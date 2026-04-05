@@ -1,0 +1,15 @@
+[package]
+version = "0.1.0"
+edition = "2024"
+name = "macro_utilities"
+authors.workspace = true
+rust-version.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+linkme.workspace = true
+
+quote.workspace = true
+syn = { workspace = true, features = ["full"] }

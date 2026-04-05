@@ -1,0 +1,34 @@
+[package]
+name = "server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+models.workspace = true
+utilities.workspace = true
+macro_utilities.workspace = true
+persistence.workspace = true
+
+axum.workspace = true
+utoipa.workspace = true
+
+tokio.workspace = true
+tracing-subscriber.workspace = true
+
+uuid.workspace = true
+
+ruma.workspace = true
+
+serde.workspace = true
+validator.workspace = true
+serde_json.workspace = true
+
+regex.workspace = true
+
+lazy_static.workspace = true
+chrono.workspace = true
+
+sha2.workspace = true
+argon2.workspace = true
+
+linkme.workspace = true

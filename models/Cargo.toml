@@ -1,0 +1,31 @@
+[package]
+name = "models"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ruma.workspace = true
+serde.workspace = true
+
+uuid.workspace = true
+
+async-trait.workspace = true
+
+anyhow.workspace = true
+thiserror.workspace = true
+
+diesel.workspace = true
+deadpool-diesel.workspace = true
+
+deadpool.workspace = true
+
+validator.workspace = true
+
+axum.workspace = true
+
+tracing.workspace = true
+
+lazy_static.workspace = true
+
+regex.workspace = true
+argon2.workspace = true
