@@ -1,0 +1,3 @@
+DROP TABLE IF EXISTS e2ee_fallback_keys CASCADE;
+DROP TABLE IF EXISTS e2ee_one_time_keys CASCADE;
+DROP TABLE IF EXISTS e2ee_device_keys CASCADE;
