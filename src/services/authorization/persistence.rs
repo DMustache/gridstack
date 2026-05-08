@@ -1,15 +1,22 @@
-use std::{collections::HashMap, sync::RwLock};
+use std::sync::RwLock;
 
+use chrono::Utc;
 use diesel::{
-    ExpressionMethods, PgConnection, QueryDsl,
+    ExpressionMethods, OptionalExtension, QueryDsl, RunQueryDsl,
     dsl::{exists, select},
+    insert_into,
+    pg::PgConnection,
     r2d2::{self, ConnectionManager},
 };
+use uuid::Uuid;
 
 use crate::{
     infrastructure::schema,
     services::{
-        authorization::entities::{AccessSession, AccessToken, UserAccount, UserId},
+        authorization::{
+            entities::{AccessSession, AccessToken, UserAccount, UserId},
+            persistence::users::{CreateUserModel, UserModel},
+        },
         errors::DomainError,
         repositories::{SessionRepository, UserRepository},
     },
@@ -18,45 +25,81 @@ use crate::{
 mod registration_sessions;
 mod users;
 
-#[derive(Default)]
+#[derive(Clone)]
 pub struct AuthorizationPersistence {
-    connection: r2d2::Pool<ConnectionManager<PgConnection>>,
+    connection_pool: r2d2::Pool<ConnectionManager<PgConnection>>,
+}
+
+impl AuthorizationPersistence {
+    pub fn new(database_url: &str) -> Result<Self, DomainError> {
+        let manager = ConnectionManager::<PgConnection>::new(database_url);
+        let connection_pool = r2d2::Pool::builder()
+            .build(manager)
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        Ok(Self { connection_pool })
+    }
 }
 
 impl UserRepository for AuthorizationPersistence {
     fn create_user(&self, user_account: UserAccount) -> Result<(), DomainError> {
-        let mut users_by_identifier = self
-            .users_by_identifier
-            .write()
-            .map_err(|_| DomainError::InvalidRequest("user storage lock failure".to_owned()))?;
-        if users_by_identifier.contains_key(user_account.user_identifier.as_str()) {
-            return Err(DomainError::AlreadyExists);
-        }
-        users_by_identifier.insert(
-            user_account.user_identifier.as_str().to_owned(),
-            user_account,
-        );
+        use schema::users;
+
+        let now = Utc::now();
+        let create_model = CreateUserModel {
+            user_id: user_account.user_identifier.as_str().to_owned(),
+            account_id: Uuid::new_v4(),
+            password_hash: Some(user_account.password_hash),
+            is_guest: false,
+            created_at: now,
+            updated_at: now,
+        };
+
+        let mut connection = self
+            .connection_pool
+            .get()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        insert_into(users::table)
+            .values(create_model)
+            .execute(&mut connection)
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
         Ok(())
     }
 
     fn find_user_by_identifier(&self, user_identifier: &UserId) -> Option<UserAccount> {
-        let users_by_identifier = self.users_by_identifier.read().ok()?;
-        users_by_identifier.get(user_identifier.as_str()).cloned()
+        use schema::users;
+
+        let mut connection = self.connection_pool.get().ok()?;
+        users::table
+            .select(users::all_columns)
+            .filter(users::user_id.eq(user_identifier.as_str()))
+            .first::<UserModel>(&mut connection)
+            .optional()
+            .ok()
+            .flatten()
+            .and_then(|model| model.try_into().ok())
     }
 
     fn user_exists(&self, user_identifier: &UserId) -> bool {
         use schema::users;
 
+        let Ok(mut connection) = self.connection_pool.get() else {
+            return false;
+        };
+
         select(exists(
-            users::table.filter(users::columns::user_id.eq("Sean")),
+            users::table.filter(users::columns::user_id.eq(user_identifier.as_str())),
         ))
-        .get_result(self.connection);
+        .get_result::<bool>(&mut connection)
+        .unwrap_or(false)
     }
 }
 
 #[derive(Default)]
 pub struct InMemorySessionRepository {
-    sessions_by_token: RwLock<HashMap<String, AccessSession>>,
+    sessions_by_token: RwLock<std::collections::HashMap<String, AccessSession>>,
 }
 
 impl SessionRepository for InMemorySessionRepository {

@@ -1,17 +1,27 @@
 use proc_macro::TokenStream;
 use quote::quote;
+use std::{
+    env, fs,
+    path::PathBuf,
+};
 use syn::{
-    AngleBracketedGenericArguments, Data, DeriveInput, Expr, ExprAssign, ExprLit, ExprPath,
-    Fields, GenericArgument, Lit, Path, Type, TypePath, parse_macro_input,
+    AngleBracketedGenericArguments, Data, DeriveInput, Expr, ExprAssign, ExprLit, ExprPath, Fields,
+    GenericArgument, Lit, Path, PathArguments, Type, TypePath, parse_macro_input,
     punctuated::Punctuated,
-    spanned::Spanned,
-    token::Comma,
+    spanned::Spanned, token::Comma,
 };
 
 #[derive(Clone)]
 struct ErrorEntry {
     matrix_error: String,
     from: Path,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PayloadKind {
+    MatrixErrorResponse,
+    MatrixRateLimitErrorResponse,
+    Other,
 }
 
 fn parse_key(assign: &ExprAssign) -> syn::Result<String> {
@@ -109,6 +119,44 @@ fn extract_error_type(path: &Path) -> Option<Path> {
     Some(parsed)
 }
 
+fn is_json_of_named_type(ty: &Type, expected_inner_ident: &str) -> bool {
+    let Type::Path(TypePath { path, .. }) = ty else {
+        return false;
+    };
+
+    let Some(segment) = path.segments.last() else {
+        return false;
+    };
+    if segment.ident != "Json" {
+        return false;
+    }
+
+    let PathArguments::AngleBracketed(AngleBracketedGenericArguments { args, .. }) =
+        &segment.arguments
+    else {
+        return false;
+    };
+
+    let Some(GenericArgument::Type(Type::Path(TypePath { path: inner, .. }))) = args.first() else {
+        return false;
+    };
+    inner
+        .segments
+        .last()
+        .map(|s| s.ident == expected_inner_ident)
+        .unwrap_or(false)
+}
+
+fn payload_kind(ty: &Type) -> PayloadKind {
+    if is_json_of_named_type(ty, "MatrixErrorResponse") {
+        PayloadKind::MatrixErrorResponse
+    } else if is_json_of_named_type(ty, "MatrixRateLimitErrorResponse") {
+        PayloadKind::MatrixRateLimitErrorResponse
+    } else {
+        PayloadKind::Other
+    }
+}
+
 #[proc_macro_derive(IntoResponseEnum, attributes(matrix))]
 pub fn derive_into_response_enum(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -117,15 +165,18 @@ pub fn derive_into_response_enum(input: TokenStream) -> TokenStream {
     let data_enum = match input.data {
         Data::Enum(data) => data,
         _ => {
-            return syn::Error::new(input.span(), "IntoResponseEnum can only be derived for enums")
-                .to_compile_error()
-                .into();
+            return syn::Error::new(
+                input.span(),
+                "IntoResponseEnum can only be derived for enums",
+            )
+            .to_compile_error()
+            .into();
         }
     };
 
     let mut match_arms = Vec::new();
     let mut metadata_entries = Vec::new();
-    let mut mapped_error_entries: Vec<(syn::Ident, Vec<ErrorEntry>)> = Vec::new();
+    let mut mapped_error_entries: Vec<(syn::Ident, Vec<ErrorEntry>, PayloadKind)> = Vec::new();
     let mut internal_fallback_variant: Option<syn::Ident> = None;
     let mut ok_inner_type: Option<Type> = None;
 
@@ -182,8 +233,7 @@ pub fn derive_into_response_enum(input: TokenStream) -> TokenStream {
                 if key == "status" {
                     let lit = match *assign.right {
                         Expr::Lit(ExprLit {
-                            lit: Lit::Int(lit),
-                            ..
+                            lit: Lit::Int(lit), ..
                         }) => lit,
                         _ => {
                             return syn::Error::new(
@@ -261,8 +311,14 @@ pub fn derive_into_response_enum(input: TokenStream) -> TokenStream {
             }
         }
 
+        let current_payload_kind = payload_kind(&payload_ty);
+
         if !error_entries_for_variant.is_empty() {
-            mapped_error_entries.push((variant_name.clone(), error_entries_for_variant));
+            mapped_error_entries.push((
+                variant_name.clone(),
+                error_entries_for_variant,
+                current_payload_kind,
+            ));
         }
 
         if status_code == Some(500) && matrix_error_codes.iter().any(|code| code == "M_UNKNOWN") {
@@ -285,24 +341,59 @@ pub fn derive_into_response_enum(input: TokenStream) -> TokenStream {
 
         let variant_name_string = variant_name.to_string();
         let status_literal = status_code.unwrap_or(200);
-        let matrix_error_literals: Vec<proc_macro2::TokenStream> =
-            matrix_error_codes.iter().map(|value| quote! { #value }).collect();
+        let single_matrix_error_code = if matrix_error_codes.len() == 1 {
+            Some(matrix_error_codes[0].clone())
+        } else {
+            None
+        };
+        let matrix_error_literals: Vec<proc_macro2::TokenStream> = matrix_error_codes
+            .iter()
+            .map(|value| quote! { #value })
+            .collect();
         metadata_entries.push(quote! {
             (#variant_name_string, #status_literal, &[#(#matrix_error_literals),*])
         });
 
+        let errcode_patch = if let Some(matrix_code) = single_matrix_error_code {
+            if is_json_of_named_type(&payload_ty, "MatrixErrorResponse") {
+                quote! {
+                    payload.0.errcode = #matrix_code.to_owned();
+                    if payload.0.error.is_empty() {
+                        payload.0.error = #matrix_code.to_owned();
+                    }
+                }
+            } else if is_json_of_named_type(&payload_ty, "MatrixRateLimitErrorResponse") {
+                quote! {
+                    payload.0.base.errcode = #matrix_code.to_owned();
+                    if payload.0.base.error.is_empty() {
+                        payload.0.base.error = #matrix_code.to_owned();
+                    }
+                }
+            } else {
+                quote! {}
+            }
+        } else {
+            quote! {}
+        };
+
         let arm = if let Some(code) = status_code {
             quote! {
-                Self::#variant_name(payload) => (
-                    ::axum::http::StatusCode::from_u16(#code)
-                        .expect("invalid status code in #[matrix(status = ...)]"),
-                    payload,
-                )
-                    .into_response(),
+                Self::#variant_name(mut payload) => {
+                    #errcode_patch
+                    (
+                        ::axum::http::StatusCode::from_u16(#code)
+                            .expect("invalid status code in #[matrix(status = ...)]"),
+                        payload,
+                    )
+                        .into_response()
+                },
             }
         } else {
             quote! {
-                Self::#variant_name(payload) => payload.into_response(),
+                Self::#variant_name(mut payload) => {
+                    #errcode_patch
+                    payload.into_response()
+                },
             }
         };
 
@@ -311,7 +402,7 @@ pub fn derive_into_response_enum(input: TokenStream) -> TokenStream {
 
     let mut error_match_arms = Vec::new();
     let mut error_type: Option<Path> = None;
-    for (variant_name, entries) in mapped_error_entries {
+    for (variant_name, entries, kind) in mapped_error_entries {
         for entry in entries {
             let current_error_type = match extract_error_type(&entry.from) {
                 Some(value) => value,
@@ -338,14 +429,35 @@ pub fn derive_into_response_enum(input: TokenStream) -> TokenStream {
                 error_type = Some(current_error_type);
             }
 
+            let from_span = entry.from.span();
             let from_path = entry.from;
             let code = entry.matrix_error;
-            error_match_arms.push(quote! {
-                #from_path => Self::#variant_name(::axum::Json(crate::services::shared::MatrixErrorResponse {
-                    errcode: #code.to_owned(),
-                    error: #code.to_owned(),
-                })),
-            });
+            let arm = match kind {
+                PayloadKind::MatrixErrorResponse => quote! {
+                    #from_path => Self::#variant_name(::axum::Json(crate::services::shared::MatrixErrorResponse {
+                        errcode: #code.to_owned(),
+                        error: error.to_string(),
+                    })),
+                },
+                PayloadKind::MatrixRateLimitErrorResponse => quote! {
+                    #from_path => Self::#variant_name(::axum::Json(crate::services::shared::MatrixRateLimitErrorResponse {
+                        base: crate::services::shared::MatrixErrorResponse {
+                            errcode: #code.to_owned(),
+                            error: error.to_string(),
+                        },
+                        retry_after_ms: 0,
+                    })),
+                },
+                PayloadKind::Other => {
+                    return syn::Error::new(
+                        from_span,
+                        "mapped errors require Json<MatrixErrorResponse> or Json<MatrixRateLimitErrorResponse> payload",
+                    )
+                    .to_compile_error()
+                    .into();
+                }
+            };
+            error_match_arms.push(arm);
         }
     }
 
@@ -377,14 +489,14 @@ pub fn derive_into_response_enum(input: TokenStream) -> TokenStream {
 
     let from_result_impl =
         if let (Some(err_type), Some(ok_type)) = (error_type.clone(), ok_inner_type) {
-        quote! {
-            pub fn from_result(result: ::core::result::Result<#ok_type, #err_type>) -> Self {
-                match result {
-                    ::core::result::Result::Ok(value) => Self::Ok(::axum::Json(value)),
-                    ::core::result::Result::Err(error) => Self::from_mapped_error(error),
+            quote! {
+                pub fn from_result(result: ::core::result::Result<#ok_type, #err_type>) -> Self {
+                    match result {
+                        ::core::result::Result::Ok(value) => Self::Ok(::axum::Json(value)),
+                        ::core::result::Result::Err(error) => Self::from_mapped_error(error),
+                    }
                 }
             }
-        }
         } else {
             quote! {}
         };
@@ -407,5 +519,41 @@ pub fn derive_into_response_enum(input: TokenStream) -> TokenStream {
         }
     };
 
+    #[cfg(debug_assertions)]
+    {
+        dump_generated_output_debug_only(&enum_name.to_string(), &output.to_string());
+    }
     output.into()
+}
+
+fn dump_generated_output_debug_only(enum_name: &str, generated: &str) {
+    let output_dir = resolve_output_dir();
+    if fs::create_dir_all(&output_dir).is_err() {
+        return;
+    }
+
+    let sanitized = enum_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let output_path = output_dir.join(format!("{sanitized}.generated.rs"));
+    let _ = fs::write(output_path, generated);
+}
+
+fn resolve_output_dir() -> PathBuf {
+    if let Some(out_dir) = env::var_os("OUT_DIR") {
+        return PathBuf::from(out_dir).join("response_derive");
+    }
+    if let Some(manifest_dir) = env::var_os("CARGO_MANIFEST_DIR") {
+        let manifest = PathBuf::from(manifest_dir);
+
+        return manifest.join("target").join("response_derive");
+    }
+    PathBuf::from("target/response_derive")
 }

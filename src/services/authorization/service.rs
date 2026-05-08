@@ -209,7 +209,9 @@ impl AuthorizationService {
         }
 
         Ok(WhoAmIView {
-            user_identifier: user_identifier.into_inner(),
+            user_id: user_identifier.into_inner(),
+            is_guest: false,
+            device_id: None,
         })
     }
 

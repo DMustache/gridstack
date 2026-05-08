@@ -5,11 +5,11 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use regex::Regex;
 use serde_json::{Map, Value, json};
 use syn::{
-    Expr, File, FnArg, GenericArgument, Item, LitInt, LitStr, Meta, PatType, PathArguments,
-    ReturnType, Type,
+    Expr, ExprAssign, ExprLit, ExprPath, File, FnArg, GenericArgument, Item, Lit, LitInt, LitStr,
+    Meta, PatType, PathArguments, ReturnType, Type, parse::Parser, punctuated::Punctuated,
+    token::Comma,
 };
 
 fn main() -> Result<()> {
@@ -21,18 +21,35 @@ fn main() -> Result<()> {
     let routes_file = Path::new("src/services/authorization/routes.rs");
     let handlers_dir = Path::new("src/services/authorization/handlers");
     let handlers_file = handlers_dir.join("../handlers.rs");
+    let layer_responses_file = Path::new("src/services/errors.rs");
     let shared_file = Path::new("src/services/shared.rs");
 
     let operations = extract_operations(routes_file)?;
     let handler_specs = extract_handler_specs(&handlers_file)?;
     let response_specs = extract_response_specs(&handlers_file)?;
+    let layer_response_specs = extract_response_specs(layer_responses_file)?;
+    let error_messages = collect_error_messages(&[
+        handlers_file.as_path(),
+        layer_responses_file,
+        Path::new("src/services/authorization/errors.rs"),
+        Path::new("src/services/layers.rs"),
+    ])?;
+    let response_specs = enrich_response_specs(response_specs, &error_messages);
+    let layer_response_specs = enrich_response_specs(layer_response_specs, &error_messages);
 
     let mut schemas = extract_schemas_from_dir(handlers_dir)?;
     schemas.extend(extract_schemas_from_file(shared_file)?);
+    apply_schema_overrides(&mut schemas);
 
     let mut paths: BTreeMap<String, Value> = BTreeMap::new();
     for op in operations {
-        let method_object = build_method_object(&op, &handler_specs, &response_specs, &schemas)?;
+        let method_object = build_method_object(
+            &op,
+            &handler_specs,
+            &response_specs,
+            &layer_response_specs,
+            &schemas,
+        )?;
 
         let entry = paths
             .entry(op.path)
@@ -57,8 +74,20 @@ fn main() -> Result<()> {
         },
         "paths": paths,
         "components": {
-            "schemas": schema_map
-        }
+            "schemas": schema_map,
+            "securitySchemes": {
+                "accessTokenBearer": {
+                    "type": "http",
+                    "scheme": "bearer",
+                    "bearerFormat": "opaque"
+                },
+                "accessTokenQuery": {
+                    "type": "apiKey",
+                    "in": "query",
+                    "name": "access_token"
+                }
+            }
+        },
     });
 
     let openapi: utoipa::openapi::OpenApi =
@@ -80,6 +109,7 @@ struct RouteOperation {
     path: String,
     method: String,
     operation_id: String,
+    layers: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -87,6 +117,7 @@ struct HandlerSpec {
     query_type: Option<String>,
     json_body_type: Option<String>,
     response_enum: Option<String>,
+    auth_requirement: AuthRequirement,
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +125,14 @@ struct ResponseVariantSpec {
     status: String,
     schema_type: Option<String>,
     matrix_error_codes: Vec<String>,
+    matrix_error_messages: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthRequirement {
+    None,
+    Required,
+    Optional,
 }
 
 fn extract_operations(routes_file: &Path) -> Result<Vec<RouteOperation>> {
@@ -119,14 +158,21 @@ fn extract_operations(routes_file: &Path) -> Result<Vec<RouteOperation>> {
 fn collect_route_calls_from_block(stmts: &[syn::Stmt], operations: &mut Vec<RouteOperation>) {
     for stmt in stmts {
         if let syn::Stmt::Expr(expr, _) = stmt {
-            collect_route_calls_from_expr(expr, operations);
+            let mut steps = Vec::new();
+            flatten_router_steps(expr, &mut steps);
+            apply_router_steps(&steps, operations);
         }
     }
 }
 
-fn collect_route_calls_from_expr(expr: &Expr, operations: &mut Vec<RouteOperation>) {
+enum RouterStep {
+    Route { path: String, route_expr: Expr },
+    Layer { layer_name: String },
+}
+
+fn flatten_router_steps(expr: &Expr, steps: &mut Vec<RouterStep>) {
     if let Expr::MethodCall(call) = expr {
-        collect_route_calls_from_expr(&call.receiver, operations);
+        flatten_router_steps(&call.receiver, steps);
 
         if call.method == "route"
             && call.args.len() == 2
@@ -134,8 +180,54 @@ fn collect_route_calls_from_expr(expr: &Expr, operations: &mut Vec<RouteOperatio
             && let syn::Lit::Str(path_lit) = &expr_lit.lit
             && let Some(route_definition) = call.args.iter().nth(1)
         {
-            let path = path_lit.value();
-            collect_http_methods(route_definition, &path, operations);
+            steps.push(RouterStep::Route {
+                path: path_lit.value(),
+                route_expr: route_definition.clone(),
+            });
+        }
+
+        if call.method == "layer"
+            && let Some(layer_name) = call.args.first().and_then(extract_layer_name)
+        {
+            steps.push(RouterStep::Layer { layer_name });
+        }
+    }
+}
+
+fn extract_layer_name(expr: &Expr) -> Option<String> {
+    let Expr::Call(call) = expr else {
+        return None;
+    };
+    let Expr::Path(path_expr) = &*call.func else {
+        return None;
+    };
+    let last = path_expr.path.segments.last()?;
+    if last.ident != "from_extractor_with_state" {
+        return None;
+    }
+    let PathArguments::AngleBracketed(args) = &last.arguments else {
+        return None;
+    };
+    let first = args.args.first()?;
+    let GenericArgument::Type(Type::Path(layer_type)) = first else {
+        return None;
+    };
+    layer_type.path.segments.last().map(|s| s.ident.to_string())
+}
+
+fn apply_router_steps(steps: &[RouterStep], operations: &mut Vec<RouteOperation>) {
+    for step in steps {
+        match step {
+            RouterStep::Route { path, route_expr } => {
+                collect_http_methods(route_expr, path, operations);
+            }
+            RouterStep::Layer { layer_name } => {
+                for op in operations.iter_mut() {
+                    if !op.layers.iter().any(|layer| layer == layer_name) {
+                        op.layers.push(layer_name.clone());
+                    }
+                }
+            }
         }
     }
 }
@@ -154,6 +246,7 @@ fn collect_http_methods(expr: &Expr, path: &str, operations: &mut Vec<RouteOpera
                 path: path.to_owned(),
                 method,
                 operation_id: handler_segment.ident.to_string(),
+                layers: Vec::new(),
             });
         }
         return;
@@ -170,6 +263,7 @@ fn collect_http_methods(expr: &Expr, path: &str, operations: &mut Vec<RouteOpera
                 path: path.to_owned(),
                 method,
                 operation_id: handler_segment.ident.to_string(),
+                layers: Vec::new(),
             });
         }
     }
@@ -190,6 +284,7 @@ fn extract_handler_specs(handlers_file: &Path) -> Result<HashMap<String, Handler
         let handler_name = function.sig.ident.to_string();
         let mut query_type = None;
         let mut json_body_type = None;
+        let mut auth_requirement = AuthRequirement::None;
 
         for input in &function.sig.inputs {
             let FnArg::Typed(PatType { ty, .. }) = input else {
@@ -202,6 +297,7 @@ fn extract_handler_specs(handlers_file: &Path) -> Result<HashMap<String, Handler
             if let Some(inner) = extract_inner_type_name(ty, "Json") {
                 json_body_type = Some(inner);
             }
+            auth_requirement = merge_auth_requirement(auth_requirement, extract_auth_requirement(ty));
         }
 
         let response_enum = match &function.sig.output {
@@ -215,11 +311,51 @@ fn extract_handler_specs(handlers_file: &Path) -> Result<HashMap<String, Handler
                 query_type,
                 json_body_type,
                 response_enum,
+                auth_requirement,
             },
         );
     }
 
     Ok(specs)
+}
+
+fn merge_auth_requirement(current: AuthRequirement, incoming: AuthRequirement) -> AuthRequirement {
+    match (current, incoming) {
+        (AuthRequirement::Required, _) | (_, AuthRequirement::Required) => AuthRequirement::Required,
+        (AuthRequirement::Optional, _) | (_, AuthRequirement::Optional) => AuthRequirement::Optional,
+        _ => AuthRequirement::None,
+    }
+}
+
+fn extract_auth_requirement(ty: &Type) -> AuthRequirement {
+    let Some(inner) = extract_inner_type_name(ty, "Extension") else {
+        return AuthRequirement::None;
+    };
+    if inner == "UserId" {
+        return AuthRequirement::Required;
+    }
+    if inner == "Option" {
+        // Handle Extension<Option<UserId>>
+        if let Type::Path(path) = ty
+            && let Some(extension_seg) = path.path.segments.last()
+            && extension_seg.ident == "Extension"
+            && let PathArguments::AngleBracketed(extension_args) = &extension_seg.arguments
+            && let Some(GenericArgument::Type(Type::Path(opt_path))) = extension_args.args.first()
+            && let Some(opt_seg) = opt_path.path.segments.last()
+            && opt_seg.ident == "Option"
+            && let PathArguments::AngleBracketed(opt_args) = &opt_seg.arguments
+            && let Some(GenericArgument::Type(Type::Path(user_path))) = opt_args.args.first()
+            && user_path
+                .path
+                .segments
+                .last()
+                .map(|s| s.ident == "UserId")
+                .unwrap_or(false)
+        {
+            return AuthRequirement::Optional;
+        }
+    }
+    AuthRequirement::None
 }
 
 fn extract_response_specs(handlers_file: &Path) -> Result<HashMap<String, Vec<ResponseVariantSpec>>> {
@@ -244,6 +380,7 @@ fn extract_response_specs(handlers_file: &Path) -> Result<HashMap<String, Vec<Re
         for variant in item_enum.variants {
             let mut status = None;
             let mut matrix_error_codes = Vec::new();
+            let mut matrix_error_sources = HashMap::new();
             for attr in &variant.attrs {
                 if !attr.path().is_ident("matrix") {
                     continue;
@@ -257,11 +394,42 @@ fn extract_response_specs(handlers_file: &Path) -> Result<HashMap<String, Vec<Re
                     Ok(())
                 });
 
-                let token_str = match &attr.meta {
-                    Meta::List(list) => list.tokens.to_string(),
-                    _ => String::new(),
-                };
-                matrix_error_codes.extend(extract_matrix_error_codes_from_tokens(&token_str)?);
+                if let Meta::List(list) = &attr.meta {
+                    let parser = Punctuated::<Expr, Comma>::parse_terminated;
+                    if let Ok(args) = parser.parse2(list.tokens.clone()) {
+                        for expr in args {
+                            let Expr::Assign(ExprAssign { left, right, .. }) = expr else {
+                                continue;
+                            };
+                            let key = match *left {
+                                Expr::Path(path) => path
+                                    .path
+                                    .segments
+                                    .last()
+                                    .map(|v| v.ident.to_string())
+                                    .unwrap_or_default(),
+                                _ => continue,
+                            };
+
+                            if key == "matrix_error" {
+                                if let Expr::Array(arr) = *right {
+                                    for item in arr.elems {
+                                        if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = item {
+                                            matrix_error_codes.push(s.value());
+                                        }
+                                    }
+                                }
+                            } else if key == "error" && let Expr::Array(arr) = *right {
+                                for item in arr.elems {
+                                    if let Some((code, from_path)) = parse_error_entry(item) {
+                                        matrix_error_codes.push(code.clone());
+                                        matrix_error_sources.insert(code, from_path);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             let payload_type = variant
@@ -274,6 +442,7 @@ fn extract_response_specs(handlers_file: &Path) -> Result<HashMap<String, Vec<Re
                 status: status.unwrap_or_else(|| "200".to_owned()),
                 schema_type: payload_type,
                 matrix_error_codes,
+                matrix_error_messages: matrix_error_sources,
             });
         }
 
@@ -281,6 +450,59 @@ fn extract_response_specs(handlers_file: &Path) -> Result<HashMap<String, Vec<Re
     }
 
     Ok(specs)
+}
+
+fn parse_error_entry(expr: Expr) -> Option<(String, String)> {
+    let tuple = match expr {
+        Expr::Paren(p) => match *p.expr {
+            Expr::Tuple(t) => t,
+            _ => return None,
+        },
+        Expr::Tuple(t) => t,
+        _ => return None,
+    };
+
+    let mut code = None;
+    let mut from = None;
+    for elem in tuple.elems {
+        let Expr::Assign(ExprAssign { left, right, .. }) = elem else {
+            continue;
+        };
+        let key = match *left {
+            Expr::Path(path) => path
+                .path
+                .segments
+                .last()
+                .map(|v| v.ident.to_string())
+                .unwrap_or_default(),
+            _ => continue,
+        };
+        if key == "matrix_error" {
+            if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = *right {
+                code = Some(s.value());
+            }
+        } else if key == "from" && let Expr::Path(ExprPath { path, .. }) = *right {
+            from = Some(path_to_enum_variant_key(&path));
+        }
+    }
+    Some((code?, from?))
+}
+
+fn path_to_enum_variant_key(path: &syn::Path) -> String {
+    let segments = path
+        .segments
+        .iter()
+        .map(|s| s.ident.to_string())
+        .collect::<Vec<_>>();
+    if segments.len() >= 2 {
+        format!(
+            "{}::{}",
+            segments[segments.len() - 2],
+            segments[segments.len() - 1]
+        )
+    } else {
+        segments.first().cloned().unwrap_or_default()
+    }
 }
 
 fn has_into_response_enum_derive(attrs: &[syn::Attribute]) -> bool {
@@ -299,31 +521,76 @@ fn has_into_response_enum_derive(attrs: &[syn::Attribute]) -> bool {
     })
 }
 
-fn extract_matrix_error_codes_from_tokens(tokens: &str) -> Result<Vec<String>> {
-    let string_code_re = Regex::new(r#"matrix_error\s*=\s*\"([^\"]+)\""#)?;
-    let list_code_re = Regex::new(r#"matrix_error\s*=\s*\[([^\]]+)\]"#)?;
-    let quoted_re = Regex::new(r#"\"([^\"]+)\""#)?;
+fn collect_error_messages(paths: &[&Path]) -> Result<HashMap<String, String>> {
+    let mut map = HashMap::new();
+    for path in paths {
+        let content =
+            fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+        let parsed: File =
+            syn::parse_file(&content).with_context(|| format!("failed to parse {}", path.display()))?;
 
-    let mut codes = Vec::new();
-    for cap in string_code_re.captures_iter(tokens) {
-        codes.push(cap[1].to_owned());
-    }
-    for cap in list_code_re.captures_iter(tokens) {
-        let inner = cap[1].to_owned();
-        for quoted in quoted_re.captures_iter(&inner) {
-            codes.push(quoted[1].to_owned());
+        for item in parsed.items {
+            let Item::Enum(item_enum) = item else {
+                continue;
+            };
+            let has_error_derive = item_enum.attrs.iter().any(|attr| {
+                if !attr.path().is_ident("derive") {
+                    return false;
+                }
+                let mut found = false;
+                let _ = attr.parse_nested_meta(|meta| {
+                    if meta.path.is_ident("Error") {
+                        found = true;
+                    }
+                    Ok(())
+                });
+                found
+            });
+            if !has_error_derive {
+                continue;
+            }
+
+            let enum_name = item_enum.ident.to_string();
+            for variant in item_enum.variants {
+                let variant_name = variant.ident.to_string();
+                for attr in variant.attrs {
+                    if !attr.path().is_ident("error") {
+                        continue;
+                    }
+                    if let Ok(message) = attr.parse_args::<LitStr>() {
+                        map.insert(format!("{enum_name}::{variant_name}"), message.value());
+                    }
+                }
+            }
         }
     }
+    Ok(map)
+}
 
-    codes.sort();
-    codes.dedup();
-    Ok(codes)
+fn enrich_response_specs(
+    mut specs: HashMap<String, Vec<ResponseVariantSpec>>,
+    error_messages: &HashMap<String, String>,
+) -> HashMap<String, Vec<ResponseVariantSpec>> {
+    for variants in specs.values_mut() {
+        for variant in variants {
+            let sources = variant.matrix_error_messages.clone();
+            let mut mapped = HashMap::new();
+            for (code, source) in sources {
+                if let Some(msg) = error_messages.get(&source) {
+                    mapped.insert(code, msg.clone());
+                }
+            }
+            variant.matrix_error_messages = mapped;
+        }
+    }
+    specs
 }
 
 fn build_method_object(
     op: &RouteOperation,
     handler_specs: &HashMap<String, HandlerSpec>,
     response_specs: &HashMap<String, Vec<ResponseVariantSpec>>,
+    layer_response_specs: &HashMap<String, Vec<ResponseVariantSpec>>,
     schemas: &HashMap<String, Value>,
 ) -> Result<Value> {
     let handler = handler_specs.get(&op.operation_id);
@@ -353,14 +620,58 @@ fn build_method_object(
         );
     }
 
-    let responses = if let Some(response_enum) = handler.and_then(|h| h.response_enum.as_ref()) {
-        build_responses(response_specs.get(response_enum))
-    } else {
-        build_responses(None)
-    };
+    let handler_responses = handler
+        .and_then(|h| h.response_enum.as_ref())
+        .and_then(|name| response_specs.get(name));
+    let mut layer_variants = Vec::new();
+    for layer_name in &op.layers {
+        if let Some(layer_enum_name) = layer_response_enum_name(layer_name)
+            && let Some(spec) = layer_response_specs.get(layer_enum_name)
+        {
+            layer_variants.push(spec.clone());
+        }
+    }
+    let responses = build_responses(handler_responses, &layer_variants);
     method.insert("responses".to_owned(), responses);
+    let auth_requirement = handler
+        .map(|h| h.auth_requirement)
+        .unwrap_or(AuthRequirement::None);
+    match auth_requirement {
+        AuthRequirement::Required => {
+            method.insert(
+                "security".to_owned(),
+                json!([
+                    {"accessTokenQuery": []},
+                    {"accessTokenBearer": []}
+                ]),
+            );
+        }
+        AuthRequirement::Optional => {
+            method.insert(
+                "security".to_owned(),
+                json!([
+                    {},
+                    {"accessTokenQuery": []},
+                    {"accessTokenBearer": []}
+                ]),
+            );
+            method.insert(
+                "description".to_owned(),
+                json!("Optional authorization: endpoint can be called with or without access token."),
+            );
+        }
+        AuthRequirement::None => {}
+    }
 
     Ok(Value::Object(method))
+}
+
+fn layer_response_enum_name(layer_name: &str) -> Option<&'static str> {
+    match layer_name {
+        "AuthorizationLayer" => Some("AuthorizationLayerResponse"),
+        "RateLimitLayer" => Some("RateLimitLayerResponse"),
+        _ => None,
+    }
 }
 
 fn build_query_parameters(query_type: &str, schemas: &HashMap<String, Value>) -> Result<Vec<Value>> {
@@ -400,41 +711,153 @@ fn build_query_parameters(query_type: &str, schemas: &HashMap<String, Value>) ->
     Ok(parameters)
 }
 
-fn build_responses(specs: Option<&Vec<ResponseVariantSpec>>) -> Value {
-    let mut responses = Map::new();
+fn build_responses(
+    handler_specs: Option<&Vec<ResponseVariantSpec>>,
+    layer_specs: &[Vec<ResponseVariantSpec>],
+) -> Value {
+    let mut merged_by_status: BTreeMap<String, ResponseVariantSpec> = BTreeMap::new();
 
-    if let Some(specs) = specs {
+    if let Some(specs) = handler_specs {
         for spec in specs {
-            let mut response = Map::new();
-            response.insert("description".to_owned(), json!("Response"));
-
-            if let Some(schema_type) = &spec.schema_type {
-                response.insert(
-                    "content".to_owned(),
-                    json!({
-                        "application/json": {
-                            "schema": { "$ref": format!("#/components/schemas/{}", schema_type) }
-                        }
-                    }),
-                );
-            }
-
-            if !spec.matrix_error_codes.is_empty() {
-                response.insert(
-                    "x-matrix-error-codes".to_owned(),
-                    json!(spec.matrix_error_codes),
-                );
-            }
-
-            responses.insert(spec.status.clone(), Value::Object(response));
+            merge_response_spec(&mut merged_by_status, spec.clone());
         }
+    }
+    for specs in layer_specs {
+        for spec in specs {
+            merge_response_spec(&mut merged_by_status, spec.clone());
+        }
+    }
+
+    let mut responses = Map::new();
+    for (status, spec) in merged_by_status {
+        let mut response = Map::new();
+        let description = build_response_description(&spec);
+        response.insert("description".to_owned(), json!(description));
+
+        if let Some(schema_type) = &spec.schema_type {
+            let mut media = Map::new();
+            media.insert(
+                "schema".to_owned(),
+                json!({ "$ref": format!("#/components/schemas/{}", schema_type) }),
+            );
+            if let Some(example) = response_example(
+                schema_type,
+                &spec.matrix_error_codes,
+                &spec.matrix_error_messages,
+            ) {
+                media.insert("example".to_owned(), example);
+            }
+            response.insert(
+                "content".to_owned(),
+                json!({
+                    "application/json": {
+                        "schema": media.get("schema").cloned().unwrap_or(json!({})),
+                        "example": media.get("example").cloned().unwrap_or(json!(null))
+                    }
+                }),
+            );
+            if let Some(content) = response.get_mut("content").and_then(Value::as_object_mut)
+                && let Some(app_json) =
+                    content.get_mut("application/json").and_then(Value::as_object_mut)
+            {
+                if app_json.get("example") == Some(&Value::Null) {
+                    app_json.remove("example");
+                }
+            }
+        }
+
+        if !spec.matrix_error_codes.is_empty() {
+            response.insert(
+                "x-matrix-error-codes".to_owned(),
+                json!(spec.matrix_error_codes),
+            );
+        }
+
+        responses.insert(status, Value::Object(response));
     }
 
     if responses.is_empty() {
         responses.insert("200".to_owned(), json!({ "description": "Success" }));
     }
-
     Value::Object(responses)
+}
+
+fn build_response_description(spec: &ResponseVariantSpec) -> String {
+    if spec.matrix_error_codes.is_empty() {
+        return "Response".to_owned();
+    }
+    let listed = spec.matrix_error_codes.join(", ");
+    let first = &spec.matrix_error_codes[0];
+    let msg = spec
+        .matrix_error_messages
+        .get(first)
+        .map(String::as_str)
+        .unwrap_or("An unknown error occurred");
+    format!("Possible errcodes: {listed}. Example: {first} - {msg}")
+}
+
+fn response_example(
+    schema_type: &str,
+    codes: &[String],
+    messages: &HashMap<String, String>,
+) -> Option<Value> {
+    let first = codes.first().map(|v| v.as_str()).unwrap_or("M_UNKNOWN");
+    let first_message = messages
+        .get(first)
+        .map(String::as_str)
+        .unwrap_or("An unknown error occurred");
+    match schema_type {
+        "MatrixErrorResponse" => Some(json!({
+            "errcode": first,
+            "error": first_message
+        })),
+        "MatrixRateLimitErrorResponse" => Some(json!({
+            "errcode": first,
+            "error": first_message
+        })),
+        _ => None,
+    }
+}
+
+fn apply_schema_overrides(schemas: &mut HashMap<String, Value>) {
+    schemas.insert(
+        "MatrixRateLimitErrorResponse".to_owned(),
+        json!({
+            "type": "object",
+            "properties": {
+                "errcode": { "type": "string" },
+                "error": { "type": "string" },
+                "retry_after_ms": { "type": "integer" }
+            },
+            "required": ["errcode", "retry_after_ms"]
+        }),
+    );
+}
+
+fn merge_response_spec(
+    merged_by_status: &mut BTreeMap<String, ResponseVariantSpec>,
+    mut incoming: ResponseVariantSpec,
+) {
+    let entry = merged_by_status
+        .entry(incoming.status.clone())
+        .or_insert_with(|| ResponseVariantSpec {
+            status: incoming.status.clone(),
+            schema_type: incoming.schema_type.clone(),
+            matrix_error_codes: Vec::new(),
+            matrix_error_messages: HashMap::new(),
+        });
+
+    if entry.schema_type.is_none() {
+        entry.schema_type = incoming.schema_type.take();
+    }
+    entry
+        .matrix_error_codes
+        .append(&mut incoming.matrix_error_codes);
+    entry.matrix_error_codes.sort();
+    entry.matrix_error_codes.dedup();
+    for (code, msg) in incoming.matrix_error_messages {
+        entry.matrix_error_messages.entry(code).or_insert(msg);
+    }
 }
 
 fn extract_schemas_from_dir(dir: &Path) -> Result<HashMap<String, Value>> {
@@ -552,6 +975,30 @@ fn type_to_schema(ty: &Type) -> (Value, bool) {
                     let (inner_schema, _) = type_to_schema(inner);
                     return (json!({ "type": "array", "items": inner_schema }), false);
                 }
+            }
+
+            if ident == "BTreeMap" || ident == "HashMap" {
+                if let PathArguments::AngleBracketed(args) = &segment.arguments {
+                    let mut iter = args.args.iter();
+                    let _key = iter.next();
+                    if let Some(GenericArgument::Type(value_ty)) = iter.next() {
+                        let (value_schema, _) = type_to_schema(value_ty);
+                        return (
+                            json!({
+                                "type": "object",
+                                "additionalProperties": value_schema
+                            }),
+                            false,
+                        );
+                    }
+                }
+                return (
+                    json!({
+                        "type": "object",
+                        "additionalProperties": true
+                    }),
+                    false,
+                );
             }
 
             match ident.as_str() {

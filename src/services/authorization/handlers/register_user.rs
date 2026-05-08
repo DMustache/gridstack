@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -8,8 +10,17 @@ pub struct RegisterUserQueryInfo {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+pub struct AuthenticationDataInfo {
+    pub session: Option<String>,
+    #[serde(rename = "type")]
+    pub auth_type: Option<String>,
+    #[serde(flatten)]
+    pub data: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
 pub struct RegisterUserInfo {
-    pub auth: Option<Value>,
+    pub auth: Option<AuthenticationDataInfo>,
     pub username: Option<String>,
     pub password: Option<String>,
     #[serde(rename = "device_id")]
@@ -47,18 +58,16 @@ pub struct UiaaResponseView {
 impl UiaaResponseView {
     pub fn password_auth_challenge() -> Self {
         Self {
-            completed: vec![],
+            completed: vec!["example.type.foo".to_owned()],
             flows: vec![AuthenticationFlowView {
-                stages: vec!["m.login.password".to_owned()],
+                stages: vec!["example.type.foo".to_owned()],
             }],
             params: json!({
-                "m.login.password": {
-                    "identifier_types": [
-                        "m.id.user",
-                    ]
+                "example.type.baz": {
+                    "example_key": "foobar",
                 }
             }),
-            session: Uuid::new_v4().to_string(),
+            session: format!("{}xyz", &Uuid::new_v4().to_string()[..5]),
         }
     }
 }

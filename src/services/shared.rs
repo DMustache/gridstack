@@ -8,5 +8,6 @@ pub struct MatrixErrorResponse {
 pub struct MatrixRateLimitErrorResponse {
     #[serde(flatten)]
     pub base: MatrixErrorResponse,
-    pub retry_after: u64,
+    #[serde(rename = "retry_after_ms")]
+    pub retry_after_ms: u64,
 }

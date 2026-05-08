@@ -1,45 +1,36 @@
 use std::time::Instant;
 
-use axum::{
-    Json,
-    extract::FromRequestParts,
-    http::{StatusCode, request::Parts},
-    response::{IntoResponse, Response},
-};
+use axum::{extract::FromRequestParts, http::request::Parts};
 use http::header::AUTHORIZATION;
+use thiserror::Error;
 
-use crate::services::{
-    shared::{MatrixErrorResponse, MatrixRateLimitErrorResponse},
-    state::ApplicationState,
-};
+use crate::services::state::ApplicationState;
 
 pub struct AuthorizationLayer;
+pub struct OptionalAuthorizationLayer;
+
+#[derive(Debug, Error)]
+pub enum AuthorizationLayerError {
+    #[error("access token is missing")]
+    MissingToken,
+    #[error("access token is invalid")]
+    UnknownToken,
+}
 
 impl FromRequestParts<ApplicationState> for AuthorizationLayer {
-    type Rejection = Response;
+    type Rejection = AuthorizationLayerError;
 
     async fn from_request_parts(
         parts: &mut Parts,
         state: &ApplicationState,
     ) -> Result<Self, Self::Rejection> {
-        let token = try_extract_access_token_from_parts(parts).ok_or_else(|| {
-            matrix_error(
-                StatusCode::UNAUTHORIZED,
-                "M_MISSING_TOKEN",
-                "No access token was specified for the request.",
-            )
-        })?;
+        let token = Self::try_extract_access_token_from_parts(parts)
+            .ok_or(AuthorizationLayerError::MissingToken)?;
 
         let user_id = state
             .authorization_service
             .authenticate_access_token(&token)
-            .map_err(|_| {
-                matrix_error(
-                    StatusCode::UNAUTHORIZED,
-                    "The access token specified was not recognised",
-                    "Unknown access token",
-                )
-            })?;
+            .map_err(|_| AuthorizationLayerError::UnknownToken)?;
 
         parts.extensions.insert(user_id);
 
@@ -47,111 +38,112 @@ impl FromRequestParts<ApplicationState> for AuthorizationLayer {
     }
 }
 
-pub struct RateLimitLayer;
-
-impl FromRequestParts<ApplicationState> for RateLimitLayer {
-    type Rejection = Response;
+impl FromRequestParts<ApplicationState> for OptionalAuthorizationLayer {
+    type Rejection = std::convert::Infallible;
 
     async fn from_request_parts(
         parts: &mut Parts,
         state: &ApplicationState,
     ) -> Result<Self, Self::Rejection> {
-        let key = rate_limit_key(parts);
+        let user_id = AuthorizationLayer::try_extract_access_token_from_parts(parts).and_then(|token| {
+            state
+                .authorization_service
+                .authenticate_access_token(&token)
+                .ok()
+        });
+
+        parts.extensions.insert(user_id);
+
+        Ok(Self)
+    }
+}
+
+impl AuthorizationLayer {
+    fn try_extract_access_token_from_parts(parts: &Parts) -> Option<String> {
+        if let Some(authorization_value) = parts
+            .headers
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+        {
+            let mut tokens = authorization_value.split_whitespace();
+            if let (Some(scheme), Some(token)) = (tokens.next(), tokens.next())
+                && scheme.eq_ignore_ascii_case("bearer")
+                && !token.is_empty()
+            {
+                return Some(token.to_owned());
+            }
+        }
+
+        parts.uri.query().and_then(Self::parse_access_token_query)
+    }
+
+    fn parse_access_token_query(query: &str) -> Option<String> {
+        for pair in query.split('&') {
+            let mut parts = pair.splitn(2, '=');
+            let key = parts.next().unwrap_or_default();
+            let value = parts.next().unwrap_or_default();
+            if key == "access_token" && !value.is_empty() {
+                return Some(value.to_owned());
+            }
+        }
+        None
+    }
+}
+
+pub struct RateLimitLayer;
+
+#[derive(Debug, Error)]
+pub enum RateLimitLayerError {
+    #[error("rate limit exceeded")]
+    RateLimited,
+    #[error("rate limiter failure")]
+    Internal,
+}
+
+impl FromRequestParts<ApplicationState> for RateLimitLayer {
+    type Rejection = RateLimitLayerError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &ApplicationState,
+    ) -> Result<Self, Self::Rejection> {
+        let key = Self::rate_limit_key(parts);
         let allowed = state
             .rate_limiter
             .allow_request(&key, Instant::now())
-            .map_err(|_| {
-                matrix_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "M_UNKNOWN",
-                    "Rate limiter failure",
-                )
-            })?;
+            .map_err(|_| RateLimitLayerError::Internal)?;
         if !allowed {
-            return Err(matrix_rate_limit_error(1));
+            return Err(RateLimitLayerError::RateLimited);
         }
 
         Ok(Self)
     }
 }
 
-fn try_extract_access_token_from_parts(parts: &Parts) -> Option<String> {
-    if let Some(authorization_value) = parts
-        .headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-    {
-        let mut tokens = authorization_value.split_whitespace();
-        if let (Some(scheme), Some(token)) = (tokens.next(), tokens.next())
-            && scheme.eq_ignore_ascii_case("bearer")
-            && !token.is_empty()
+impl RateLimitLayer {
+    fn rate_limit_key(parts: &Parts) -> String {
+        if let Some(value) = parts
+            .headers
+            .get("x-forwarded-for")
+            .and_then(|value| value.to_str().ok())
         {
-            return Some(token.to_owned());
+            let first = value.split(',').next().unwrap_or_default().trim();
+            if !first.is_empty() {
+                return format!("ip:{first}");
+            }
         }
-    }
 
-    parts.uri.query().and_then(parse_access_token_query)
-}
-
-fn parse_access_token_query(query: &str) -> Option<String> {
-    for pair in query.split('&') {
-        let mut parts = pair.splitn(2, '=');
-        let key = parts.next().unwrap_or_default();
-        let value = parts.next().unwrap_or_default();
-        if key == "access_token" && !value.is_empty() {
-            return Some(value.to_owned());
+        if let Some(value) = parts
+            .headers
+            .get("x-real-ip")
+            .and_then(|value| value.to_str().ok())
+        {
+            let ip = value.trim();
+            if !ip.is_empty() {
+                return format!("ip:{ip}");
+            }
         }
+
+        "ip:unknown".to_owned()
     }
-    None
-}
-
-fn rate_limit_key(parts: &Parts) -> String {
-    if let Some(value) = parts
-        .headers
-        .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())
-    {
-        let first = value.split(',').next().unwrap_or_default().trim();
-        if !first.is_empty() {
-            return format!("ip:{first}");
-        }
-    }
-
-    if let Some(value) = parts
-        .headers
-        .get("x-real-ip")
-        .and_then(|value| value.to_str().ok())
-    {
-        let ip = value.trim();
-        if !ip.is_empty() {
-            return format!("ip:{ip}");
-        }
-    }
-
-    "ip:unknown".to_owned()
-}
-
-fn matrix_error(status: StatusCode, errcode: &str, message: &str) -> Response {
-    (
-        status,
-        Json(MatrixErrorResponse {
-            errcode: errcode.to_owned(),
-            error: message.to_owned(),
-        }),
-    )
-        .into_response()
-}
-
-fn matrix_rate_limit_error(retry_after: u64) -> Response {
-    (
-        StatusCode::TOO_MANY_REQUESTS,
-        Json(MatrixRateLimitErrorResponse {
-            base: MatrixErrorResponse {
-                errcode: "M_LIMIT_EXCEEDED".to_owned(),
-                error: "Too many requests".to_owned(),
-            },
-            retry_after,
-        }),
-    )
-        .into_response()
 }

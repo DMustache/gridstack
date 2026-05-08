@@ -19,7 +19,7 @@ use crate::services::{
             who_am_i::WhoAmIView,
         },
     },
-    shared::{MatrixErrorResponse, MatrixRateLimitErrorResponse},
+    shared::MatrixErrorResponse,
     state::ApplicationState,
 };
 
@@ -52,8 +52,6 @@ pub enum GetLoginFlowsResponse {
     Ok(Json<GetLoginFlowsView>),
     #[matrix(status = 404, error = [(matrix_error = "M_UNRECOGNIZED", from = AuthorizationApplicationError::LegacyAuthorizationUnsupported)])]
     BadRequest(Json<MatrixErrorResponse>),
-    #[matrix(status = 429, matrix_error = ["M_LIMIT_EXCEEDED"])]
-    RateLimited(Json<MatrixRateLimitErrorResponse>),
 }
 
 pub async fn get_login_flows(
@@ -75,8 +73,6 @@ pub enum CheckUsernameAvailableResponse {
         ]
     )]
     BadRequest(Json<MatrixErrorResponse>),
-    #[matrix(status = 429, matrix_error = ["M_LIMIT_EXCEEDED"])]
-    RateLimited(Json<MatrixRateLimitErrorResponse>),
 }
 
 pub async fn check_username_available(
@@ -100,8 +96,6 @@ pub enum RegisterUserResponse {
     Unauthorized(Json<UiaaResponseView>),
     #[matrix(status = 403, error = [(matrix_error = "M_FORBIDDEN", from = AuthorizationApplicationError::Forbidden)])]
     Forbidden(Json<MatrixErrorResponse>),
-    #[matrix(status = 429, matrix_error = ["M_LIMIT_EXCEEDED"])]
-    RateLimited(Json<MatrixRateLimitErrorResponse>),
 }
 
 pub async fn register_user(
@@ -128,8 +122,6 @@ pub enum LoginUserResponse {
     Ok(Json<LoginUserView>),
     #[matrix(status = 404, error = [(matrix_error = "M_UNRECOGNIZED", from = AuthorizationApplicationError::Unrecognized)])]
     Unrecognized(Json<MatrixErrorResponse>),
-    #[matrix(status = 429, matrix_error = ["M_LIMIT_EXCEEDED"])]
-    RateLimited(Json<MatrixRateLimitErrorResponse>),
 }
 
 pub async fn login_user(
@@ -151,8 +143,6 @@ pub enum WhoAmIResponse {
     Unauthorized(Json<MatrixErrorResponse>),
     #[matrix(status = 403, error = [(matrix_error = "M_FORBIDDEN", from = AuthorizationApplicationError::Forbidden)])]
     Forbidden(Json<MatrixErrorResponse>),
-    #[matrix(status = 429, matrix_error = ["M_LIMIT_EXCEEDED"])]
-    RateLimited(Json<MatrixRateLimitErrorResponse>),
 }
 
 pub async fn who_am_i(

@@ -46,8 +46,10 @@ struct RateLimitBucket {
 
 impl ApplicationState {
     pub fn new(application_configuration: ApplicationConfiguration) -> Self {
-        let user_repository: Arc<dyn UserRepository> =
-            Arc::new(AuthorizationPersistence::default());
+        let user_repository: Arc<dyn UserRepository> = Arc::new(
+            AuthorizationPersistence::new(&application_configuration.database.url)
+                .expect("failed to initialize authorization postgres pool"),
+        );
         let session_repository: Arc<dyn SessionRepository> =
             Arc::new(InMemorySessionRepository::default());
         let room_repository: Arc<dyn RoomRepository> = Arc::new(InMemoryRoomRepository::default());

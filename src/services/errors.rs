@@ -4,9 +4,13 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use response_derive::IntoResponseEnum;
 use thiserror::Error;
 
-use crate::services::shared::MatrixErrorResponse;
+use crate::services::{
+    layers::{AuthorizationLayerError, RateLimitLayerError},
+    shared::{MatrixErrorResponse, MatrixRateLimitErrorResponse},
+};
 
 #[derive(Debug, Error)]
 pub enum DomainError {
@@ -92,5 +96,77 @@ impl IntoResponse for ApplicationError {
         };
 
         (status_code, Json(MatrixErrorResponse { errcode, error })).into_response()
+    }
+}
+
+#[derive(IntoResponseEnum)]
+pub enum AuthorizationLayerResponse {
+    #[matrix(
+        status = 401,
+        error = [
+            (matrix_error = "M_MISSING_TOKEN", from = AuthorizationLayerError::MissingToken),
+            (matrix_error = "M_UNKNOWN_TOKEN", from = AuthorizationLayerError::UnknownToken),
+        ]
+    )]
+    Unauthorized(Json<MatrixErrorResponse>),
+}
+
+#[derive(IntoResponseEnum)]
+pub enum RateLimitLayerResponse {
+    #[matrix(
+        status = 429,
+        error = [(matrix_error = "M_LIMIT_EXCEEDED", from = RateLimitLayerError::RateLimited)]
+    )]
+    RateLimited(Json<MatrixRateLimitErrorResponse>),
+    #[matrix(status = 500, error = [(matrix_error = "M_UNKNOWN", from = RateLimitLayerError::Internal)])]
+    Internal(Json<MatrixErrorResponse>),
+}
+
+impl IntoResponse for AuthorizationLayerError {
+    fn into_response(self) -> Response {
+        match self {
+            AuthorizationLayerError::MissingToken => (
+                StatusCode::UNAUTHORIZED,
+                Json(MatrixErrorResponse {
+                    errcode: "M_MISSING_TOKEN".to_owned(),
+                    error: "No access token was specified for the request.".to_owned(),
+                }),
+            )
+                .into_response(),
+            AuthorizationLayerError::UnknownToken => (
+                StatusCode::UNAUTHORIZED,
+                Json(MatrixErrorResponse {
+                    errcode: "M_UNKNOWN_TOKEN".to_owned(),
+                    error: "Unknown access token".to_owned(),
+                }),
+            )
+                .into_response(),
+        }
+    }
+}
+
+impl IntoResponse for RateLimitLayerError {
+    fn into_response(self) -> Response {
+        match self {
+            RateLimitLayerError::RateLimited => (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(MatrixRateLimitErrorResponse {
+                    base: MatrixErrorResponse {
+                        errcode: "M_LIMIT_EXCEEDED".to_owned(),
+                        error: "Too many requests".to_owned(),
+                    },
+                    retry_after_ms: 2000,
+                }),
+            )
+                .into_response(),
+            RateLimitLayerError::Internal => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(MatrixErrorResponse {
+                    errcode: "M_UNKNOWN".to_owned(),
+                    error: "Rate limiter failure".to_owned(),
+                }),
+            )
+                .into_response(),
+        }
     }
 }
