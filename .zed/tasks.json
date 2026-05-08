@@ -93,6 +93,12 @@
         "allow_concurrent_runs": false
     },
     {
+        "label": "Redocly: Export OpenAPI to redocly html",
+        "command": " docker run --rm -v $PWD:/spec redocly/cli build-docs openapi.json -o redocly.html",
+        "use_new_terminal": true,
+        "allow_concurrent_runs": false
+    },
+    {
         "label": "Cargo: Ultra Clippy (Strict)",
         "command": "cargo clippy --all-targets --all-features -- -D warnings -D clippy::all -D clippy::pedantic -D clippy::nursery -D clippy::restriction",
         "use_new_terminal": true,
