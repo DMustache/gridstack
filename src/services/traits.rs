@@ -6,6 +6,10 @@ pub trait IdGenerator: Send + Sync {
     fn next_event_identifier(&self, home_server_name: &str) -> String;
 }
 
+pub trait Id: Send + Sync {
+    fn new(&self) -> Self;
+}
+
 pub trait JsonWebTokenAdapter: Send + Sync {
     fn encode<T: Clock>(
         &self,
