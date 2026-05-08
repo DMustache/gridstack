@@ -8,6 +8,7 @@ pub struct ApplicationConfiguration {
     pub server: ServerConfiguration,
     pub database: DatabaseConfiguration,
     pub authenification: AuthenticationConfiguration,
+    pub rate_limit: RateLimitConfiguration,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -27,6 +28,11 @@ pub struct AuthenticationConfiguration {
     pub access_token_expiry_seconds: u64,
     pub refresh_token_expiry_seconds: u64,
     pub json_web_token_secret: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct RateLimitConfiguration {
+    pub retry_after_ms: u64,
 }
 
 impl ApplicationConfiguration {

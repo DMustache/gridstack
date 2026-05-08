@@ -14,6 +14,7 @@ use crate::{
             persistence::{AuthorizationPersistence, InMemorySessionRepository},
             service::AuthorizationService,
         },
+        errors::set_rate_limit_retry_after_ms,
         messaging_events::service::MessagingEventsService,
         repositories::{RoomRepository, SessionRepository, UserRepository},
         rooms::persistence::InMemoryRoomRepository,
@@ -46,6 +47,8 @@ struct RateLimitBucket {
 
 impl ApplicationState {
     pub fn new(application_configuration: ApplicationConfiguration) -> Self {
+        set_rate_limit_retry_after_ms(application_configuration.rate_limit.retry_after_ms);
+
         let user_repository: Arc<dyn UserRepository> = Arc::new(
             AuthorizationPersistence::new(&application_configuration.database.url)
                 .expect("failed to initialize authorization postgres pool"),

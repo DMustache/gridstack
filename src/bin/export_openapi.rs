@@ -39,7 +39,6 @@ fn main() -> Result<()> {
 
     let mut schemas = extract_schemas_from_dir(handlers_dir)?;
     schemas.extend(extract_schemas_from_file(shared_file)?);
-    apply_schema_overrides(&mut schemas);
 
     let mut paths: BTreeMap<String, Value> = BTreeMap::new();
     for op in operations {
@@ -740,11 +739,7 @@ fn build_responses(
                 "schema".to_owned(),
                 json!({ "$ref": format!("#/components/schemas/{}", schema_type) }),
             );
-            if let Some(example) = response_example(
-                schema_type,
-                &spec.matrix_error_codes,
-                &spec.matrix_error_messages,
-            ) {
+            if let Some(example) = build_response_example(&spec, schema_type) {
                 media.insert("example".to_owned(), example);
             }
             response.insert(
@@ -782,6 +777,30 @@ fn build_responses(
     Value::Object(responses)
 }
 
+fn build_response_example(spec: &ResponseVariantSpec, schema_type: &str) -> Option<Value> {
+    let code = spec.matrix_error_codes.first()?;
+    let message = spec
+        .matrix_error_messages
+        .get(code)
+        .cloned()
+        .unwrap_or_else(|| "Unknown error".to_owned());
+
+    if schema_type == "MatrixRateLimitErrorResponse" {
+        return Some(json!({
+            "errcode": code,
+            "error": message,
+            "retry_after_ms": 0
+        }));
+    }
+    if schema_type == "MatrixErrorResponse" {
+        return Some(json!({
+            "errcode": code,
+            "error": message
+        }));
+    }
+    None
+}
+
 fn build_response_description(spec: &ResponseVariantSpec) -> String {
     if spec.matrix_error_codes.is_empty() {
         return "Response".to_owned();
@@ -794,44 +813,6 @@ fn build_response_description(spec: &ResponseVariantSpec) -> String {
         .map(String::as_str)
         .unwrap_or("An unknown error occurred");
     format!("Possible errcodes: {listed}. Example: {first} - {msg}")
-}
-
-fn response_example(
-    schema_type: &str,
-    codes: &[String],
-    messages: &HashMap<String, String>,
-) -> Option<Value> {
-    let first = codes.first().map(|v| v.as_str()).unwrap_or("M_UNKNOWN");
-    let first_message = messages
-        .get(first)
-        .map(String::as_str)
-        .unwrap_or("An unknown error occurred");
-    match schema_type {
-        "MatrixErrorResponse" => Some(json!({
-            "errcode": first,
-            "error": first_message
-        })),
-        "MatrixRateLimitErrorResponse" => Some(json!({
-            "errcode": first,
-            "error": first_message
-        })),
-        _ => None,
-    }
-}
-
-fn apply_schema_overrides(schemas: &mut HashMap<String, Value>) {
-    schemas.insert(
-        "MatrixRateLimitErrorResponse".to_owned(),
-        json!({
-            "type": "object",
-            "properties": {
-                "errcode": { "type": "string" },
-                "error": { "type": "string" },
-                "retry_after_ms": { "type": "integer" }
-            },
-            "required": ["errcode", "retry_after_ms"]
-        }),
-    );
 }
 
 fn merge_response_spec(
@@ -853,8 +834,10 @@ fn merge_response_spec(
     entry
         .matrix_error_codes
         .append(&mut incoming.matrix_error_codes);
-    entry.matrix_error_codes.sort();
-    entry.matrix_error_codes.dedup();
+    let mut seen = std::collections::HashSet::new();
+    entry
+        .matrix_error_codes
+        .retain(|code| seen.insert(code.clone()));
     for (code, msg) in incoming.matrix_error_messages {
         entry.matrix_error_messages.entry(code).or_insert(msg);
     }

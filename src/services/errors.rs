@@ -4,6 +4,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use once_cell::sync::OnceCell;
 use response_derive::IntoResponseEnum;
 use thiserror::Error;
 
@@ -11,6 +12,8 @@ use crate::services::{
     layers::{AuthorizationLayerError, RateLimitLayerError},
     shared::{MatrixErrorResponse, MatrixRateLimitErrorResponse},
 };
+
+static RATE_LIMIT_RETRY_AFTER_MS: OnceCell<u64> = OnceCell::new();
 
 #[derive(Debug, Error)]
 pub enum DomainError {
@@ -59,6 +62,14 @@ impl ApplicationError {
     pub fn invalid_input(message: impl Into<String>) -> Self {
         Self::InvalidInput(message.into())
     }
+}
+
+pub fn set_rate_limit_retry_after_ms(value: u64) {
+    let _ = RATE_LIMIT_RETRY_AFTER_MS.set(value);
+}
+
+fn configured_rate_limit_retry_after_ms() -> u64 {
+    RATE_LIMIT_RETRY_AFTER_MS.get().copied().unwrap_or(2000)
 }
 
 impl IntoResponse for ApplicationError {
@@ -155,7 +166,7 @@ impl IntoResponse for RateLimitLayerError {
                         errcode: "M_LIMIT_EXCEEDED".to_owned(),
                         error: "Too many requests".to_owned(),
                     },
-                    retry_after_ms: 2000,
+                    retry_after_ms: configured_rate_limit_retry_after_ms(),
                 }),
             )
                 .into_response(),

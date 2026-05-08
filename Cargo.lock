@@ -773,6 +773,7 @@ dependencies = [
  "diesel_migrations",
  "http",
  "jsonwebtoken",
+ "once_cell",
  "regex",
  "response_derive",
  "ruma",

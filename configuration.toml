@@ -11,3 +11,6 @@ access_token_expiry_seconds = 3600
 refresh_token_expiry_seconds = 7776000
 # openssl rand -hex 64
 json_web_token_secret = "f4351c639741bdfc82fa19560c3c4c8866828384b7448dff20b797d8e598a6b3a6bedc11d69b3f6cfc35f1a7659c80b28890edd4c03e0a8e102e352a28ed1e44"
+
+[rate_limit]
+retry_after_ms = 2000
