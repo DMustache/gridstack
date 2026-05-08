@@ -1,928 +1,601 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
-    env,
-    error::Error,
-    fs,
+    collections::{BTreeMap, HashMap},
+    env, fs,
     path::{Path, PathBuf},
 };
 
-use serde::Serialize;
+use anyhow::{Context, Result, bail};
+use regex::Regex;
 use serde_json::{Map, Value, json};
 use syn::{
-    Expr, ExprCall, ExprLit, ExprMethodCall, ExprPath, Fields, File, FnArg, GenericArgument,
-    Item, ItemEnum, ItemFn, ItemStruct, ItemType, Lit, PatType, PathArguments, ReturnType, Type,
-    TypeArray, TypePath, parse_file,
+    Expr, File, FnArg, GenericArgument, Item, LitInt, LitStr, Meta, PatType, PathArguments,
+    ReturnType, Type,
 };
 
-fn main() -> Result<(), Box<dyn Error>> {
-    let output_path = env::args()
+fn main() -> Result<()> {
+    let output = env::args()
         .nth(1)
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("target/openapi/openapi.json"));
+        .unwrap_or_else(|| PathBuf::from("openapi.json"));
 
-    let project = ProjectScanner::new()?;
-    let document = project.build_openapi_document()?;
+    let routes_file = Path::new("src/services/authorization/routes.rs");
+    let handlers_dir = Path::new("src/services/authorization/handlers");
+    let handlers_file = handlers_dir.join("../handlers.rs");
+    let shared_file = Path::new("src/services/shared.rs");
 
-    if let Some(parent) = output_path.parent() {
-        fs::create_dir_all(parent)?;
+    let operations = extract_operations(routes_file)?;
+    let handler_specs = extract_handler_specs(&handlers_file)?;
+    let response_specs = extract_response_specs(&handlers_file)?;
+
+    let mut schemas = extract_schemas_from_dir(handlers_dir)?;
+    schemas.extend(extract_schemas_from_file(shared_file)?);
+
+    let mut paths: BTreeMap<String, Value> = BTreeMap::new();
+    for op in operations {
+        let method_object = build_method_object(&op, &handler_specs, &response_specs, &schemas)?;
+
+        let entry = paths
+            .entry(op.path)
+            .or_insert_with(|| Value::Object(Map::new()));
+        let object = entry
+            .as_object_mut()
+            .context("path entry must be an object")?;
+        object.insert(op.method, method_object);
     }
 
-    fs::write(&output_path, serde_json::to_vec_pretty(&document)?)?;
-    println!("{}", output_path.display());
+    let mut schema_map = Map::new();
+    for (name, schema) in schemas {
+        schema_map.insert(name, schema);
+    }
+
+    let openapi_value = json!({
+        "openapi": "3.1.0",
+        "info": {
+            "title": "Gridstack Authorization API",
+            "version": "0.1.0",
+            "description": "Auto-generated from src/services/authorization routes and handlers."
+        },
+        "paths": paths,
+        "components": {
+            "schemas": schema_map
+        }
+    });
+
+    let openapi: utoipa::openapi::OpenApi =
+        serde_json::from_value(openapi_value).context("invalid generated OpenAPI structure")?;
+    let content = serde_json::to_string_pretty(&openapi)?;
+
+    if let Some(parent) = output.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&output, content)?;
+    println!("OpenAPI written to {}", output.display());
     Ok(())
 }
 
-struct ProjectScanner {
-    files: HashMap<PathBuf, File>,
-    handler_scanners: HashMap<PathBuf, HandlerScanner>,
+#[derive(Debug)]
+struct RouteOperation {
+    path: String,
+    method: String,
+    operation_id: String,
 }
 
-impl ProjectScanner {
-    fn new() -> Result<Self, Box<dyn Error>> {
-        let mut files = HashMap::new();
-        for path in rust_files("src")? {
-            let source = fs::read_to_string(&path)?;
-            files.insert(path, parse_file(&source)?);
+#[derive(Debug, Clone)]
+struct HandlerSpec {
+    query_type: Option<String>,
+    json_body_type: Option<String>,
+    response_enum: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ResponseVariantSpec {
+    status: String,
+    schema_type: Option<String>,
+    matrix_error_codes: Vec<String>,
+}
+
+fn extract_operations(routes_file: &Path) -> Result<Vec<RouteOperation>> {
+    let content = fs::read_to_string(routes_file)
+        .with_context(|| format!("failed to read {}", routes_file.display()))?;
+    let parsed: File = syn::parse_file(&content)
+        .with_context(|| format!("failed to parse {}", routes_file.display()))?;
+
+    let mut operations = Vec::new();
+    for item in parsed.items {
+        if let Item::Fn(function) = item {
+            collect_route_calls_from_block(&function.block.stmts, &mut operations);
         }
-
-        Ok(Self {
-            files,
-            handler_scanners: HashMap::new(),
-        })
     }
 
-    fn build_openapi_document(mut self) -> Result<OpenApiDocument, Box<dyn Error>> {
-        let routes = self.discover_routes()?;
-        let mut paths: BTreeMap<String, BTreeMap<String, OpenApiOperation>> = BTreeMap::new();
+    if operations.is_empty() {
+        bail!("no authorization routes were detected in {}", routes_file.display());
+    }
 
-        for route in routes {
-            let scanner = self.handler_scanner(&route.handlers_file)?;
-            let operation = scanner.operation_for_route(&route)?;
-            paths
-                .entry(route.path.clone())
-                .or_default()
-                .insert(route.method.clone(), operation);
+    Ok(operations)
+}
+
+fn collect_route_calls_from_block(stmts: &[syn::Stmt], operations: &mut Vec<RouteOperation>) {
+    for stmt in stmts {
+        if let syn::Stmt::Expr(expr, _) = stmt {
+            collect_route_calls_from_expr(expr, operations);
         }
-
-        Ok(OpenApiDocument {
-            openapi: "3.1.0",
-            info: OpenApiInfo {
-                title: "gridstack".to_owned(),
-                version: env!("CARGO_PKG_VERSION").to_owned(),
-            },
-            paths,
-        })
     }
+}
 
-    fn discover_routes(&self) -> Result<Vec<RouteSpec>, Box<dyn Error>> {
-        let main_file = PathBuf::from("src/main.rs");
-        let root_router = self.find_root_router_file(&main_file)?;
-        let root_module_dir = module_dir_for_root_file(&root_router);
-        let mut visited = HashSet::new();
-        let mut routes = Vec::new();
-        self.collect_routes_from_router(&root_router, &root_module_dir, &mut visited, &mut routes)?;
-        Ok(routes)
-    }
+fn collect_route_calls_from_expr(expr: &Expr, operations: &mut Vec<RouteOperation>) {
+    if let Expr::MethodCall(call) = expr {
+        collect_route_calls_from_expr(&call.receiver, operations);
 
-    fn find_root_router_file(&self, main_file: &Path) -> Result<PathBuf, Box<dyn Error>> {
-        let file = self
-            .files
-            .get(main_file)
-            .ok_or("src/main.rs not found in file cache")?;
-
-        for item in &file.items {
-            let Item::Fn(function) = item else {
-                continue;
-            };
-            if function.sig.ident != "main" {
-                continue;
-            }
-
-            for statement in &function.block.stmts {
-                let syn::Stmt::Local(local) = statement else {
-                    continue;
-                };
-
-                let Some(init) = &local.init else {
-                    continue;
-                };
-
-                let Expr::Call(ExprCall { func, .. }) = init.expr.as_ref() else {
-                    continue;
-                };
-
-                let Expr::Path(ExprPath { path, .. }) = func.as_ref() else {
-                    continue;
-                };
-
-                let segments: Vec<String> =
-                    path.segments.iter().map(|segment| segment.ident.to_string()).collect();
-                if segments == ["services".to_owned(), "router".to_owned()] {
-                    return Ok(PathBuf::from("src/services.rs"));
-                }
-            }
+        if call.method == "route"
+            && call.args.len() == 2
+            && let Some(Expr::Lit(expr_lit)) = call.args.first()
+            && let syn::Lit::Str(path_lit) = &expr_lit.lit
+            && let Some(route_definition) = call.args.iter().nth(1)
+        {
+            let path = path_lit.value();
+            collect_http_methods(route_definition, &path, operations);
         }
-
-        Err("root services::router(...) call not found in main.rs".into())
     }
+}
 
-    fn collect_routes_from_router(
-        &self,
-        router_file: &Path,
-        module_dir: &Path,
-        visited: &mut HashSet<PathBuf>,
-        routes: &mut Vec<RouteSpec>,
-    ) -> Result<(), Box<dyn Error>> {
-        if !visited.insert(router_file.to_path_buf()) {
-            return Ok(());
+fn collect_http_methods(expr: &Expr, path: &str, operations: &mut Vec<RouteOperation>) {
+    if let Expr::Call(call) = expr
+        && let Expr::Path(path_expr) = &*call.func
+        && let Some(segment) = path_expr.path.segments.last()
+    {
+        let method = segment.ident.to_string();
+        if matches!(method.as_str(), "get" | "post" | "put" | "patch" | "delete")
+            && let Some(Expr::Path(handler_path)) = call.args.first()
+            && let Some(handler_segment) = handler_path.path.segments.last()
+        {
+            operations.push(RouteOperation {
+                path: path.to_owned(),
+                method,
+                operation_id: handler_segment.ident.to_string(),
+            });
         }
-
-        let file = self
-            .files
-            .get(router_file)
-            .ok_or_else(|| format!("router file `{}` not found", router_file.display()))?;
-
-        let router_fn = file
-            .items
-            .iter()
-            .find_map(|item| match item {
-                Item::Fn(function) if function.sig.ident == "router" => Some(function),
-                _ => None,
-            })
-            .ok_or_else(|| format!("router function not found in `{}`", router_file.display()))?;
-
-        let expr = router_expression(router_fn)?;
-        self.walk_router_expression(expr, module_dir, visited, routes)
+        return;
     }
 
-    fn walk_router_expression(
-        &self,
-        expr: &Expr,
-        module_dir: &Path,
-        visited: &mut HashSet<PathBuf>,
-        routes: &mut Vec<RouteSpec>,
-    ) -> Result<(), Box<dyn Error>> {
-        let Expr::MethodCall(ExprMethodCall {
-            receiver,
-            method,
-            args,
-            ..
-        }) = expr
-        else {
-            return Ok(());
+    if let Expr::MethodCall(call) = expr {
+        collect_http_methods(&call.receiver, path, operations);
+        let method = call.method.to_string();
+        if matches!(method.as_str(), "get" | "post" | "put" | "patch" | "delete")
+            && let Some(Expr::Path(handler_path)) = call.args.first()
+            && let Some(handler_segment) = handler_path.path.segments.last()
+        {
+            operations.push(RouteOperation {
+                path: path.to_owned(),
+                method,
+                operation_id: handler_segment.ident.to_string(),
+            });
+        }
+    }
+}
+
+fn extract_handler_specs(handlers_file: &Path) -> Result<HashMap<String, HandlerSpec>> {
+    let content = fs::read_to_string(handlers_file)
+        .with_context(|| format!("failed to read {}", handlers_file.display()))?;
+    let parsed: File = syn::parse_file(&content)
+        .with_context(|| format!("failed to parse {}", handlers_file.display()))?;
+
+    let mut specs = HashMap::new();
+    for item in parsed.items {
+        let Item::Fn(function) = item else {
+            continue;
         };
 
-        self.walk_router_expression(receiver, module_dir, visited, routes)?;
-
-        match method.to_string().as_str() {
-            "route" => {
-                let path = route_path(args.first().ok_or("route path missing")?)?;
-                let (http_method, handler_name) =
-                    route_handler(args.iter().nth(1).ok_or("route handler missing")?)?;
-                routes.push(RouteSpec {
-                    path,
-                    method: http_method,
-                    handler_name,
-                    handlers_file: module_dir.join("handlers.rs"),
-                });
-            }
-            "merge" => {
-                let merged_router = args.first().ok_or("merge target missing")?;
-                let (target_router_file, target_module_dir) =
-                    resolve_merged_router(module_dir, merged_router)?;
-                self.collect_routes_from_router(
-                    &target_router_file,
-                    &target_module_dir,
-                    visited,
-                    routes,
-                )?;
-            }
-            _ => {}
-        }
-
-        Ok(())
-    }
-
-    fn handler_scanner(&mut self, handlers_file: &Path) -> Result<&HandlerScanner, Box<dyn Error>> {
-        if !self.handler_scanners.contains_key(handlers_file) {
-            let file = self
-                .files
-                .get(handlers_file)
-                .ok_or_else(|| format!("handlers file `{}` not found", handlers_file.display()))?;
-            self.handler_scanners
-                .insert(handlers_file.to_path_buf(), HandlerScanner::from_file(file.clone()));
-        }
-
-        Ok(self
-            .handler_scanners
-            .get(handlers_file)
-            .expect("handler scanner inserted"))
-    }
-}
-
-struct HandlerScanner {
-    structs: HashMap<String, ItemStruct>,
-    enums: HashMap<String, ItemEnum>,
-    aliases: HashMap<String, ItemType>,
-    functions: HashMap<String, ItemFn>,
-}
-
-impl HandlerScanner {
-    fn from_file(file: File) -> Self {
-        let mut structs = HashMap::new();
-        let mut enums = HashMap::new();
-        let mut aliases = HashMap::new();
-        let mut functions = HashMap::new();
-
-        for item in file.items {
-            match item {
-                Item::Struct(item_struct) => {
-                    structs.insert(item_struct.ident.to_string(), item_struct);
-                }
-                Item::Enum(item_enum) => {
-                    enums.insert(item_enum.ident.to_string(), item_enum);
-                }
-                Item::Type(item_type) => {
-                    aliases.insert(item_type.ident.to_string(), item_type);
-                }
-                Item::Fn(item_fn) => {
-                    functions.insert(item_fn.sig.ident.to_string(), item_fn);
-                }
-                _ => {}
-            }
-        }
-
-        Self {
-            structs,
-            enums,
-            aliases,
-            functions,
-        }
-    }
-
-    fn operation_for_route(&self, route: &RouteSpec) -> Result<OpenApiOperation, Box<dyn Error>> {
-        let function = self
-            .functions
-            .get(&route.handler_name)
-            .ok_or_else(|| format!("handler `{}` not found", route.handler_name))?;
-
-        let mut parameters = Vec::new();
-        let mut request_body = None;
+        let handler_name = function.sig.ident.to_string();
+        let mut query_type = None;
+        let mut json_body_type = None;
 
         for input in &function.sig.inputs {
             let FnArg::Typed(PatType { ty, .. }) = input else {
                 continue;
             };
 
-            let Some((wrapper, inner)) = extract_outer_inner_type(ty.as_ref()) else {
-                continue;
-            };
-
-            match wrapper.as_str() {
-                "Query" => parameters.extend(self.query_parameters(&inner)?),
-                "Json" => {
-                    request_body = Some(OpenApiRequestBody {
-                        required: true,
-                        description: format!("Request body for `{}`.", route.handler_name),
-                        content: json_content(self.schema_for_type_name(&inner)?),
-                    });
-                }
-                _ => {}
+            if let Some(inner) = extract_inner_type_name(ty, "Query") {
+                query_type = Some(inner);
+            }
+            if let Some(inner) = extract_inner_type_name(ty, "Json") {
+                json_body_type = Some(inner);
             }
         }
 
-        let (ok_type, err_type) = result_type_names(&function.sig.output)?;
-        let success_response = self.response_spec_from_type_name(&ok_type, "200")?;
-
-        let mut responses = BTreeMap::new();
-        responses.insert(
-            success_response.status,
-            OpenApiResponse {
-                description: "Successful response.".to_owned(),
-                content: Some(json_content(self.schema_for_type_name(
-                    success_response
-                        .body_type
-                        .as_deref()
-                        .ok_or("success response body type missing")?,
-                )?)),
-            },
-        );
-
-        for (status, schema, description) in self.error_responses(&err_type)? {
-            if let Some(existing) = responses.get_mut(&status) {
-                if !existing.description.split(" | ").any(|part| part == description) {
-                    existing.description = format!("{} | {}", existing.description, description);
-                }
-            } else {
-                responses.insert(
-                    status,
-                    OpenApiResponse {
-                        description,
-                        content: Some(json_content(schema)),
-                    },
-                );
-            }
-        }
-
-        Ok(OpenApiOperation {
-            operation_id: route.handler_name.clone(),
-            summary: None,
-            description: None,
-            tags: Vec::new(),
-            parameters,
-            request_body,
-            responses,
-        })
-    }
-
-    fn query_parameters(&self, type_name: &str) -> Result<Vec<OpenApiParameter>, Box<dyn Error>> {
-        let item_struct = self
-            .structs
-            .get(type_name)
-            .ok_or_else(|| format!("query struct `{type_name}` not found"))?;
-
-        let Fields::Named(fields) = &item_struct.fields else {
-            return Ok(Vec::new());
+        let response_enum = match &function.sig.output {
+            ReturnType::Type(_, ty) => type_name_from_type(ty),
+            ReturnType::Default => None,
         };
 
-        let mut parameters = Vec::new();
-        for field in &fields.named {
-            let field_name =
-                serde_field_name(field).unwrap_or_else(|| field.ident.as_ref().unwrap().to_string());
-            parameters.push(OpenApiParameter {
-                name: field_name,
-                location: "query".to_owned(),
-                required: !is_option_type(&field.ty) && !has_serde_default(&field.attrs),
-                description: String::new(),
-                schema: self.schema_for_syn_type(&field.ty)?,
+        specs.insert(
+            handler_name,
+            HandlerSpec {
+                query_type,
+                json_body_type,
+                response_enum,
+            },
+        );
+    }
+
+    Ok(specs)
+}
+
+fn extract_response_specs(handlers_file: &Path) -> Result<HashMap<String, Vec<ResponseVariantSpec>>> {
+    let content = fs::read_to_string(handlers_file)
+        .with_context(|| format!("failed to read {}", handlers_file.display()))?;
+    let parsed: File = syn::parse_file(&content)
+        .with_context(|| format!("failed to parse {}", handlers_file.display()))?;
+
+    let mut specs = HashMap::new();
+    for item in parsed.items {
+        let Item::Enum(item_enum) = item else {
+            continue;
+        };
+
+        if !has_into_response_enum_derive(&item_enum.attrs) {
+            continue;
+        }
+
+        let enum_name = item_enum.ident.to_string();
+        let mut variants = Vec::new();
+
+        for variant in item_enum.variants {
+            let mut status = None;
+            let mut matrix_error_codes = Vec::new();
+            for attr in &variant.attrs {
+                if !attr.path().is_ident("matrix") {
+                    continue;
+                }
+
+                let _ = attr.parse_nested_meta(|meta| {
+                    if meta.path.is_ident("status") {
+                        let lit: LitInt = meta.value()?.parse()?;
+                        status = Some(lit.base10_digits().to_owned());
+                    }
+                    Ok(())
+                });
+
+                let token_str = match &attr.meta {
+                    Meta::List(list) => list.tokens.to_string(),
+                    _ => String::new(),
+                };
+                matrix_error_codes.extend(extract_matrix_error_codes_from_tokens(&token_str)?);
+            }
+
+            let payload_type = variant
+                .fields
+                .iter()
+                .next()
+                .and_then(|field| extract_inner_type_name(&field.ty, "Json"));
+
+            variants.push(ResponseVariantSpec {
+                status: status.unwrap_or_else(|| "200".to_owned()),
+                schema_type: payload_type,
+                matrix_error_codes,
             });
         }
 
-        Ok(parameters)
+        specs.insert(enum_name, variants);
     }
 
-    fn error_responses(
-        &self,
-        error_type: &str,
-    ) -> Result<Vec<(String, Value, String)>, Box<dyn Error>> {
-        let item_enum = self
-            .enums
-            .get(error_type)
-            .ok_or_else(|| format!("error enum `{error_type}` not found"))?;
+    Ok(specs)
+}
 
-        let mut responses = Vec::new();
+fn has_into_response_enum_derive(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        if !attr.path().is_ident("derive") {
+            return false;
+        }
+        let mut found = false;
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("IntoResponseEnum") {
+                found = true;
+            }
+            Ok(())
+        });
+        found
+    })
+}
 
-        for variant in &item_enum.variants {
-            let response = match &variant.fields {
-                Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
-                    let field_type = &fields.unnamed.first().unwrap().ty;
-                    self.response_spec_from_syn_type(field_type, "500")?
+fn extract_matrix_error_codes_from_tokens(tokens: &str) -> Result<Vec<String>> {
+    let string_code_re = Regex::new(r#"matrix_error\s*=\s*\"([^\"]+)\""#)?;
+    let list_code_re = Regex::new(r#"matrix_error\s*=\s*\[([^\]]+)\]"#)?;
+    let quoted_re = Regex::new(r#"\"([^\"]+)\""#)?;
+
+    let mut codes = Vec::new();
+    for cap in string_code_re.captures_iter(tokens) {
+        codes.push(cap[1].to_owned());
+    }
+    for cap in list_code_re.captures_iter(tokens) {
+        let inner = cap[1].to_owned();
+        for quoted in quoted_re.captures_iter(&inner) {
+            codes.push(quoted[1].to_owned());
+        }
+    }
+
+    codes.sort();
+    codes.dedup();
+    Ok(codes)
+}
+
+fn build_method_object(
+    op: &RouteOperation,
+    handler_specs: &HashMap<String, HandlerSpec>,
+    response_specs: &HashMap<String, Vec<ResponseVariantSpec>>,
+    schemas: &HashMap<String, Value>,
+) -> Result<Value> {
+    let handler = handler_specs.get(&op.operation_id);
+
+    let mut method = Map::new();
+    method.insert("tags".to_owned(), json!(["authorization"]));
+    method.insert("operationId".to_owned(), json!(op.operation_id));
+
+    if let Some(query_type) = handler.and_then(|h| h.query_type.as_ref()) {
+        let parameters = build_query_parameters(query_type, schemas)?;
+        if !parameters.is_empty() {
+            method.insert("parameters".to_owned(), Value::Array(parameters));
+        }
+    }
+
+    if let Some(body_type) = handler.and_then(|h| h.json_body_type.as_ref()) {
+        method.insert(
+            "requestBody".to_owned(),
+            json!({
+                "required": true,
+                "content": {
+                    "application/json": {
+                        "schema": { "$ref": format!("#/components/schemas/{}", body_type) }
+                    }
                 }
-                _ => ResponseSpec {
-                    status: "500".to_owned(),
-                    body_type: None,
-                },
-            };
-
-            let schema = if let Some(body_type) = response.body_type.as_deref() {
-                self.schema_for_type_name(body_type)?
-            } else {
-                json!({ "type": "object" })
-            };
-
-            responses.push((response.status, schema, variant.ident.to_string()));
-        }
-
-        responses.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.2.cmp(&right.2)));
-        Ok(responses)
+            }),
+        );
     }
 
-    fn response_spec_from_type_name(
-        &self,
-        type_name: &str,
-        default_status: &str,
-    ) -> Result<ResponseSpec, Box<dyn Error>> {
-        if let Some(alias) = self.aliases.get(type_name) {
-            return self.response_spec_from_syn_type(&alias.ty, default_status);
-        }
-
-        Ok(ResponseSpec {
-            status: default_status.to_owned(),
-            body_type: Some(type_name.to_owned()),
-        })
-    }
-
-    fn response_spec_from_syn_type(
-        &self,
-        ty: &Type,
-        default_status: &str,
-    ) -> Result<ResponseSpec, Box<dyn Error>> {
-        if let Some(spec) = json_response_spec_from_syn_type(ty) {
-            return Ok(spec);
-        }
-
-        if let Some(type_name) = simple_type_name(ty) {
-            return self.response_spec_from_type_name(&type_name, default_status);
-        }
-
-        Err("unsupported response type".into())
-    }
-
-    fn schema_for_type_name(&self, type_name: &str) -> Result<Value, Box<dyn Error>> {
-        if let Some(alias) = self.aliases.get(type_name) {
-            if let Some(spec) = json_response_spec_from_syn_type(&alias.ty)
-                && let Some(body_type) = spec.body_type
-            {
-                return self.schema_for_type_name(&body_type);
-            }
-
-            return self.schema_for_syn_type(&alias.ty);
-        }
-
-        if let Some(item_struct) = self.structs.get(type_name) {
-            return self.schema_for_struct(item_struct);
-        }
-
-        if let Some(item_enum) = self.enums.get(type_name) {
-            return self.schema_for_enum(item_enum);
-        }
-
-        Ok(match type_name {
-            "String" => json!({ "type": "string" }),
-            "bool" => json!({ "type": "boolean" }),
-            "u64" => json!({ "type": "integer", "format": "int64" }),
-            "Value" => json!({ "type": "object" }),
-            _ => json!({ "type": "object" }),
-        })
-    }
-
-    fn schema_for_struct(&self, item_struct: &ItemStruct) -> Result<Value, Box<dyn Error>> {
-        let Fields::Named(fields) = &item_struct.fields else {
-            return Ok(json!({ "type": "object" }));
-        };
-
-        let mut properties = Map::new();
-        for field in &fields.named {
-            let field_name =
-                serde_field_name(field).unwrap_or_else(|| field.ident.as_ref().unwrap().to_string());
-            properties.insert(field_name, self.schema_for_syn_type(&field.ty)?);
-        }
-
-        Ok(Value::Object(Map::from_iter([
-            ("type".to_owned(), Value::String("object".to_owned())),
-            ("properties".to_owned(), Value::Object(properties)),
-        ])))
-    }
-
-    fn schema_for_enum(&self, item_enum: &ItemEnum) -> Result<Value, Box<dyn Error>> {
-        if item_enum
-            .variants
-            .iter()
-            .all(|variant| matches!(variant.fields, Fields::Unit))
-        {
-            let values: Vec<String> = item_enum
-                .variants
-                .iter()
-                .map(|variant| {
-                    serde_variant_name(variant)
-                        .unwrap_or_else(|| variant.ident.to_string().to_lowercase())
-                })
-                .collect();
-
-            return Ok(json!({ "type": "string", "enum": values }));
-        }
-
-        Ok(json!({ "type": "object" }))
-    }
-
-    fn schema_for_syn_type(&self, ty: &Type) -> Result<Value, Box<dyn Error>> {
-        if let Some(spec) = json_response_spec_from_syn_type(ty)
-            && let Some(body_type) = spec.body_type
-        {
-            return self.schema_for_type_name(&body_type);
-        }
-
-        if let Some(inner) = option_inner_type_name(ty) {
-            let mut schema = self.schema_for_type_name(&inner)?;
-            if let Value::Object(ref mut map) = schema {
-                map.insert("nullable".to_owned(), Value::Bool(true));
-            }
-            return Ok(schema);
-        }
-
-        if let Some(inner) = vec_inner_type_name(ty) {
-            return Ok(json!({
-                "type": "array",
-                "items": self.schema_for_type_name(&inner)?,
-            }));
-        }
-
-        if let Type::Array(TypeArray { elem, .. }) = ty {
-            return Ok(json!({
-                "type": "array",
-                "items": self.schema_for_syn_type(elem)?,
-            }));
-        }
-
-        if let Some(type_name) = simple_type_name(ty) {
-            return self.schema_for_type_name(&type_name);
-        }
-
-        Ok(json!({ "type": "object" }))
-    }
-}
-
-#[derive(Debug, Clone)]
-struct RouteSpec {
-    path: String,
-    method: String,
-    handler_name: String,
-    handlers_file: PathBuf,
-}
-
-#[derive(Debug, Serialize)]
-struct OpenApiDocument {
-    openapi: &'static str,
-    info: OpenApiInfo,
-    paths: BTreeMap<String, BTreeMap<String, OpenApiOperation>>,
-}
-
-#[derive(Debug, Serialize)]
-struct OpenApiInfo {
-    title: String,
-    version: String,
-}
-
-#[derive(Debug, Serialize)]
-struct OpenApiOperation {
-    operation_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    summary: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    tags: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    parameters: Vec<OpenApiParameter>,
-    #[serde(skip_serializing_if = "Option::is_none", rename = "requestBody")]
-    request_body: Option<OpenApiRequestBody>,
-    responses: BTreeMap<String, OpenApiResponse>,
-}
-
-#[derive(Debug, Serialize)]
-struct OpenApiParameter {
-    name: String,
-    #[serde(rename = "in")]
-    location: String,
-    required: bool,
-    description: String,
-    schema: Value,
-}
-
-#[derive(Debug, Serialize)]
-struct OpenApiRequestBody {
-    required: bool,
-    description: String,
-    content: BTreeMap<String, OpenApiMediaType>,
-}
-
-#[derive(Debug, Serialize)]
-struct OpenApiResponse {
-    description: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<BTreeMap<String, OpenApiMediaType>>,
-}
-
-#[derive(Debug, Serialize)]
-struct OpenApiMediaType {
-    schema: Value,
-}
-
-#[derive(Debug)]
-struct ResponseSpec {
-    status: String,
-    body_type: Option<String>,
-}
-
-fn rust_files(root: impl AsRef<Path>) -> Result<Vec<PathBuf>, Box<dyn Error>> {
-    let mut files = Vec::new();
-    collect_rust_files(root.as_ref(), &mut files)?;
-    Ok(files)
-}
-
-fn collect_rust_files(path: &Path, files: &mut Vec<PathBuf>) -> Result<(), Box<dyn Error>> {
-    if path.is_file() {
-        if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
-            files.push(path.to_path_buf());
-        }
-        return Ok(());
-    }
-
-    for entry in fs::read_dir(path)? {
-        let entry = entry?;
-        collect_rust_files(&entry.path(), files)?;
-    }
-
-    Ok(())
-}
-
-fn module_dir_for_root_file(file: &Path) -> PathBuf {
-    if file.file_name().and_then(|name| name.to_str()) == Some("mod.rs") {
-        file.parent().unwrap().to_path_buf()
+    let responses = if let Some(response_enum) = handler.and_then(|h| h.response_enum.as_ref()) {
+        build_responses(response_specs.get(response_enum))
     } else {
-        let stem = file.file_stem().unwrap().to_str().unwrap();
-        file.parent().unwrap().join(stem)
-    }
+        build_responses(None)
+    };
+    method.insert("responses".to_owned(), responses);
+
+    Ok(Value::Object(method))
 }
 
-fn router_expression(function: &ItemFn) -> Result<&Expr, Box<dyn Error>> {
-    function
-        .block
-        .stmts
-        .iter()
-        .find_map(|stmt| match stmt {
-            syn::Stmt::Expr(expr, _) => Some(expr),
-            _ => None,
+fn build_query_parameters(query_type: &str, schemas: &HashMap<String, Value>) -> Result<Vec<Value>> {
+    let Some(schema) = schemas.get(query_type) else {
+        return Ok(Vec::new());
+    };
+
+    let object = schema
+        .as_object()
+        .with_context(|| format!("schema {} must be object", query_type))?;
+    let props = object
+        .get("properties")
+        .and_then(Value::as_object)
+        .with_context(|| format!("schema {} missing properties", query_type))?;
+
+    let required: Vec<String> = object
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect()
         })
-        .ok_or_else(|| "router function expression not found".into())
-}
+        .unwrap_or_default();
 
-fn route_path(expr: &Expr) -> Result<String, Box<dyn Error>> {
-    string_literal_expr(expr).ok_or_else(|| "route path must be a string literal".into())
-}
-
-fn route_handler(expr: &Expr) -> Result<(String, String), Box<dyn Error>> {
-    let Expr::Call(ExprCall { func, args, .. }) = expr else {
-        return Err("route handler must be method call like post(handler)".into());
-    };
-
-    let Expr::Path(ExprPath { path, .. }) = func.as_ref() else {
-        return Err("route method function path not found".into());
-    };
-
-    let http_method = path
-        .segments
-        .last()
-        .map(|segment| segment.ident.to_string())
-        .ok_or("route method missing")?;
-
-    let handler_expr = args.first().ok_or("route handler missing")?;
-    let Expr::Path(ExprPath { path, .. }) = handler_expr else {
-        return Err("route handler must be a path".into());
-    };
-
-    let handler_name = path
-        .segments
-        .last()
-        .map(|segment| segment.ident.to_string())
-        .ok_or("handler name missing")?;
-
-    Ok((http_method, handler_name))
-}
-
-fn resolve_merged_router(
-    module_dir: &Path,
-    expr: &Expr,
-) -> Result<(PathBuf, PathBuf), Box<dyn Error>> {
-    let Expr::Call(ExprCall { func, .. }) = expr else {
-        return Err("merge target must be router(...) call".into());
-    };
-
-    let Expr::Path(ExprPath { path, .. }) = func.as_ref() else {
-        return Err("merge target path not found".into());
-    };
-
-    let segments: Vec<String> = path.segments.iter().map(|segment| segment.ident.to_string()).collect();
-    if segments.last().map(String::as_str) != Some("router") {
-        return Err("merge target must call router".into());
+    let mut parameters = Vec::new();
+    for (name, schema) in props {
+        parameters.push(json!({
+            "name": name,
+            "in": "query",
+            "required": required.iter().any(|r| r == name),
+            "schema": schema,
+        }));
     }
 
-    let module_segments = &segments[..segments.len() - 1];
-    let target_module_dir = module_segments
-        .iter()
-        .fold(module_dir.to_path_buf(), |acc, segment| acc.join(segment));
-
-    Ok((target_module_dir.join("router.rs"), target_module_dir))
+    Ok(parameters)
 }
 
-fn result_type_names(output: &ReturnType) -> Result<(String, String), Box<dyn Error>> {
-    let ReturnType::Type(_, ty) = output else {
-        return Err("handler must return Result".into());
-    };
+fn build_responses(specs: Option<&Vec<ResponseVariantSpec>>) -> Value {
+    let mut responses = Map::new();
 
-    let Type::Path(type_path) = ty.as_ref() else {
-        return Err("unsupported return type".into());
-    };
+    if let Some(specs) = specs {
+        for spec in specs {
+            let mut response = Map::new();
+            response.insert("description".to_owned(), json!("Response"));
 
-    let last = type_path.path.segments.last().ok_or("missing return type segment")?;
-    if last.ident != "Result" {
-        return Err("handler must return Result".into());
+            if let Some(schema_type) = &spec.schema_type {
+                response.insert(
+                    "content".to_owned(),
+                    json!({
+                        "application/json": {
+                            "schema": { "$ref": format!("#/components/schemas/{}", schema_type) }
+                        }
+                    }),
+                );
+            }
+
+            if !spec.matrix_error_codes.is_empty() {
+                response.insert(
+                    "x-matrix-error-codes".to_owned(),
+                    json!(spec.matrix_error_codes),
+                );
+            }
+
+            responses.insert(spec.status.clone(), Value::Object(response));
+        }
     }
 
-    let PathArguments::AngleBracketed(arguments) = &last.arguments else {
-        return Err("unsupported Result arguments".into());
-    };
+    if responses.is_empty() {
+        responses.insert("200".to_owned(), json!({ "description": "Success" }));
+    }
 
-    let mut types = arguments.args.iter().filter_map(|argument| match argument {
-        GenericArgument::Type(ty) => simple_type_name(ty),
-        _ => None,
-    });
-
-    let ok_type = types.next().ok_or("missing success type")?;
-    let err_type = types.next().ok_or("missing error type")?;
-    Ok((ok_type, err_type))
+    Value::Object(responses)
 }
 
-fn extract_outer_inner_type(ty: &Type) -> Option<(String, String)> {
-    let Type::Path(type_path) = ty else {
-        return None;
-    };
-
-    let segment = type_path.path.segments.last()?;
-    let wrapper = segment.ident.to_string();
-    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
-        return None;
-    };
-
-    let inner = arguments.args.iter().find_map(|argument| match argument {
-        GenericArgument::Type(ty) => simple_type_name(ty),
-        _ => None,
-    })?;
-
-    Some((wrapper, inner))
+fn extract_schemas_from_dir(dir: &Path) -> Result<HashMap<String, Value>> {
+    let mut schemas = HashMap::new();
+    for entry in fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|v| v.to_str()) != Some("rs") {
+            continue;
+        }
+        schemas.extend(extract_schemas_from_file(&path)?);
+    }
+    Ok(schemas)
 }
 
-fn simple_type_name(ty: &Type) -> Option<String> {
+fn extract_schemas_from_file(path: &Path) -> Result<HashMap<String, Value>> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let parsed: File =
+        syn::parse_file(&content).with_context(|| format!("failed to parse {}", path.display()))?;
+
+    let mut schemas = HashMap::new();
+    for item in parsed.items {
+        if let Item::Struct(item_struct) = item {
+            let struct_name = item_struct.ident.to_string();
+            let fields = match item_struct.fields {
+                syn::Fields::Named(named) => named.named,
+                _ => continue,
+            };
+
+            let mut properties = Map::new();
+            let mut required = Vec::new();
+
+            for field in fields {
+                let field_name = field.ident.context("missing field name")?.to_string();
+                let (serialized_name, optional, schema) =
+                    convert_field(&field_name, &field.ty, &field.attrs);
+                if !optional {
+                    required.push(serialized_name.clone());
+                }
+                properties.insert(serialized_name, schema);
+            }
+
+            let mut schema = Map::new();
+            schema.insert("type".to_owned(), json!("object"));
+            schema.insert("properties".to_owned(), Value::Object(properties));
+            if !required.is_empty() {
+                schema.insert("required".to_owned(), json!(required));
+            }
+
+            schemas.insert(struct_name, Value::Object(schema));
+        }
+    }
+
+    Ok(schemas)
+}
+
+fn convert_field(field_name: &str, field_type: &Type, attrs: &[syn::Attribute]) -> (String, bool, Value) {
+    let (serialized_name, optional_from_attr) = parse_serde_attrs(field_name, attrs);
+    let (schema, optional_from_type) = type_to_schema(field_type);
+    (serialized_name, optional_from_attr || optional_from_type, schema)
+}
+
+fn parse_serde_attrs(field_name: &str, attrs: &[syn::Attribute]) -> (String, bool) {
+    let mut name = field_name.to_owned();
+    let mut optional = false;
+
+    for attr in attrs {
+        if !attr.path().is_ident("serde") {
+            continue;
+        }
+
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("rename") {
+                let value: LitStr = meta.value()?.parse()?;
+                name = value.value();
+            }
+            if meta.path.is_ident("skip_serializing_if") {
+                optional = true;
+            }
+            Ok(())
+        });
+    }
+
+    (name, optional)
+}
+
+fn type_to_schema(ty: &Type) -> (Value, bool) {
     match ty {
-        Type::Path(type_path) => type_path
-            .path
-            .segments
-            .last()
-            .map(|segment| segment.ident.to_string()),
-        _ => None,
-    }
-}
+        Type::Path(path) => {
+            let segment = match path.path.segments.last() {
+                Some(segment) => segment,
+                None => {
+                    return (
+                        json!({ "type": "object", "additionalProperties": true }),
+                        false,
+                    );
+                }
+            };
 
-fn option_inner_type_name(ty: &Type) -> Option<String> {
-    let Type::Path(type_path) = ty else {
-        return None;
-    };
-
-    let segment = type_path.path.segments.last()?;
-    if segment.ident != "Option" {
-        return None;
-    }
-
-    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
-        return None;
-    };
-
-    arguments.args.iter().find_map(|argument| match argument {
-        GenericArgument::Type(ty) => simple_type_name(ty),
-        _ => None,
-    })
-}
-
-fn vec_inner_type_name(ty: &Type) -> Option<String> {
-    let Type::Path(type_path) = ty else {
-        return None;
-    };
-
-    let segment = type_path.path.segments.last()?;
-    if segment.ident != "Vec" {
-        return None;
-    }
-
-    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
-        return None;
-    };
-
-    arguments.args.iter().find_map(|argument| match argument {
-        GenericArgument::Type(ty) => simple_type_name(ty),
-        _ => None,
-    })
-}
-
-fn is_option_type(ty: &Type) -> bool {
-    option_inner_type_name(ty).is_some()
-}
-
-fn serde_field_name(field: &syn::Field) -> Option<String> {
-    for attribute in &field.attrs {
-        if !attribute.path().is_ident("serde") {
-            continue;
-        }
-
-        let mut rename = None;
-        let _ = attribute.parse_nested_meta(|meta| {
-            if meta.path.is_ident("rename") {
-                let value = meta.value()?;
-                let lit: syn::LitStr = value.parse()?;
-                rename = Some(lit.value());
+            let ident = segment.ident.to_string();
+            if ident == "Option" {
+                if let PathArguments::AngleBracketed(args) = &segment.arguments
+                    && let Some(GenericArgument::Type(inner)) = args.args.first()
+                {
+                    let (inner_schema, _) = type_to_schema(inner);
+                    return (inner_schema, true);
+                }
             }
-            Ok(())
-        });
 
-        if rename.is_some() {
-            return rename;
-        }
-    }
-
-    None
-}
-
-fn serde_variant_name(variant: &syn::Variant) -> Option<String> {
-    for attribute in &variant.attrs {
-        if !attribute.path().is_ident("serde") {
-            continue;
-        }
-
-        let mut rename = None;
-        let _ = attribute.parse_nested_meta(|meta| {
-            if meta.path.is_ident("rename") {
-                let value = meta.value()?;
-                let lit: syn::LitStr = value.parse()?;
-                rename = Some(lit.value());
+            if ident == "Vec" {
+                if let PathArguments::AngleBracketed(args) = &segment.arguments
+                    && let Some(GenericArgument::Type(inner)) = args.args.first()
+                {
+                    let (inner_schema, _) = type_to_schema(inner);
+                    return (json!({ "type": "array", "items": inner_schema }), false);
+                }
             }
-            Ok(())
-        });
 
-        if rename.is_some() {
-            return rename;
-        }
-    }
-
-    None
-}
-
-fn has_serde_default(attributes: &[syn::Attribute]) -> bool {
-    for attribute in attributes {
-        if !attribute.path().is_ident("serde") {
-            continue;
-        }
-
-        let mut has_default = false;
-        let _ = attribute.parse_nested_meta(|meta| {
-            if meta.path.is_ident("default") {
-                has_default = true;
+            match ident.as_str() {
+                "String" => (json!({ "type": "string" }), false),
+                "bool" => (json!({ "type": "boolean" }), false),
+                "i64" | "i32" | "u64" | "u32" | "usize" => {
+                    (json!({ "type": "integer" }), false)
+                }
+                "Value" => (json!({ "type": "object", "additionalProperties": true }), false),
+                _ => (
+                    json!({ "$ref": format!("#/components/schemas/{}", ident) }),
+                    false,
+                ),
             }
-            Ok(())
-        });
-
-        if has_default {
-            return true;
         }
+        _ => (json!({ "type": "object", "additionalProperties": true }), false),
     }
-
-    false
 }
 
-fn json_response_spec_from_syn_type(ty: &Type) -> Option<ResponseSpec> {
-    let Type::Path(TypePath { path, .. }) = ty else {
+fn extract_inner_type_name(ty: &Type, wrapper: &str) -> Option<String> {
+    let Type::Path(path) = ty else {
         return None;
     };
 
-    let segment = path.segments.last()?;
-    if segment.ident != "JsonResponse" {
+    let last = path.path.segments.last()?;
+    if last.ident != wrapper {
         return None;
     }
 
-    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+    let PathArguments::AngleBracketed(args) = &last.arguments else {
         return None;
     };
 
-    let mut status = None;
-    let mut body_type = None;
-
-    for argument in &arguments.args {
-        match argument {
-            GenericArgument::Const(Expr::Lit(ExprLit { lit: Lit::Int(lit), .. })) => {
-                status = Some(lit.base10_digits().to_owned());
-            }
-            GenericArgument::Type(ty) => {
-                body_type = simple_type_name(ty);
-            }
-            _ => {}
-        }
-    }
-
-    Some(ResponseSpec {
-        status: status?,
-        body_type,
-    })
-}
-
-fn string_literal_expr(expr: &Expr) -> Option<String> {
-    let Expr::Lit(ExprLit { lit: Lit::Str(lit), .. }) = expr else {
+    let inner = args.args.first()?;
+    let GenericArgument::Type(inner_type) = inner else {
         return None;
     };
 
-    Some(lit.value())
+    type_name_from_type(inner_type)
 }
 
-fn json_content(schema: Value) -> BTreeMap<String, OpenApiMediaType> {
-    BTreeMap::from([(
-        "application/json".to_owned(),
-        OpenApiMediaType { schema },
-    )])
+fn type_name_from_type(ty: &Type) -> Option<String> {
+    let Type::Path(path) = ty else {
+        return None;
+    };
+    path.path.segments.last().map(|s| s.ident.to_string())
 }

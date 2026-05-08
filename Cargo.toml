@@ -3,8 +3,7 @@ name = "gridstack"
 authors = ["Dmustache <dvusakov@gmail.com>"]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.92.0"
-
+rust-version = "1.95.0"
 
 [dependencies]
 tokio = { version = "1.49.0", features = ["full"] }
@@ -16,8 +15,11 @@ http = "1.4.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.149", features = ["raw_value"] }
 syn = { version = "2.0.117", features = ["full", "parsing"] }
+chrono = { version = "0.4.42", features = ["serde"] }
+uuid = { version = "1.18.1", features = ["serde", "v4"] }
+utoipa = "5.4.0"
 
-diesel = { version = "2.3.5", features = ["postgres", "sqlite", "chrono", "serde_json", "uuid"] }
+diesel = { version = "2.3.5", features = ["postgres", "sqlite", "chrono", "serde_json", "uuid", "r2d2"] }
 diesel-async = { version = "0.7.4", features = ["postgres", "sqlite"] }
 bb8 = "0.9.1"
 deadpool = "0.12.3"
@@ -27,6 +29,7 @@ diesel_migrations = { version = "2.3.1", features = ["postgres"] }
 
 anyhow = "1.0.100"
 thiserror = "2.0.17"
+regex = "1.12.2"
 
 ruma = { version= "0.14.1", features = [
     "client-api",
@@ -39,3 +42,5 @@ config = "0.15.22"
 
 strum = { version = "0.28"}
 strum_macros = "0.28.0"
+response_derive = { path = "response_derive" }
+jsonwebtoken = "9.3.1"
