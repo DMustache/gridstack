@@ -4,30 +4,38 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use crate::{
+    infrastructure::session_id::SessionId, services::authorization::entities::AccountKind,
+};
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct RegisterUserQueryInfo {
-    pub kind: Option<String>,
+    #[serde(default)]
+    pub kind: AccountKind,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct AuthenticationDataInfo {
-    pub session: Option<String>,
+    pub session: Option<SessionId>,
     #[serde(rename = "type")]
-    pub auth_type: Option<String>,
+    pub authentication_type: Option<String>,
     #[serde(flatten)]
     pub data: BTreeMap<String, Value>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct RegisterUserInfo {
-    pub auth: Option<AuthenticationDataInfo>,
-    pub username: Option<String>,
-    pub password: Option<String>,
+    #[serde(rename = "auth")]
+    pub authentification: Option<AuthenticationDataInfo>,
     #[serde(rename = "device_id")]
     pub device_identifier: Option<String>,
-    pub inhibit_login: Option<bool>,
-    pub refresh_token: Option<bool>,
+    #[serde(default)]
+    pub inhibit_login: bool,
     pub initial_device_display_name: Option<String>,
+    pub password: Option<String>,
+    #[serde(default)]
+    pub refresh_token: bool,
+    pub username: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]

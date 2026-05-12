@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use crate::{
-    infrastructure::configuration::AuthenticationConfiguration,
+    infrastructure::{configuration::AuthenticationConfiguration, username::Username},
     services::{
+        authorization::entities::AccountKind,
         repositories::{SessionRepository, UserRepository},
         traits::IdGenerator,
     },
@@ -76,7 +77,7 @@ impl AuthorizationService {
         allow_registration: bool,
     ) -> Result<RegisterUserView, AuthorizationApplicationError> {
         let _ = (
-            &info.auth,
+            &info.authentification,
             &info.refresh_token,
             &info.initial_device_display_name,
         );
@@ -85,7 +86,7 @@ impl AuthorizationService {
             return Err(AuthorizationApplicationError::Forbidden);
         }
 
-        if query.kind.as_deref().unwrap_or("user") == "guest" {
+        if query.kind.eq(&AccountKind::Guest) {
             return Err(AuthorizationApplicationError::Forbidden);
         }
 
@@ -114,7 +115,7 @@ impl AuthorizationService {
             })
             .map_err(|error| AuthorizationApplicationError::Internal(error.to_string()))?;
 
-        if info.inhibit_login.unwrap_or(false) {
+        if info.inhibit_login {
             return Ok(RegisterUserView {
                 user_identifier: user_identifier.into_inner(),
                 access_token: None,
@@ -242,7 +243,9 @@ impl AuthorizationService {
                 .ok_or(AuthorizationApplicationError::InvalidUsername);
         }
 
-        UserId::parse(format!("@{}:{}", candidate, self.home_server_name))
+        let username =
+            Username::try_new(candidate).ok_or(AuthorizationApplicationError::InvalidUsername)?;
+        UserId::parse(format!("@{}:{}", username.as_str(), self.home_server_name))
             .ok_or(AuthorizationApplicationError::InvalidUsername)
     }
 }

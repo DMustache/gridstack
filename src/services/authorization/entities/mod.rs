@@ -54,3 +54,10 @@ pub struct AccessSession {
     pub access_token: AccessToken,
     pub user_identifier: UserId,
 }
+
+#[derive(Debug, Default, Deserialize, Clone, PartialEq)]
+pub enum AccountKind {
+    #[default]
+    User,
+    Guest,
+}
