@@ -5,29 +5,21 @@ use std::{
 };
 
 use crate::{
-    infrastructure::{
-        chrono_clock::ChronoClock, configuration::ApplicationConfiguration,
-        id_generator::AtomicIdGenerator,
-    },
+    infrastructure::{configuration::ApplicationConfiguration, id_generator::AtomicIdGenerator},
     services::{
         authorization::{
             persistence::{AuthorizationPersistence, InMemorySessionRepository},
             service::AuthorizationService,
         },
         errors::set_rate_limit_retry_after_ms,
-        messaging_events::service::MessagingEventsService,
-        repositories::{RoomRepository, SessionRepository, UserRepository},
-        rooms::persistence::InMemoryRoomRepository,
-        rooms::service::RoomsService,
-        traits::{Clock, IdGenerator},
+        repositories::{SessionRepository, UserRepository},
+        traits::IdGenerator,
     },
 };
 
 #[derive(Clone)]
 pub struct ApplicationState {
     pub authorization_service: Arc<AuthorizationService>,
-    pub rooms_service: Arc<RoomsService>,
-    pub messaging_events_service: Arc<MessagingEventsService>,
     pub session_repository: Arc<dyn SessionRepository>,
     pub home_server_name: String,
     pub allow_registration: bool,
@@ -55,9 +47,7 @@ impl ApplicationState {
         );
         let session_repository: Arc<dyn SessionRepository> =
             Arc::new(InMemorySessionRepository::default());
-        let room_repository: Arc<dyn RoomRepository> = Arc::new(InMemoryRoomRepository::default());
         let id_generator: Arc<dyn IdGenerator> = Arc::new(AtomicIdGenerator::new());
-        let clock: Arc<dyn Clock> = Arc::new(ChronoClock);
 
         let home_server_name = format!(
             "{}:{}",
@@ -71,23 +61,10 @@ impl ApplicationState {
             home_server_name.clone(),
             application_configuration.authenification.clone(),
         ));
-        let rooms_service = Arc::new(RoomsService::new(
-            room_repository.clone(),
-            id_generator.clone(),
-            home_server_name.clone(),
-        ));
-        let messaging_events_service = Arc::new(MessagingEventsService::new(
-            room_repository,
-            id_generator,
-            clock,
-            home_server_name.clone(),
-        ));
         let rate_limiter = Arc::new(RateLimiterState::new(Duration::from_secs(60), 120));
 
         ApplicationState {
             authorization_service,
-            rooms_service,
-            messaging_events_service,
             session_repository,
             home_server_name,
             allow_registration: application_configuration.authenification.allow_registration,

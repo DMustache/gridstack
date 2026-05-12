@@ -4,9 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::{
-    infrastructure::session_id::SessionId, services::authorization::entities::AccountKind,
-};
+use crate::services::authorization::entities::AccountKind;
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct RegisterUserQueryInfo {
@@ -16,7 +14,7 @@ pub struct RegisterUserQueryInfo {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct AuthenticationDataInfo {
-    pub session: Option<SessionId>,
+    pub session: Option<String>,
     #[serde(rename = "type")]
     pub authentication_type: Option<String>,
     #[serde(flatten)]

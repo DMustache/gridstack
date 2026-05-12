@@ -1,12 +1,4 @@
-pub mod administration;
 pub mod authorization;
-pub mod devices_user_data;
-pub mod discovery;
-pub mod encryption;
-pub mod media;
-pub mod messaging_events;
-pub mod notifications;
-pub mod rooms;
 
 pub mod configuration;
 pub mod entities;
