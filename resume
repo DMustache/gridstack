@@ -1,11 +1,13 @@
 to check
     v1.3
-        /_matrix/client/v3/register +
+        POST /_matrix/client/v3/register +
+    v1.7
+        GET /_matrix/client/v3/login - untill we not support m.login.token
     v1.17
 
 missing
     v1.18
-        /_matrix/client/v3/register
+        POST /_matrix/client/v3/register
 
 RFC 8414 OAuth 2.0 Authorization Server Metadata https://datatracker.ietf.org/doc/html/rfc8414
 https://en.wikipedia.org/wiki/Augmented_Backus%E2%80%93Naur_form
@@ -14,7 +16,7 @@ PCI DSS 4.0 Requirement 8.3.6 for password complexity ^(?=.*[a-z])(?=.*[A-Z])(?=
 
 POST /_matrix/client/v3/register + only m.login.password and user account kind
 GET /_matrix/client/v1/auth_metadata +- On implementation to disable Legacy auth should be updated pass
-GET /_matrix/client/v3/login +- On 1.18 implementation Oauth2.0 auth should be updated, pass
+GET /_matrix/client/v3/login +- On 1.18 implementation Oauth2.0 auth should be updated and future m.login.token support, pass
 POST /_matrix/client/v3/login
 
 Pattenrs
