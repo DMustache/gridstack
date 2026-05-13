@@ -1,92 +1,142 @@
 [
-    {
-        "label": "Cargo: Update",
-        "command": "cargo update",
-        "use_new_terminal": true,
-        "allow_concurrent_runs": false
-    },
-    {
-        "label": "Cargo: Check",
-        "command": "cargo check",
-        "use_new_terminal": false,
-        "allow_concurrent_runs": false,
-        "hide": "on_success",
-        "save": "all"
-    },
-    {
-        "label": "Cargo: Format",
-        "command": "cargo fmt --all",
-        "use_new_terminal": false,
-        "allow_concurrent_runs": false,
-        "hide": "on_success",
-        "save": "all"
-    },
-    {
-        "label": "Cargo: Test",
-        "command": "cargo test",
-        "use_new_terminal": true,
-        "allow_concurrent_runs": false,
-        "save": "all"
-    },
-    {
-        "label": "Cargo: Build (Debug)",
-        "command": "cargo build",
-        "use_new_terminal": true,
-        "allow_concurrent_runs": false,
-        "save": "all"
-    },
-    {
-        "label": "Cargo: Build (Release)",
-        "command": "cargo build --release",
-        "use_new_terminal": true,
-        "allow_concurrent_runs": false,
-        "save": "all"
-    },
-    {
-        "label": "Cargo: Ultra Clippy (Strict)",
-        "command": "cargo clippy --all-targets --all-features -- -D warnings -D clippy::all -D clippy::pedantic -D clippy::nursery -D clippy::restriction",
-        "use_new_terminal": true,
-        "allow_concurrent_runs": false,
-        "save": "all"
-    },
-    {
-        "label": "Cargo: Export OpenAPI",
-        "command": "mkdir -p generated/openapi && cargo run --bin export_openapi -- generated/openapi/gridstack-openapi.json",
-        "use_new_terminal": true,
-        "allow_concurrent_runs": false,
-        "save": "all"
-    },
-    {
-        "label": "Redocly: Export OpenAPI to html",
-        "command": "mkdir -p generated/openapi && docker run --rm -v \"$PWD:/spec\" redocly/cli build-docs generated/openapi/gridstack-openapi.json -o generated/openapi/gridstack-redocly.html",
-        "use_new_terminal": true,
-        "allow_concurrent_runs": false
-    },
-    {
-        "label": "Docs: Rebuild OpenAPI + Redocly",
-        "command": "cargo run --bin export_openapi -- gridstack-openapi.json && docker run --rm -v \"$PWD:/spec\" redocly/cli build-docs generated/openapi/gridstack-openapi.json -o gridstack-redocly.html",
-        "use_new_terminal": true,
-        "allow_concurrent_runs": false,
-        "save": "all"
-    },
-    {
-        "label": "Matrix: Sync & Generate OpenAPI",
-        "command": "mkdir -p temp && cd temp && if [ ! -d \"matrix-spec\" ]; then git clone https://github.com/matrix-org/matrix-spec.git; fi && cd matrix-spec && git pull && python3 -m venv venv && source venv/bin/activate && pip install -r ./scripts/requirements.txt && python ./scripts/dump-openapi.py && mkdir -p ../../generated/openapi/ && cp ./scripts/openapi/api-docs.json ../../generated/openapi/matrix-openapi.json",
-        "use_new_terminal": true,
-        "allow_concurrent_runs": false,
-        "reveal": "always"
-    },
-    {
-        "label": "Matrix: Sync & Generate OpenAPI + Redocly",
-        "command": "mkdir -p temp && cd temp && if [ ! -d \"matrix-spec\" ]; then git clone https://github.com/matrix-org/matrix-spec.git; fi && cd matrix-spec && git pull && python3 -m venv venv && source venv/bin/activate && pip install -r ./scripts/requirements.txt && python ./scripts/dump-openapi.py && mkdir -p ../../generated/openapi/ && cp ./scripts/openapi/api-docs.json ../../generated/openapi/matrix-openapi.json && docker run --rm -v \"$PWD:/spec\" redocly/cli build-docs generated/openapi/matrix-openapi.json -o generated/openapi/matrix-redocly.html",
-        "use_new_terminal": true,
-        "allow_concurrent_runs": false,
-        "save": "all"
-    },
-    {
-        "label": "DB: Dump Schema Only",
-        "command": "mkdir -p generated/db && pg_dump --schema-only --no-owner --no-privileges -U admin -d gridstack -h localhost -p 5432 > generated/db/schema.sql",
-        "use_new_terminal": true,
-        "allow_concurrent_runs": false
-    }
+  {
+    "label": "Cargo: Update",
+    "command": "./scripts/tasks/cargo_update.sh",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "save": "all",
+    "reveal": "no_focus",
+    "hide": "on_success",
+    "show_command": false
+  },
+  {
+    "label": "Cargo: Check",
+    "command": "./scripts/tasks/cargo_check.sh",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "save": "all",
+    "reveal": "no_focus",
+    "hide": "on_success",
+    "show_command": false
+  },
+  {
+    "label": "Cargo: Format",
+    "command": "./scripts/tasks/cargo_fmt.sh",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "save": "all",
+    "reveal": "no_focus",
+    "hide": "on_success",
+    "show_command": false
+  },
+  {
+    "label": "Cargo: Test",
+    "command": "./scripts/tasks/cargo_test.sh",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "save": "all",
+    "reveal": "no_focus",
+    "hide": "on_success",
+    "show_command": false
+  },
+  {
+    "label": "Cargo: Build (Debug)",
+    "command": "./scripts/tasks/cargo_build_debug.sh",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "save": "all",
+    "reveal": "no_focus",
+    "hide": "on_success",
+    "show_command": false
+  },
+  {
+    "label": "Cargo: Build (Release)",
+    "command": "./scripts/tasks/cargo_build_release.sh",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "save": "all",
+    "reveal": "no_focus",
+    "hide": "on_success",
+    "show_command": false
+  },
+  {
+    "label": "Cargo: Ultra Clippy (Strict)",
+    "command": "./scripts/tasks/cargo_clippy_ultra.sh",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "save": "all",
+    "reveal": "no_focus",
+    "hide": "on_success",
+    "show_command": false
+  },
+  {
+    "label": "Cargo: Export OpenAPI",
+    "command": "./scripts/tasks/export_openapi.sh",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "save": "all",
+    "reveal": "no_focus",
+    "hide": "on_success",
+    "show_command": false
+  },
+  {
+    "label": "Redocly: Export OpenAPI to html",
+    "command": "./scripts/tasks/redocly_from_openapi.sh",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "save": "all",
+    "reveal": "no_focus",
+    "hide": "on_success",
+    "show_command": false
+  },
+  {
+    "label": "Docs: Rebuild OpenAPI + Redocly",
+    "command": "./scripts/tasks/rebuild_openapi_redocly.sh",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "save": "all",
+    "reveal": "no_focus",
+    "hide": "on_success",
+    "show_command": false
+  },
+  {
+    "label": "Matrix: Sync & Generate OpenAPI",
+    "command": "./scripts/tasks/sync_matrix_openapi_only.sh",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "save": "all",
+    "reveal": "no_focus",
+    "hide": "on_success",
+    "show_command": false
+  },
+  {
+    "label": "Matrix: Sync & Generate OpenAPI + Redocly",
+    "command": "./scripts/tasks/sync_matrix_openapi.sh",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "save": "all",
+    "reveal": "no_focus",
+    "hide": "on_success",
+    "show_command": false
+  },
+  {
+    "label": "Tuwunel: Sync Repository",
+    "command": "./scripts/tasks/sync_tuwunel.sh",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "save": "all",
+    "reveal": "no_focus",
+    "hide": "on_success",
+    "show_command": false
+  },
+  {
+    "label": "DB: Dump Schema Only",
+    "command": "./scripts/tasks/db_dump_schema.sh",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "save": "all",
+    "reveal": "no_focus",
+    "hide": "on_success",
+    "show_command": false
+  }
 ]
