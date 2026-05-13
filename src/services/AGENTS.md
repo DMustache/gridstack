@@ -137,7 +137,7 @@ Rules:
 For faster endpoint delivery with predictable quality:
 
 1. Start with local patterns:
-- copy route/handler/service/error/test structure from nearest endpoint in the same module
+- copy route/handler/service/error structure from nearest endpoint in the same module
 - do not create new folders/modules unless existing module already uses that split
 
 2. Implement in this order:
@@ -145,7 +145,6 @@ For faster endpoint delivery with predictable quality:
 - handler response enum mapping
 - service business flow
 - persistence changes (only if required)
-- tests (service first, then HTTP mapping)
 
 3. Keep tests separated by purpose:
 - service tests validate business decisions and typed errors

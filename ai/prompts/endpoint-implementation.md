@@ -19,17 +19,14 @@ Requirements:
 - reuse existing DTOs/errors/services where possible
 - avoid introducing new abstractions unless reused by at least 2 call sites
 - keep first pass minimal, then extend only for missing spec cases
-- prefer incremental compile/test cycles (`Cargo: Check` early, `Cargo: Test` after behavior is complete)
+- prefer incremental compile cycles (`Cargo: Check` is complete)
 
 Implementation expectations:
 1. Add route wiring for `{METHOD} {PATH}`.
 2. Implement request parsing and validation according to Matrix v1.18.
 3. Implement business flow for `{METHOD} {PATH}` (including any required auth/session/token handling per spec and existing architecture).
 4. Map errors to Matrix-compatible error responses.
-5. Add/adjust tests in two layers:
-- service tests for business rules
-- handler/router HTTP tests for status + errcode mapping only
-6. Keep OpenAPI/export compatibility:
+5. Keep OpenAPI/export compatibility:
 - avoid tuple error variants in mapped handler enums when `response_derive` requires unit-style variant matching
 - keep enum-to-matrix mapping explicit in handler response enums
 
