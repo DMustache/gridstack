@@ -4,7 +4,9 @@ use axum::{extract::FromRequestParts, http::request::Parts};
 use http::header::AUTHORIZATION;
 use thiserror::Error;
 
-use crate::services::{authorization::entities::AccessToken, state::ApplicationState};
+use crate::services::{
+    authorization::entities::AccessToken, entities::AccessSession, state::ApplicationState,
+};
 
 pub struct AuthorizationLayer;
 pub struct OptionalAuthorizationLayer;
@@ -29,12 +31,17 @@ impl FromRequestParts<ApplicationState> for AuthorizationLayer {
         let access_token =
             AccessToken::parse(raw_token).ok_or(AuthorizationLayerError::UnknownToken)?;
 
-        let user_id = state
+        let user_identifier = state
             .authorization_service
             .authenticate_access_token(&access_token)
             .map_err(|_| AuthorizationLayerError::UnknownToken)?;
 
-        parts.extensions.insert(user_id);
+        let access_session = AccessSession {
+            access_token,
+            user_identifier,
+        };
+
+        parts.extensions.insert(access_session);
 
         Ok(Self)
     }

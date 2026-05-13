@@ -4,33 +4,31 @@ use axum::{
 };
 use response_derive::IntoResponseEnum;
 
-use crate::{
-    infrastructure::user_identifier::UserIdentifier,
-    services::{
-        authorization::{
-            errors::AuthorizationApplicationError,
-            handlers::{
-                check_username_available::{
-                    CheckUsernameAvailableInfo, CheckUsernameAvailableView,
-                },
-                get_auth_metadata::GetAuthMetadataView,
-                get_login_flows::GetLoginFlowsView,
-                login_user::{LoginUserInfo, LoginUserView},
-                register_user::{
-                    RegisterUserInfo, RegisterUserQueryInfo, RegisterUserView, UiaaResponseView,
-                },
-                who_am_i::WhoAmIView,
+use crate::services::{
+    authorization::{
+        errors::AuthorizationApplicationError,
+        handlers::{
+            check_username_available::{CheckUsernameAvailableInfo, CheckUsernameAvailableView},
+            get_auth_metadata::GetAuthMetadataView,
+            get_login_flows::GetLoginFlowsView,
+            login_user::{LoginUserInfo, LoginUserView},
+            logout_user::LogoutUserView,
+            register_user::{
+                RegisterUserInfo, RegisterUserQueryInfo, RegisterUserView, UiaaResponseView,
             },
+            who_am_i::WhoAmIView,
         },
-        shared::MatrixErrorResponse,
-        state::ApplicationState,
     },
+    entities::AccessSession,
+    shared::MatrixErrorResponse,
+    state::ApplicationState,
 };
 
 pub mod check_username_available;
 pub mod get_auth_metadata;
 pub mod get_login_flows;
 pub mod login_user;
+pub mod logout_user;
 pub mod register_user;
 pub mod who_am_i;
 
@@ -175,11 +173,30 @@ pub enum WhoAmIResponse {
 
 pub async fn who_am_i(
     State(application_state): State<ApplicationState>,
-    Extension(user_identifier): Extension<UserIdentifier>,
+    Extension(access_session): Extension<AccessSession>,
 ) -> WhoAmIResponse {
     WhoAmIResponse::from_result(
         application_state
             .authorization_service
-            .who_am_i_from_user_identifier(user_identifier),
+            .who_am_i_from_user_identifier(access_session.user_identifier),
+    )
+}
+
+#[derive(IntoResponseEnum)]
+pub enum LogoutUserResponse {
+    #[matrix(status = 200)]
+    Ok(Json<LogoutUserView>),
+    #[matrix(status = 401, error = [(matrix_error = "M_UNKNOWN_TOKEN", from = AuthorizationApplicationError::Unauthorized)])]
+    Unauthorized(Json<MatrixErrorResponse>),
+}
+
+pub async fn logout_user(
+    State(application_state): State<ApplicationState>,
+    Extension(access_session): Extension<AccessSession>,
+) -> LogoutUserResponse {
+    LogoutUserResponse::from_result(
+        application_state
+            .authorization_service
+            .logout_user(access_session.access_token),
     )
 }
