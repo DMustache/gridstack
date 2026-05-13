@@ -7,11 +7,12 @@ run_logged() {
 
   mkdir -p "$(dirname "$log_file")"
 
+  local exit_code=0
   if "$@" >"$log_file" 2>&1; then
     return 0
+  else
+    exit_code=$?
   fi
-
-  local exit_code=$?
   echo "Task failed (exit $exit_code). Log: $log_file" >&2
   if [ -f "$log_file" ]; then
     echo "----- BEGIN LOG -----" >&2
