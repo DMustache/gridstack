@@ -14,5 +14,6 @@ pub trait UserRepository: Send + Sync {
 pub trait SessionRepository: Send + Sync {
     fn create_session(&self, access_session: AccessSession) -> Result<(), DomainError>;
     fn find_session_by_access_token(&self, access_token: &AccessToken) -> Option<AccessSession>;
-    fn delete_session_by_access_token(&self, access_token: &AccessToken) -> Result<(), DomainError>;
+    fn delete_session_by_access_token(&self, access_token: &AccessToken)
+    -> Result<(), DomainError>;
 }

@@ -104,7 +104,7 @@ impl AuthorizationService {
     pub fn register_user(
         &self,
         query: &RegisterUserQueryInfo,
-        info: RegisterUserInfo,
+        info: &RegisterUserInfo,
         allow_registration: bool,
     ) -> Result<RegisterUserView, AuthorizationApplicationError> {
         if !allow_registration {
@@ -180,7 +180,7 @@ impl AuthorizationService {
             .device_identifier
             .as_deref()
             .and_then(DeviceId::parse)
-            .unwrap_or_else(DeviceId::new);
+            .unwrap_or_default();
 
         self.session_repository
             .create_session(AccessSession {
@@ -249,7 +249,7 @@ impl AuthorizationService {
             .device_identifier
             .as_deref()
             .and_then(DeviceId::parse)
-            .unwrap_or_else(DeviceId::new);
+            .unwrap_or_default();
 
         self.session_repository
             .create_session(AccessSession {
@@ -278,17 +278,14 @@ impl AuthorizationService {
         &self,
         access_session: AccessSession,
     ) -> Result<WhoAmIView, AuthorizationApplicationError> {
-        if self
+        let user_account = self
             .user_repository
             .find_user_by_identifier(&access_session.user_identifier)
-            .is_none()
-        {
-            return Err(AuthorizationApplicationError::Unauthorized);
-        }
+            .ok_or(AuthorizationApplicationError::Unauthorized)?;
 
         Ok(WhoAmIView {
             user_id: access_session.user_identifier.into_inner(),
-            is_guest: false,
+            is_guest: user_account.is_guest,
             device_id: Some(access_session.device_id.into_inner()),
         })
     }
