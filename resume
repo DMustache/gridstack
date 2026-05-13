@@ -7,7 +7,7 @@ missing
     v1.18
         /_matrix/client/v3/register
 
-RFC 8414 OAuth 2.0 Authorization Server Metadata
+RFC 8414 OAuth 2.0 Authorization Server Metadata https://datatracker.ietf.org/doc/html/rfc8414
 https://en.wikipedia.org/wiki/Augmented_Backus%E2%80%93Naur_form
 
 PCI DSS 4.0 Requirement 8.3.6 for password complexity ^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{12,}$
