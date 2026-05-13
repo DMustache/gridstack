@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::services::traits::Id;
 
@@ -18,17 +19,19 @@ impl DeviceId {
         Some(Self(normalized.to_owned()))
     }
 
-    pub fn new() -> Self {
-        Self(uuid::Uuid::new_v4().to_string())
-    }
-
     pub fn into_inner(self) -> String {
         self.0
     }
 }
 
+impl Default for DeviceId {
+    fn default() -> Self {
+        Self(Uuid::new_v4().to_string())
+    }
+}
+
 impl Id for DeviceId {
     fn new_id() -> String {
-        DeviceId::new().into_inner()
+        Self::default().into_inner()
     }
 }

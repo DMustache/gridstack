@@ -1,4 +1,12 @@
 to check
+    v1.1
+        GET /_matrix/client/v3/account/whoami +
+        ---
+        device_id
+    v1.2
+        GET /_matrix/client/v3/account/whoami +
+        ---
+        guests
     v1.3
         POST /_matrix/client/v3/register +
         POST /_matrix/client/v3/login +

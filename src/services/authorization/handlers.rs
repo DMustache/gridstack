@@ -119,7 +119,7 @@ pub async fn register_user(
 ) -> RegisterUserResponse {
     match application_state.authorization_service.register_user(
         &query_info,
-        register_user_info,
+        &register_user_info,
         application_state.allow_registration,
     ) {
         Ok(response) => RegisterUserResponse::Ok(Json(response)),

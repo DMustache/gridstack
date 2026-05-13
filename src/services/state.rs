@@ -95,7 +95,10 @@ impl RateLimiterState {
     }
 
     #[allow(clippy::arithmetic_side_effects)]
-    #[allow(clippy::significant_drop_tightening, reason = "drop is handled internally")]
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "drop is handled internally"
+    )]
     pub fn allow_request(&self, key: &str, now: Instant) -> anyhow::Result<bool> {
         let mut buckets_guard = self
             .buckets
