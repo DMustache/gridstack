@@ -1,14 +1,10 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use std::{
-    env, fs,
-    path::PathBuf,
-};
+use std::{env, fs, path::PathBuf};
 use syn::{
     AngleBracketedGenericArguments, Data, DeriveInput, Expr, ExprAssign, ExprLit, ExprPath, Fields,
     GenericArgument, Lit, Path, PathArguments, Type, TypePath, parse_macro_input,
-    punctuated::Punctuated,
-    spanned::Spanned, token::Comma,
+    punctuated::Punctuated, spanned::Spanned, token::Comma,
 };
 
 #[derive(Clone)]

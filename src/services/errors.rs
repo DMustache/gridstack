@@ -4,8 +4,8 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use once_cell::sync::OnceCell;
 use response_derive::IntoResponseEnum;
+use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
 use crate::services::{
@@ -13,7 +13,7 @@ use crate::services::{
     shared::{MatrixErrorResponse, MatrixRateLimitErrorResponse},
 };
 
-static RATE_LIMIT_RETRY_AFTER_MS: OnceCell<u64> = OnceCell::new();
+static RATE_LIMIT_RETRY_AFTER_MS: AtomicU64 = AtomicU64::new(2000);
 
 #[derive(Debug, Error)]
 pub enum DomainError {
@@ -59,51 +59,48 @@ impl From<DomainError> for ApplicationError {
 }
 
 impl ApplicationError {
-    pub fn invalid_input(message: impl Into<String>) -> Self {
+    pub fn invalid_input<T: Into<String>>(message: T) -> Self {
         Self::InvalidInput(message.into())
     }
 }
 
 pub fn set_rate_limit_retry_after_ms(value: u64) {
-    let _ = RATE_LIMIT_RETRY_AFTER_MS.set(value);
+    RATE_LIMIT_RETRY_AFTER_MS.store(value, Ordering::Relaxed);
 }
 
 fn configured_rate_limit_retry_after_ms() -> u64 {
-    RATE_LIMIT_RETRY_AFTER_MS.get().copied().unwrap_or(2000)
+    RATE_LIMIT_RETRY_AFTER_MS.load(Ordering::Relaxed)
 }
 
 impl IntoResponse for ApplicationError {
     fn into_response(self) -> Response {
-        let status_code = match &self {
-            ApplicationError::Conflict => StatusCode::CONFLICT,
-            ApplicationError::NotFound => StatusCode::NOT_FOUND,
-            ApplicationError::AuthenticationRequired => StatusCode::UNAUTHORIZED,
-            ApplicationError::AuthenticationFailed => StatusCode::UNAUTHORIZED,
-            ApplicationError::Forbidden => StatusCode::FORBIDDEN,
-            ApplicationError::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
-            ApplicationError::InvalidInput(_) => StatusCode::BAD_REQUEST,
-            ApplicationError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        let status_code = match self {
+            Self::Conflict => StatusCode::CONFLICT,
+            Self::NotFound => StatusCode::NOT_FOUND,
+            Self::AuthenticationRequired | Self::AuthenticationFailed => StatusCode::UNAUTHORIZED,
+            Self::Forbidden => StatusCode::FORBIDDEN,
+            Self::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
+            Self::InvalidInput(_) => StatusCode::BAD_REQUEST,
+            Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
 
         let (errcode, error) = match self {
-            ApplicationError::Conflict => (
+            Self::Conflict => (
                 "M_USER_IN_USE".to_owned(),
                 "Resource already exists".to_owned(),
             ),
-            ApplicationError::NotFound => {
-                ("M_NOT_FOUND".to_owned(), "Resource not found".to_owned())
-            }
-            ApplicationError::AuthenticationRequired => (
+            Self::NotFound => ("M_NOT_FOUND".to_owned(), "Resource not found".to_owned()),
+            Self::AuthenticationRequired => (
                 "M_MISSING_TOKEN".to_owned(),
                 "Authentication required".to_owned(),
             ),
-            ApplicationError::AuthenticationFailed => {
+            Self::AuthenticationFailed => {
                 ("M_FORBIDDEN".to_owned(), "Invalid credentials".to_owned())
             }
-            ApplicationError::Forbidden => ("M_FORBIDDEN".to_owned(), "Forbidden".to_owned()),
-            ApplicationError::NotImplemented(message) => ("M_UNRECOGNIZED".to_owned(), message),
-            ApplicationError::InvalidInput(message) => ("M_BAD_JSON".to_owned(), message),
-            ApplicationError::Internal(error) => ("M_UNKNOWN".to_owned(), error.to_string()),
+            Self::Forbidden => ("M_FORBIDDEN".to_owned(), "Forbidden".to_owned()),
+            Self::NotImplemented(message) => ("M_UNRECOGNIZED".to_owned(), message),
+            Self::InvalidInput(message) => ("M_BAD_JSON".to_owned(), message),
+            Self::Internal(error) => ("M_UNKNOWN".to_owned(), error.to_string()),
         };
 
         (status_code, Json(MatrixErrorResponse { errcode, error })).into_response()
@@ -136,7 +133,7 @@ pub enum RateLimitLayerResponse {
 impl IntoResponse for AuthorizationLayerError {
     fn into_response(self) -> Response {
         match self {
-            AuthorizationLayerError::MissingToken => (
+            Self::MissingToken => (
                 StatusCode::UNAUTHORIZED,
                 Json(MatrixErrorResponse {
                     errcode: "M_MISSING_TOKEN".to_owned(),
@@ -144,7 +141,7 @@ impl IntoResponse for AuthorizationLayerError {
                 }),
             )
                 .into_response(),
-            AuthorizationLayerError::UnknownToken => (
+            Self::UnknownToken => (
                 StatusCode::UNAUTHORIZED,
                 Json(MatrixErrorResponse {
                     errcode: "M_UNKNOWN_TOKEN".to_owned(),
@@ -159,7 +156,7 @@ impl IntoResponse for AuthorizationLayerError {
 impl IntoResponse for RateLimitLayerError {
     fn into_response(self) -> Response {
         match self {
-            RateLimitLayerError::RateLimited => (
+            Self::RateLimited => (
                 StatusCode::TOO_MANY_REQUESTS,
                 Json(MatrixRateLimitErrorResponse {
                     base: MatrixErrorResponse {
@@ -170,7 +167,7 @@ impl IntoResponse for RateLimitLayerError {
                 }),
             )
                 .into_response(),
-            RateLimitLayerError::Internal => (
+            Self::Internal => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(MatrixErrorResponse {
                     errcode: "M_UNKNOWN".to_owned(),

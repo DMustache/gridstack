@@ -32,26 +32,38 @@ pub enum AuthorizationApplicationError {
     Unauthorized,
     #[error("forbidden")]
     Forbidden,
+    #[error("guest registration is disabled")]
+    GuestRegistrationDisabled,
+    #[error("Registration is disabled")]
+    RegistrationDisabled,
+    #[error("Invalid parameters")]
+    RegisterInvalidParameters,
     #[error("unrecognized")]
     Unrecognized,
     #[error("Legacy authentication is in use on this homeserver.")]
     OAuthAuthorizationUnsupported,
     #[error("OAuth 2.0 authentication is in use on this homeserver.")]
     LegacyAuthorizationUnsupported,
-    #[error("unexpected error: {0}")]
-    Internal(String),
+    #[error("unexpected error")]
+    Internal,
 }
 
 impl From<AuthorizationDomainError> for AuthorizationApplicationError {
     fn from(value: AuthorizationDomainError) -> Self {
         match value {
             AuthorizationDomainError::UserAlreadyExists => Self::UserInUse,
-            AuthorizationDomainError::UserNotFound => Self::InvalidCredentials,
-            AuthorizationDomainError::InvalidCredentials => Self::InvalidCredentials,
+            AuthorizationDomainError::InvalidCredentials
+            | AuthorizationDomainError::UserNotFound => Self::InvalidCredentials,
             AuthorizationDomainError::InvalidUsername => Self::InvalidUsername,
             AuthorizationDomainError::InvalidToken => Self::Unauthorized,
             AuthorizationDomainError::RegistrationDisabled => Self::Forbidden,
-            AuthorizationDomainError::Repository(message) => Self::Internal(message),
+            AuthorizationDomainError::Repository(_) => Self::Internal,
         }
+    }
+}
+
+impl From<strum::ParseError> for AuthorizationApplicationError {
+    fn from(_: strum::ParseError) -> Self {
+        Self::RegisterInvalidParameters
     }
 }
