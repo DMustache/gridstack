@@ -93,22 +93,6 @@ impl UserRepository for AuthorizationPersistence {
         .get_result::<bool>(&mut connection)
         .unwrap_or(false)
     }
-
-    fn is_user_password_matches(&self, user_identifier: &UserIdentifier, password: &str) -> bool {
-        use schema::users;
-
-        let Ok(mut connection) = self.connection_pool.get() else {
-            return false;
-        };
-
-        select(exists(
-            users::table
-                .filter(users::columns::user_id.eq(user_identifier.as_str()))
-                .filter(users::columns::password_hash.eq(password)),
-        ))
-        .get_result::<bool>(&mut connection)
-        .unwrap_or(false)
-    }
 }
 
 #[derive(Default)]
@@ -133,7 +117,10 @@ impl SessionRepository for InMemorySessionRepository {
         sessions_by_token.get(access_token.as_str()).cloned()
     }
 
-    fn delete_session_by_access_token(&self, access_token: AccessToken) -> Result<(), DomainError> {
+    fn delete_session_by_access_token(
+        &self,
+        access_token: &AccessToken,
+    ) -> Result<(), DomainError> {
         self.sessions_by_token
             .write()
             .map_err(|_| DomainError::InvalidRequest("session storage lock failure".to_owned()))?

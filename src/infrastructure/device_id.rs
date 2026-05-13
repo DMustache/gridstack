@@ -1,22 +1,34 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::services::traits::Id;
 
-#[derive(Clone, Debug, Deserialize)]
-pub struct DeviceId;
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct DeviceId(String);
 
 impl DeviceId {
-    pub fn parse(value: impl Into<String>) -> Option<String> {
+    pub fn parse(value: impl Into<String>) -> Option<Self> {
         let value = value.into();
-        if value.trim().is_empty() {
+        let normalized = value.trim();
+        if normalized.is_empty() || normalized.len() > 255 {
             return None;
         }
-        Some(value)
+        if normalized.starts_with("ed25519:") {
+            return None;
+        }
+        Some(Self(normalized.to_owned()))
+    }
+
+    pub fn new() -> Self {
+        Self(uuid::Uuid::new_v4().to_string())
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
     }
 }
 
 impl Id for DeviceId {
     fn new_id() -> String {
-        uuid::Uuid::new_v4().to_string()
+        DeviceId::new().into_inner()
     }
 }
