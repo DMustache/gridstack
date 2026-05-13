@@ -4,23 +4,27 @@ use axum::{
 };
 use response_derive::IntoResponseEnum;
 
-use crate::services::{
-    authorization::{
-        entities::UserId,
-        errors::AuthorizationApplicationError,
-        handlers::{
-            check_username_available::{CheckUsernameAvailableInfo, CheckUsernameAvailableView},
-            get_auth_metadata::GetAuthMetadataView,
-            get_login_flows::GetLoginFlowsView,
-            login_user::{LoginUserInfo, LoginUserView},
-            register_user::{
-                RegisterUserInfo, RegisterUserQueryInfo, RegisterUserView, UiaaResponseView,
+use crate::{
+    infrastructure::user_identifier::UserIdentifier,
+    services::{
+        authorization::{
+            errors::AuthorizationApplicationError,
+            handlers::{
+                check_username_available::{
+                    CheckUsernameAvailableInfo, CheckUsernameAvailableView,
+                },
+                get_auth_metadata::GetAuthMetadataView,
+                get_login_flows::GetLoginFlowsView,
+                login_user::{LoginUserInfo, LoginUserView},
+                register_user::{
+                    RegisterUserInfo, RegisterUserQueryInfo, RegisterUserView, UiaaResponseView,
+                },
+                who_am_i::WhoAmIView,
             },
-            who_am_i::WhoAmIView,
         },
+        shared::MatrixErrorResponse,
+        state::ApplicationState,
     },
-    shared::MatrixErrorResponse,
-    state::ApplicationState,
 };
 
 pub mod check_username_available;
@@ -136,8 +140,16 @@ pub async fn register_user(
 pub enum LoginUserResponse {
     #[matrix(status = 200)]
     Ok(Json<LoginUserView>),
-    #[matrix(status = 404, error = [(matrix_error = "M_UNRECOGNIZED", from = AuthorizationApplicationError::Unrecognized)])]
+    #[matrix(status = 400, error = [(matrix_error = "M_UNKNOWN", from = AuthorizationApplicationError::Unrecognized)])]
     Unrecognized(Json<MatrixErrorResponse>),
+    #[matrix(status = 403, error = [
+        (matrix_error = "M_FORBIDDEN", from = AuthorizationApplicationError::InvalidCredentials),
+        (matrix_error = "M_FORBIDDEN", from = AuthorizationApplicationError::InvalidUsername),
+        (matrix_error = "M_FORBIDDEN", from = AuthorizationApplicationError::Forbidden)
+    ])]
+    Forbidden(Json<MatrixErrorResponse>),
+    #[matrix(status = 500, error = [(matrix_error = "M_UNKNOWN", from = AuthorizationApplicationError::Internal)])]
+    Internal(Json<MatrixErrorResponse>),
 }
 
 pub async fn login_user(
@@ -163,11 +175,11 @@ pub enum WhoAmIResponse {
 
 pub async fn who_am_i(
     State(application_state): State<ApplicationState>,
-    Extension(user_id): Extension<UserId>,
+    Extension(user_identifier): Extension<UserIdentifier>,
 ) -> WhoAmIResponse {
     WhoAmIResponse::from_result(
         application_state
             .authorization_service
-            .who_am_i_from_user_id(user_id),
+            .who_am_i_from_user_identifier(user_identifier),
     )
 }

@@ -2,28 +2,9 @@ use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString};
 
+use crate::infrastructure::user_identifier::UserIdentifier;
+
 use crate::services::traits::Clock;
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct UserId(String);
-
-impl UserId {
-    pub fn parse(value: impl Into<String>) -> Option<Self> {
-        let value = value.into();
-        if value.trim().is_empty() {
-            return None;
-        }
-        Some(Self(value))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    pub fn into_inner(self) -> String {
-        self.0
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AccessToken(String);
@@ -48,7 +29,7 @@ impl AccessToken {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UserAccount {
-    pub user_identifier: UserId,
+    pub user_identifier: UserIdentifier,
     pub password_hash: String,
     pub display_name: String,
     pub is_guest: bool,
@@ -57,7 +38,7 @@ pub struct UserAccount {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AccessSession {
     pub access_token: AccessToken,
-    pub user_identifier: UserId,
+    pub user_identifier: UserIdentifier,
 }
 
 #[derive(Debug, Default, Deserialize, Clone, PartialEq, Eq)]
@@ -72,6 +53,28 @@ pub enum AccountKind {
 pub enum UiaaFlowType {
     #[strum(serialize = "m.login.password")]
     Password,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub enum LoginType {
+    #[serde(rename = "m.login.password")]
+    Password,
+    #[serde(rename = "m.login.token")]
+    Token,
+    #[serde(other)]
+    Unsupported,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub enum UserIdentifierType {
+    #[serde(rename = "m.id.user")]
+    MatrixUser,
+    #[serde(rename = "m.id.thirdparty")]
+    ThirdParty,
+    #[serde(rename = "m.id.phone")]
+    PhoneNumber,
+    #[serde(other)]
+    Unsupported,
 }
 
 pub struct ExpirationClock {

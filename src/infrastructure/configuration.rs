@@ -30,6 +30,16 @@ pub struct AuthenticationConfiguration {
     pub json_web_token_secret: String,
 }
 
+impl AuthenticationConfiguration {
+    pub const fn refresh_token_expiry_as_milliseconds(&self) -> u64 {
+        self.refresh_token_expiry_seconds * 1000
+    }
+
+    pub const fn access_token_expiry_as_milliseconds(&self) -> u64 {
+        self.access_token_expiry_seconds * 1000
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct RateLimitConfiguration {
     pub retry_after_ms: u64,
