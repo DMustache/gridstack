@@ -6,7 +6,3 @@ CREATE TABLE users (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-
-ALTER TABLE devices
-    ADD CONSTRAINT devices_user_id_fkey
-    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE;
