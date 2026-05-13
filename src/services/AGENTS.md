@@ -131,3 +131,27 @@ Rules:
 - Do not copy Tuwunel code directly.
 - Do not let Tuwunel override the official Matrix specification.
 - If OpenAPI, spec, and Tuwunel disagree, report the conflict and prefer the official specification unless the user explicitly chooses implementation compatibility.
+
+## Fast Endpoint Path
+
+For faster endpoint delivery with predictable quality:
+
+1. Start with local patterns:
+- copy route/handler/service/error/test structure from nearest endpoint in the same module
+- do not create new folders/modules unless existing module already uses that split
+
+2. Implement in this order:
+- request/response DTO updates
+- handler response enum mapping
+- service business flow
+- persistence changes (only if required)
+- tests (service first, then HTTP mapping)
+
+3. Keep tests separated by purpose:
+- service tests validate business decisions and typed errors
+- handler/router tests validate status codes and Matrix `errcode` mapping
+
+4. Minimize churn:
+- avoid broad refactors while adding one endpoint
+- avoid changing generated artifacts directly
+- avoid changing task scripts unless they are objectively broken

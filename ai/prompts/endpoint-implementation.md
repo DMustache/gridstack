@@ -15,18 +15,29 @@ Requirements:
 - persistence: DB access only
 5. Do not edit `generated/` manually.
 6. Before running validation commands, read `.zed/tasks.json` and use task labels only; evaluate outputs using `.zed/task-contracts.md`.
+7. Optimize for delivery speed with correctness:
+- reuse existing DTOs/errors/services where possible
+- avoid introducing new abstractions unless reused by at least 2 call sites
+- keep first pass minimal, then extend only for missing spec cases
+- prefer incremental compile/test cycles (`Cargo: Check` early, `Cargo: Test` after behavior is complete)
 
 Implementation expectations:
 1. Add route wiring for `{METHOD} {PATH}`.
 2. Implement request parsing and validation according to Matrix v1.18.
-3. Implement registration business flow (including any required auth/session/token handling per spec and existing project architecture).
+3. Implement business flow for `{METHOD} {PATH}` (including any required auth/session/token handling per spec and existing architecture).
 4. Map errors to Matrix-compatible error responses.
-5. Add/adjust tests for success and important failure paths.
+5. Add/adjust tests in two layers:
+- service tests for business rules
+- handler/router HTTP tests for status + errcode mapping only
+6. Keep OpenAPI/export compatibility:
+- avoid tuple error variants in mapped handler enums when `response_derive` requires unit-style variant matching
+- keep enum-to-matrix mapping explicit in handler response enums
 
 Deliverables:
 1. Code changes in appropriate `{SERVICE_MODULE}` modules.
 2. Brief notes on any spec ambiguity and which source resolved it.
-3. Final report in this format:
+3. Explicitly list whether implementation is exact match vs intentional subset of Matrix/OpenAPI behavior.
+4. Final report in this format:
 
 ## Summary
 - ...
