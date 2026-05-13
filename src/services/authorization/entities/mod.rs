@@ -2,7 +2,7 @@ use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString};
 
-use crate::infrastructure::user_identifier::UserIdentifier;
+use crate::infrastructure::{device_id::DeviceId, user_identifier::UserIdentifier};
 
 use crate::services::traits::Clock;
 
@@ -39,6 +39,7 @@ pub struct UserAccount {
 pub struct AccessSession {
     pub access_token: AccessToken,
     pub user_identifier: UserIdentifier,
+    pub device_id: DeviceId,
 }
 
 #[derive(Debug, Default, Deserialize, Clone, PartialEq, Eq)]

@@ -31,14 +31,13 @@ impl FromRequestParts<ApplicationState> for AuthorizationLayer {
         let access_token =
             AccessToken::parse(raw_token).ok_or(AuthorizationLayerError::UnknownToken)?;
 
-        let user_identifier = state
+        let access_session = state
             .authorization_service
             .authenticate_access_token(&access_token)
             .map_err(|_| AuthorizationLayerError::UnknownToken)?;
-
         let access_session = AccessSession {
             access_token,
-            user_identifier,
+            ..access_session
         };
 
         parts.extensions.insert(access_session);
@@ -61,6 +60,7 @@ impl FromRequestParts<ApplicationState> for OptionalAuthorizationLayer {
                     .authorization_service
                     .authenticate_access_token(&access_token)
                     .ok()
+                    .map(|access_session| access_session.user_identifier)
             });
 
         parts.extensions.insert(user_id);

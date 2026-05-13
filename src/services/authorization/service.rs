@@ -5,8 +5,8 @@ use uuid::Uuid;
 
 use crate::{
     infrastructure::{
-        configuration::AuthenticationConfiguration, password_hash::PasswordHash,
-        user_identifier::UserIdentifier, username::Username,
+        configuration::AuthenticationConfiguration, device_id::DeviceId,
+        password_hash::PasswordHash, user_identifier::UserIdentifier, username::Username,
     },
     services::{
         authorization::entities::{AccountKind, ExpirationClock, UiaaFlowType},
@@ -176,21 +176,24 @@ impl AuthorizationService {
         let access_token = AccessToken::parse(self.generate_access_token()?)
             .ok_or(AuthorizationApplicationError::Internal)?;
 
+        let device_id = info
+            .device_identifier
+            .as_deref()
+            .and_then(DeviceId::parse)
+            .unwrap_or_else(DeviceId::new);
+
         self.session_repository
             .create_session(AccessSession {
                 access_token: access_token.clone(),
                 user_identifier: user_identifier.clone(),
+                device_id: device_id.clone(),
             })
             .map_err(|_| AuthorizationApplicationError::Internal)?;
 
         Ok(RegisterUserView {
             user_identifier: user_identifier.into_inner(),
             access_token: Some(access_token.into_inner()),
-            device_identifier: Some(
-                info.device_identifier
-                    .filter(|value| !value.trim().is_empty())
-                    .unwrap_or_else(Self::new_generated_device_identifier),
-            ),
+            device_identifier: Some(device_id.into_inner()),
             home_server_name: Some(self.home_server_name.clone()),
             expires_in_milliseconds: Some(
                 self.configuration
@@ -239,20 +242,20 @@ impl AuthorizationService {
             return Err(AuthorizationApplicationError::InvalidCredentials);
         }
 
-        if !self
-            .user_repository
-            .is_user_password_matches(&user_identifier, &request.password)
-        {
-            return Err(AuthorizationApplicationError::InvalidCredentials);
-        }
-
         let access_token = AccessToken::parse(self.generate_access_token()?)
             .ok_or(AuthorizationApplicationError::Internal)?;
+
+        let device_id = request
+            .device_identifier
+            .as_deref()
+            .and_then(DeviceId::parse)
+            .unwrap_or_else(DeviceId::new);
 
         self.session_repository
             .create_session(AccessSession {
                 access_token: access_token.clone(),
                 user_identifier: user_identifier.clone(),
+                device_id: device_id.clone(),
             })
             .map_err(|_| AuthorizationApplicationError::Internal)?;
 
@@ -263,9 +266,7 @@ impl AuthorizationService {
 
         Ok(LoginUserView {
             access_token: access_token.into_inner(),
-            device_id: request
-                .device_identifier
-                .unwrap_or_else(|| "DEVICEGRIDSTACK".to_owned()),
+            device_id: device_id.into_inner(),
             expires_in_milliseconds: Some(self.configuration.access_token_expiry_as_milliseconds()),
             home_server: Some(self.home_server_name.clone()),
             refresh_token,
@@ -273,28 +274,28 @@ impl AuthorizationService {
         })
     }
 
-    pub fn who_am_i_from_user_identifier(
+    pub fn who_am_i_from_session(
         &self,
-        user_identifier: UserIdentifier,
+        access_session: AccessSession,
     ) -> Result<WhoAmIView, AuthorizationApplicationError> {
         if self
             .user_repository
-            .find_user_by_identifier(&user_identifier)
+            .find_user_by_identifier(&access_session.user_identifier)
             .is_none()
         {
             return Err(AuthorizationApplicationError::Unauthorized);
         }
 
         Ok(WhoAmIView {
-            user_id: user_identifier.into_inner(),
+            user_id: access_session.user_identifier.into_inner(),
             is_guest: false,
-            device_id: None,
+            device_id: Some(access_session.device_id.into_inner()),
         })
     }
 
     pub fn logout_user(
         &self,
-        access_token: AccessToken,
+        access_token: &AccessToken,
     ) -> Result<LogoutUserView, AuthorizationApplicationError> {
         self.session_repository
             .delete_session_by_access_token(access_token)
@@ -306,7 +307,7 @@ impl AuthorizationService {
     pub fn authenticate_access_token(
         &self,
         access_token: &AccessToken,
-    ) -> Result<UserIdentifier, AuthorizationApplicationError> {
+    ) -> Result<AccessSession, AuthorizationApplicationError> {
         if !self.json_web_token_adapter.is_token_valid(
             access_token.as_str(),
             &self.configuration.json_web_token_secret,
@@ -319,7 +320,7 @@ impl AuthorizationService {
             .find_session_by_access_token(access_token)
             .ok_or(AuthorizationApplicationError::Unauthorized)?;
 
-        Ok(session.user_identifier)
+        Ok(session)
     }
 
     fn try_parse_user_id(
@@ -357,10 +358,6 @@ impl AuthorizationService {
             .take(12)
             .collect::<String>();
         format!("{prefix}_{suffix}")
-    }
-
-    fn new_generated_device_identifier() -> String {
-        format!("DEVICE{}", Uuid::new_v4())
     }
 
     fn generate_access_token(&self) -> Result<String, AuthorizationApplicationError> {

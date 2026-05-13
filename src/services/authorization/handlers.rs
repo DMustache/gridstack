@@ -178,7 +178,7 @@ pub async fn who_am_i(
     WhoAmIResponse::from_result(
         application_state
             .authorization_service
-            .who_am_i_from_user_identifier(access_session.user_identifier),
+            .who_am_i_from_session(access_session),
     )
 }
 
@@ -197,6 +197,6 @@ pub async fn logout_user(
     LogoutUserResponse::from_result(
         application_state
             .authorization_service
-            .logout_user(access_session.access_token),
+            .logout_user(&access_session.access_token),
     )
 }

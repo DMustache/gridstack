@@ -25,6 +25,7 @@ POST /_matrix/client/v3/register + only m.login.password and user account kind
 GET /_matrix/client/v1/auth_metadata +- On implementation to disable Legacy auth should be updated pass
 GET /_matrix/client/v3/login +- On 1.18 implementation Oauth2.0 auth should be updated and future m.login.token support, pass
 POST /_matrix/client/v3/login +- well_known in View not provided untill implementation not ready. appservice not implemented, well_known not supported
+POST /_matrix/client/v3/logout +
 
 Pattenrs
 
