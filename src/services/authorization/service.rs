@@ -18,7 +18,7 @@ use super::{
     handlers::{
         check_username_available::CheckUsernameAvailableView,
         get_auth_metadata::GetAuthMetadataView,
-        get_login_flows::{GetLoginFlowsView, LoginFlowView},
+        get_login_flows::{GetLoginFlowsView, LoginFlow},
         login_user::{LoginUserInfo, LoginUserView},
         register_user::{AuthenticationFlowView, UiaaResponseView},
         register_user::{RegisterUserInfo, RegisterUserQueryInfo, RegisterUserView},
@@ -64,9 +64,9 @@ impl AuthorizationService {
         Ok(GetLoginFlowsView {
             flows: Self::registration_uiaa_flow_types()
                 .iter()
-                .map(|flow_type| LoginFlowView {
+                .map(|flow_type| LoginFlow {
                     type_field: flow_type.to_string(),
-                    get_login_token: Some(false),
+                    get_login_token: None,
                 })
                 .collect(),
         })
