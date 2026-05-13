@@ -1,10 +1,10 @@
-use std::time::Instant;
+use std::{convert::Infallible, time::Instant};
 
 use axum::{extract::FromRequestParts, http::request::Parts};
 use http::header::AUTHORIZATION;
 use thiserror::Error;
 
-use crate::services::state::ApplicationState;
+use crate::services::{authorization::entities::AccessToken, state::ApplicationState};
 
 pub struct AuthorizationLayer;
 pub struct OptionalAuthorizationLayer;
@@ -24,12 +24,14 @@ impl FromRequestParts<ApplicationState> for AuthorizationLayer {
         parts: &mut Parts,
         state: &ApplicationState,
     ) -> Result<Self, Self::Rejection> {
-        let token = Self::try_extract_access_token_from_parts(parts)
+        let raw_token = Self::try_extract_access_token_from_parts(parts)
             .ok_or(AuthorizationLayerError::MissingToken)?;
+        let access_token =
+            AccessToken::parse(raw_token).ok_or(AuthorizationLayerError::UnknownToken)?;
 
         let user_id = state
             .authorization_service
-            .authenticate_access_token(&token)
+            .authenticate_access_token(&access_token)
             .map_err(|_| AuthorizationLayerError::UnknownToken)?;
 
         parts.extensions.insert(user_id);
@@ -39,18 +41,20 @@ impl FromRequestParts<ApplicationState> for AuthorizationLayer {
 }
 
 impl FromRequestParts<ApplicationState> for OptionalAuthorizationLayer {
-    type Rejection = std::convert::Infallible;
+    type Rejection = Infallible;
 
     async fn from_request_parts(
         parts: &mut Parts,
         state: &ApplicationState,
     ) -> Result<Self, Self::Rejection> {
-        let user_id = AuthorizationLayer::try_extract_access_token_from_parts(parts).and_then(|token| {
-            state
-                .authorization_service
-                .authenticate_access_token(&token)
-                .ok()
-        });
+        let user_id = AuthorizationLayer::try_extract_access_token_from_parts(parts)
+            .and_then(AccessToken::parse)
+            .and_then(|access_token| {
+                state
+                    .authorization_service
+                    .authenticate_access_token(&access_token)
+                    .ok()
+            });
 
         parts.extensions.insert(user_id);
 

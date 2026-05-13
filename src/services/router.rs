@@ -4,7 +4,7 @@ use crate::services::{authorization, shared::MatrixErrorResponse, state::Applica
 
 pub fn build_router(application_state: ApplicationState) -> Router {
     Router::new()
-        .merge(authorization::routes::routes(application_state.clone()))
+        .merge(authorization::routes::routes(&application_state))
         .with_state(application_state.clone())
         .fallback(any(matrix_fallback))
         .with_state(application_state)

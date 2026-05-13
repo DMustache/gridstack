@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::NaiveDateTime;
 use diesel::{AsChangeset, Identifiable, Insertable, Queryable, Selectable};
 use uuid::Uuid;
 
@@ -15,8 +15,8 @@ pub(super) struct UserModel {
     pub account_id: Uuid,
     pub password_hash: Option<String>,
     pub is_guest: bool,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: NaiveDateTime,
+    pub updated_at: NaiveDateTime,
 }
 
 #[derive(Debug, Clone, Insertable)]
@@ -26,8 +26,8 @@ pub(super) struct CreateUserModel {
     pub account_id: Uuid,
     pub password_hash: Option<String>,
     pub is_guest: bool,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: NaiveDateTime,
+    pub updated_at: NaiveDateTime,
 }
 
 impl TryFrom<UserModel> for UserAccount {
@@ -38,6 +38,7 @@ impl TryFrom<UserModel> for UserAccount {
             user_identifier: UserId::parse(value.user_id).ok_or(())?,
             password_hash: value.password_hash.unwrap_or_default(),
             display_name: String::new(),
+            is_guest: value.is_guest,
         })
     }
 }

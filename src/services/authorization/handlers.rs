@@ -90,12 +90,24 @@ pub async fn check_username_available(
 pub enum RegisterUserResponse {
     #[matrix(status = 200)]
     Ok(Json<RegisterUserView>),
-    #[matrix(status = 400, error = [(matrix_error = "M_INVALID_USERNAME", from = AuthorizationApplicationError::InvalidUsername), (matrix_error = "M_USER_IN_USE", from = AuthorizationApplicationError::UserInUse), (matrix_error = "M_EXCLUSIVE", from = AuthorizationApplicationError::Exclusive)])]
+    #[matrix(status = 400, error = [
+        (matrix_error = "M_INVALID_USERNAME", from = AuthorizationApplicationError::InvalidUsername),
+        (matrix_error = "M_USER_IN_USE", from = AuthorizationApplicationError::UserInUse),
+        (matrix_error = "M_EXCLUSIVE", from = AuthorizationApplicationError::Exclusive),
+        (matrix_error = "M_INVALID_PARAM", from = AuthorizationApplicationError::InvalidCredentials)])]
     InvalidUsername(Json<MatrixErrorResponse>),
     #[matrix(status = 401)]
     Unauthorized(Json<UiaaResponseView>),
-    #[matrix(status = 403, error = [(matrix_error = "M_FORBIDDEN", from = AuthorizationApplicationError::Forbidden)])]
+    #[matrix(status = 403, error = [
+        (matrix_error = "M_FORBIDDEN", from = AuthorizationApplicationError::RegistrationDisabled),
+        (matrix_error = "M_FORBIDDEN", from = AuthorizationApplicationError::GuestRegistrationDisabled)
+    ])]
     Forbidden(Json<MatrixErrorResponse>),
+    #[matrix(status = 500, error = [
+        (matrix_error = "M_BAD_JSON", from = AuthorizationApplicationError::RegisterInvalidParameters),
+        (matrix_error = "M_UNKNOWN", from = AuthorizationApplicationError::Internal)
+    ])]
+    BadJson(Json<MatrixErrorResponse>),
 }
 
 pub async fn register_user(
@@ -104,13 +116,17 @@ pub async fn register_user(
     Json(register_user_info): Json<RegisterUserInfo>,
 ) -> RegisterUserResponse {
     match application_state.authorization_service.register_user(
-        query_info,
+        &query_info,
         register_user_info,
         application_state.allow_registration,
     ) {
         Ok(response) => RegisterUserResponse::Ok(Json(response)),
         Err(AuthorizationApplicationError::Unauthorized) => {
-            RegisterUserResponse::Unauthorized(Json(UiaaResponseView::password_auth_challenge()))
+            RegisterUserResponse::Unauthorized(Json(
+                application_state
+                    .authorization_service
+                    .registration_uiaa_challenge(),
+            ))
         }
         Err(error) => RegisterUserResponse::from_mapped_error(error),
     }

@@ -1,11 +1,14 @@
-use std::sync::Arc;
+use std::{str::FromStr, sync::Arc};
+
+use serde_json::json;
+use uuid::Uuid;
 
 use crate::{
     infrastructure::{configuration::AuthenticationConfiguration, username::Username},
     services::{
-        authorization::entities::AccountKind,
+        authorization::entities::{AccountKind, ExpirationClock, UiaaFlowType},
         repositories::{SessionRepository, UserRepository},
-        traits::IdGenerator,
+        traits::{Clock, JsonWebTokenAdapter},
     },
 };
 
@@ -17,6 +20,7 @@ use super::{
         get_auth_metadata::GetAuthMetadataView,
         get_login_flows::{GetLoginFlowsView, LoginFlowView},
         login_user::{LoginUserInfo, LoginUserView},
+        register_user::{AuthenticationFlowView, UiaaResponseView},
         register_user::{RegisterUserInfo, RegisterUserQueryInfo, RegisterUserView},
         who_am_i::WhoAmIView,
     },
@@ -25,7 +29,8 @@ use super::{
 pub struct AuthorizationService {
     user_repository: Arc<dyn UserRepository>,
     session_repository: Arc<dyn SessionRepository>,
-    id_generator: Arc<dyn IdGenerator>,
+    clock: Arc<dyn Clock>,
+    json_web_token_adapter: Arc<dyn JsonWebTokenAdapter>,
     home_server_name: String,
     configuration: AuthenticationConfiguration,
 }
@@ -34,37 +39,59 @@ impl AuthorizationService {
     pub fn new(
         user_repository: Arc<dyn UserRepository>,
         session_repository: Arc<dyn SessionRepository>,
-        id_generator: Arc<dyn IdGenerator>,
+        json_web_token_adapter: Arc<dyn JsonWebTokenAdapter>,
+        clock: Arc<dyn Clock>,
         home_server_name: String,
         configuration: AuthenticationConfiguration,
     ) -> Self {
         Self {
             user_repository,
             session_repository,
-            id_generator,
+            clock,
+            json_web_token_adapter,
             home_server_name,
             configuration,
         }
     }
 
-    pub fn get_auth_metadata(&self) -> Result<GetAuthMetadataView, AuthorizationApplicationError> {
+    pub const fn get_auth_metadata(
+        &self,
+    ) -> Result<GetAuthMetadataView, AuthorizationApplicationError> {
         Err(AuthorizationApplicationError::Unrecognized)
     }
 
     pub fn get_login_flows(&self) -> Result<GetLoginFlowsView, AuthorizationApplicationError> {
         Ok(GetLoginFlowsView {
-            flows: vec![LoginFlowView {
-                type_field: "m.login.password".to_owned(),
-                get_login_token: Some(false),
-            }],
+            flows: Self::registration_uiaa_flow_types()
+                .iter()
+                .map(|flow_type| LoginFlowView {
+                    type_field: flow_type.to_string(),
+                    get_login_token: Some(false),
+                })
+                .collect(),
         })
     }
 
+    pub fn registration_uiaa_challenge(&self) -> UiaaResponseView {
+        UiaaResponseView {
+            completed: Vec::new(),
+            flows: vec![AuthenticationFlowView {
+                stages: Self::registration_uiaa_flow_types()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+            }],
+            params: json!({}),
+            session: Uuid::new_v4().to_string(),
+        }
+    }
+
+    #[allow(clippy::needless_pass_by_value, reason = "handler boundary ownership")]
     pub fn check_username_available(
         &self,
         username: String,
     ) -> Result<CheckUsernameAvailableView, AuthorizationApplicationError> {
-        let user_identifier = self.try_get_user_id(&username)?;
+        let user_identifier = self.try_parse_user_id(&username)?;
         Ok(CheckUsernameAvailableView {
             available: !self.user_repository.user_exists(&user_identifier),
         })
@@ -72,22 +99,28 @@ impl AuthorizationService {
 
     pub fn register_user(
         &self,
-        query: RegisterUserQueryInfo,
+        query: &RegisterUserQueryInfo,
         info: RegisterUserInfo,
         allow_registration: bool,
     ) -> Result<RegisterUserView, AuthorizationApplicationError> {
-        let _ = (
-            &info.authentification,
-            &info.refresh_token,
-            &info.initial_device_display_name,
-        );
-
         if !allow_registration {
-            return Err(AuthorizationApplicationError::Forbidden);
+            return Err(AuthorizationApplicationError::RegistrationDisabled);
         }
 
-        if query.kind.eq(&AccountKind::Guest) {
-            return Err(AuthorizationApplicationError::Forbidden);
+        let is_guest = query.kind.eq(&AccountKind::Guest);
+        if is_guest {
+            return Err(AuthorizationApplicationError::GuestRegistrationDisabled);
+        }
+
+        let authentication_type = UiaaFlowType::from_str(
+            info.authentication
+                .as_ref()
+                .and_then(|authentication| authentication.authentication_type.as_deref())
+                .unwrap_or_default(),
+        )
+        .map_err(|_| AuthorizationApplicationError::Unauthorized)?;
+        if !Self::is_supported_registration_uiaa_flow(&authentication_type) {
+            return Err(AuthorizationApplicationError::Unauthorized);
         }
 
         let username = info
@@ -95,14 +128,15 @@ impl AuthorizationService {
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .ok_or(AuthorizationApplicationError::InvalidUsername)?;
+            .map_or_else(|| Self::new_generated_username("user"), str::to_owned);
+
         let password = info
             .password
             .as_deref()
             .filter(|value| !value.trim().is_empty())
             .ok_or(AuthorizationApplicationError::InvalidCredentials)?;
 
-        let user_identifier = self.try_get_user_id(username)?;
+        let user_identifier = self.try_parse_user_id(&username)?;
         if self.user_repository.user_exists(&user_identifier) {
             return Err(AuthorizationApplicationError::UserInUse);
         }
@@ -112,8 +146,14 @@ impl AuthorizationService {
                 user_identifier: user_identifier.clone(),
                 password_hash: password.to_owned(),
                 display_name: user_identifier.as_str().to_owned(),
+                is_guest,
             })
-            .map_err(|error| AuthorizationApplicationError::Internal(error.to_string()))?;
+            .map_err(|_| AuthorizationApplicationError::Internal)?;
+
+        let refresh_token = info
+            .refresh_token
+            .then(|| self.generate_refresh_token())
+            .transpose()?;
 
         if info.inhibit_login {
             return Ok(RegisterUserView {
@@ -121,23 +161,20 @@ impl AuthorizationService {
                 access_token: None,
                 device_identifier: None,
                 home_server_name: None,
+                expires_in_milliseconds: None,
+                refresh_token: None,
             });
         }
 
-        let access_token = AccessToken::parse(
-            self.id_generator
-                .next_access_token(user_identifier.as_str()),
-        )
-        .ok_or_else(|| {
-            AuthorizationApplicationError::Internal("token generation failed".to_owned())
-        })?;
+        let access_token = AccessToken::parse(self.generate_access_token()?)
+            .ok_or(AuthorizationApplicationError::Internal)?;
 
         self.session_repository
             .create_session(AccessSession {
                 access_token: access_token.clone(),
                 user_identifier: user_identifier.clone(),
             })
-            .map_err(|error| AuthorizationApplicationError::Internal(error.to_string()))?;
+            .map_err(|_| AuthorizationApplicationError::Internal)?;
 
         Ok(RegisterUserView {
             user_identifier: user_identifier.into_inner(),
@@ -145,9 +182,15 @@ impl AuthorizationService {
             device_identifier: Some(
                 info.device_identifier
                     .filter(|value| !value.trim().is_empty())
-                    .unwrap_or_else(|| "DEVICEGRIDSTACK".to_owned()),
+                    .unwrap_or_else(Self::new_generated_device_identifier),
             ),
             home_server_name: Some(self.home_server_name.clone()),
+            expires_in_milliseconds: Some(
+                self.configuration
+                    .access_token_expiry_seconds
+                    .saturating_mul(1000),
+            ),
+            refresh_token,
         })
     }
 
@@ -157,11 +200,11 @@ impl AuthorizationService {
     ) -> Result<LoginUserView, AuthorizationApplicationError> {
         let requested_user = request
             .identifier
-            .map(|v| v.user)
+            .map(|login_identifier_info| login_identifier_info.user)
             .or(request.user)
             .ok_or(AuthorizationApplicationError::InvalidUsername)?;
 
-        let user_identifier = self.try_get_user_id(&requested_user)?;
+        let user_identifier = self.try_parse_user_id(&requested_user)?;
         let user_account = self
             .user_repository
             .find_user_by_identifier(&user_identifier)
@@ -171,20 +214,15 @@ impl AuthorizationService {
             return Err(AuthorizationApplicationError::InvalidCredentials);
         }
 
-        let access_token = AccessToken::parse(
-            self.id_generator
-                .next_access_token(user_identifier.as_str()),
-        )
-        .ok_or_else(|| {
-            AuthorizationApplicationError::Internal("token generation failed".to_owned())
-        })?;
+        let access_token = AccessToken::parse(self.generate_access_token()?)
+            .ok_or(AuthorizationApplicationError::Internal)?;
 
         self.session_repository
             .create_session(AccessSession {
                 access_token: access_token.clone(),
                 user_identifier: user_identifier.clone(),
             })
-            .map_err(|error| AuthorizationApplicationError::Internal(error.to_string()))?;
+            .map_err(|_| AuthorizationApplicationError::Internal)?;
 
         Ok(LoginUserView {
             access_token: access_token.into_inner(),
@@ -218,19 +256,24 @@ impl AuthorizationService {
 
     pub fn authenticate_access_token(
         &self,
-        access_token: &str,
+        access_token: &AccessToken,
     ) -> Result<UserId, AuthorizationApplicationError> {
-        let access_token = AccessToken::parse(access_token.to_owned())
-            .ok_or(AuthorizationApplicationError::Unauthorized)?;
+        if !self.json_web_token_adapter.is_token_valid(
+            access_token.as_str(),
+            &self.configuration.json_web_token_secret,
+        ) {
+            return Err(AuthorizationApplicationError::Unauthorized);
+        }
+
         let session = self
             .session_repository
-            .find_session_by_access_token(&access_token)
+            .find_session_by_access_token(access_token)
             .ok_or(AuthorizationApplicationError::Unauthorized)?;
 
         Ok(session.user_identifier)
     }
 
-    fn try_get_user_id(
+    fn try_parse_user_id(
         &self,
         username_or_identifier: &str,
     ) -> Result<UserId, AuthorizationApplicationError> {
@@ -238,7 +281,7 @@ impl AuthorizationService {
         if candidate.is_empty() {
             return Err(AuthorizationApplicationError::InvalidUsername);
         }
-        if candidate.starts_with('@') && candidate.contains(":") {
+        if candidate.starts_with('@') && candidate.contains(':') {
             return UserId::parse(candidate.to_owned())
                 .ok_or(AuthorizationApplicationError::InvalidUsername);
         }
@@ -247,5 +290,55 @@ impl AuthorizationService {
             Username::try_new(candidate).ok_or(AuthorizationApplicationError::InvalidUsername)?;
         UserId::parse(format!("@{}:{}", username.as_str(), self.home_server_name))
             .ok_or(AuthorizationApplicationError::InvalidUsername)
+    }
+
+    const fn registration_uiaa_flow_types() -> &'static [UiaaFlowType] {
+        &[UiaaFlowType::Password]
+    }
+
+    fn is_supported_registration_uiaa_flow(flow_type: &UiaaFlowType) -> bool {
+        Self::registration_uiaa_flow_types().contains(flow_type)
+    }
+
+    fn new_generated_username(prefix: &str) -> String {
+        let suffix = Uuid::new_v4()
+            .to_string()
+            .replace('-', "")
+            .chars()
+            .take(12)
+            .collect::<String>();
+        format!("{prefix}_{suffix}")
+    }
+
+    fn new_generated_device_identifier() -> String {
+        format!("DEVICE{}", Uuid::new_v4())
+    }
+
+    fn generate_access_token(&self) -> Result<String, AuthorizationApplicationError> {
+        let expires_at_seconds =
+            self.expiry_from_now(self.configuration.access_token_expiry_seconds)?;
+        let expiry_clock = ExpirationClock::new(expires_at_seconds);
+        self.json_web_token_adapter
+            .encode(&expiry_clock, &self.configuration.json_web_token_secret)
+            .map_err(|_| AuthorizationApplicationError::Internal)
+    }
+
+    fn generate_refresh_token(&self) -> Result<String, AuthorizationApplicationError> {
+        let expires_at_seconds =
+            self.expiry_from_now(self.configuration.refresh_token_expiry_seconds)?;
+        let expiry_clock = ExpirationClock::new(expires_at_seconds);
+        self.json_web_token_adapter
+            .encode(&expiry_clock, &self.configuration.json_web_token_secret)
+            .map_err(|_| AuthorizationApplicationError::Internal)
+    }
+
+    fn expiry_from_now(
+        &self,
+        valid_for_seconds: u64,
+    ) -> Result<i64, AuthorizationApplicationError> {
+        Ok((self.clock.as_seconds()).saturating_add(
+            i64::try_from(valid_for_seconds)
+                .map_err(|_| AuthorizationApplicationError::Internal)?,
+        ))
     }
 }

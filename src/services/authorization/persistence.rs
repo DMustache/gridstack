@@ -45,12 +45,12 @@ impl UserRepository for AuthorizationPersistence {
     fn create_user(&self, user_account: UserAccount) -> Result<(), DomainError> {
         use schema::users;
 
-        let now = Utc::now();
+        let now = Utc::now().naive_utc();
         let create_model = CreateUserModel {
             user_id: user_account.user_identifier.as_str().to_owned(),
             account_id: Uuid::new_v4(),
             password_hash: Some(user_account.password_hash),
-            is_guest: false,
+            is_guest: user_account.is_guest,
             created_at: now,
             updated_at: now,
         };
@@ -104,14 +104,13 @@ pub struct InMemorySessionRepository {
 
 impl SessionRepository for InMemorySessionRepository {
     fn create_session(&self, access_session: AccessSession) -> Result<(), DomainError> {
-        let mut sessions_by_token = self
-            .sessions_by_token
+        self.sessions_by_token
             .write()
-            .map_err(|_| DomainError::InvalidRequest("session storage lock failure".to_owned()))?;
-        sessions_by_token.insert(
-            access_session.access_token.as_str().to_owned(),
-            access_session,
-        );
+            .map_err(|_| DomainError::InvalidRequest("session storage lock failure".to_owned()))?
+            .insert(
+                access_session.access_token.as_str().to_owned(),
+                access_session,
+            );
         Ok(())
     }
 

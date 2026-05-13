@@ -15,8 +15,7 @@ use syn::{
 fn main() -> Result<()> {
     let output = env::args()
         .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("openapi.json"));
+        .map_or_else(|| PathBuf::from("openapi.json"), PathBuf::from);
 
     let routes_file = Path::new("src/services/authorization/routes.rs");
     let handlers_dir = Path::new("src/services/authorization/handlers");
@@ -148,7 +147,10 @@ fn extract_operations(routes_file: &Path) -> Result<Vec<RouteOperation>> {
     }
 
     if operations.is_empty() {
-        bail!("no authorization routes were detected in {}", routes_file.display());
+        bail!(
+            "no authorization routes were detected in {}",
+            routes_file.display()
+        );
     }
 
     Ok(operations)
@@ -296,7 +298,8 @@ fn extract_handler_specs(handlers_file: &Path) -> Result<HashMap<String, Handler
             if let Some(inner) = extract_inner_type_name(ty, "Json") {
                 json_body_type = Some(inner);
             }
-            auth_requirement = merge_auth_requirement(auth_requirement, extract_auth_requirement(ty));
+            auth_requirement =
+                merge_auth_requirement(auth_requirement, extract_auth_requirement(ty));
         }
 
         let response_enum = match &function.sig.output {
@@ -318,10 +321,17 @@ fn extract_handler_specs(handlers_file: &Path) -> Result<HashMap<String, Handler
     Ok(specs)
 }
 
-fn merge_auth_requirement(current: AuthRequirement, incoming: AuthRequirement) -> AuthRequirement {
+const fn merge_auth_requirement(
+    current: AuthRequirement,
+    incoming: AuthRequirement,
+) -> AuthRequirement {
     match (current, incoming) {
-        (AuthRequirement::Required, _) | (_, AuthRequirement::Required) => AuthRequirement::Required,
-        (AuthRequirement::Optional, _) | (_, AuthRequirement::Optional) => AuthRequirement::Optional,
+        (AuthRequirement::Required, _) | (_, AuthRequirement::Required) => {
+            AuthRequirement::Required
+        }
+        (AuthRequirement::Optional, _) | (_, AuthRequirement::Optional) => {
+            AuthRequirement::Optional
+        }
         _ => AuthRequirement::None,
     }
 }
@@ -348,8 +358,7 @@ fn extract_auth_requirement(ty: &Type) -> AuthRequirement {
                 .path
                 .segments
                 .last()
-                .map(|s| s.ident == "UserId")
-                .unwrap_or(false)
+                .is_some_and(|path_segment| path_segment.ident == "UserId")
         {
             return AuthRequirement::Optional;
         }
@@ -357,7 +366,9 @@ fn extract_auth_requirement(ty: &Type) -> AuthRequirement {
     AuthRequirement::None
 }
 
-fn extract_response_specs(handlers_file: &Path) -> Result<HashMap<String, Vec<ResponseVariantSpec>>> {
+fn extract_response_specs(
+    handlers_file: &Path,
+) -> Result<HashMap<String, Vec<ResponseVariantSpec>>> {
     let content = fs::read_to_string(handlers_file)
         .with_context(|| format!("failed to read {}", handlers_file.display()))?;
     let parsed: File = syn::parse_file(&content)
@@ -413,12 +424,17 @@ fn extract_response_specs(handlers_file: &Path) -> Result<HashMap<String, Vec<Re
                             if key == "matrix_error" {
                                 if let Expr::Array(arr) = *right {
                                     for item in arr.elems {
-                                        if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = item {
+                                        if let Expr::Lit(ExprLit {
+                                            lit: Lit::Str(s), ..
+                                        }) = item
+                                        {
                                             matrix_error_codes.push(s.value());
                                         }
                                     }
                                 }
-                            } else if key == "error" && let Expr::Array(arr) = *right {
+                            } else if key == "error"
+                                && let Expr::Array(arr) = *right
+                            {
                                 for item in arr.elems {
                                     if let Some((code, from_path)) = parse_error_entry(item) {
                                         matrix_error_codes.push(code.clone());
@@ -477,10 +493,15 @@ fn parse_error_entry(expr: Expr) -> Option<(String, String)> {
             _ => continue,
         };
         if key == "matrix_error" {
-            if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = *right {
+            if let Expr::Lit(ExprLit {
+                lit: Lit::Str(s), ..
+            }) = *right
+            {
                 code = Some(s.value());
             }
-        } else if key == "from" && let Expr::Path(ExprPath { path, .. }) = *right {
+        } else if key == "from"
+            && let Expr::Path(ExprPath { path, .. }) = *right
+        {
             from = Some(path_to_enum_variant_key(&path));
         }
     }
@@ -523,10 +544,10 @@ fn has_into_response_enum_derive(attrs: &[syn::Attribute]) -> bool {
 fn collect_error_messages(paths: &[&Path]) -> Result<HashMap<String, String>> {
     let mut map = HashMap::new();
     for path in paths {
-        let content =
-            fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-        let parsed: File =
-            syn::parse_file(&content).with_context(|| format!("failed to parse {}", path.display()))?;
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let parsed: File = syn::parse_file(&content)
+            .with_context(|| format!("failed to parse {}", path.display()))?;
 
         for item in parsed.items {
             let Item::Enum(item_enum) = item else {
@@ -632,9 +653,9 @@ fn build_method_object(
     }
     let responses = build_responses(handler_responses, &layer_variants);
     method.insert("responses".to_owned(), responses);
-    let auth_requirement = handler
-        .map(|h| h.auth_requirement)
-        .unwrap_or(AuthRequirement::None);
+    let auth_requirement = handler.map_or(AuthRequirement::None, |handler_specification| {
+        handler_specification.auth_requirement
+    });
     match auth_requirement {
         AuthRequirement::Required => {
             method.insert(
@@ -656,7 +677,9 @@ fn build_method_object(
             );
             method.insert(
                 "description".to_owned(),
-                json!("Optional authorization: endpoint can be called with or without access token."),
+                json!(
+                    "Optional authorization: endpoint can be called with or without access token."
+                ),
             );
         }
         AuthRequirement::None => {}
@@ -673,18 +696,21 @@ fn layer_response_enum_name(layer_name: &str) -> Option<&'static str> {
     }
 }
 
-fn build_query_parameters(query_type: &str, schemas: &HashMap<String, Value>) -> Result<Vec<Value>> {
+fn build_query_parameters(
+    query_type: &str,
+    schemas: &HashMap<String, Value>,
+) -> Result<Vec<Value>> {
     let Some(schema) = schemas.get(query_type) else {
         return Ok(Vec::new());
     };
 
     let object = schema
         .as_object()
-        .with_context(|| format!("schema {} must be object", query_type))?;
+        .with_context(|| format!("schema {query_type} must be object"))?;
     let props = object
         .get("properties")
         .and_then(Value::as_object)
-        .with_context(|| format!("schema {} missing properties", query_type))?;
+        .with_context(|| format!("schema {query_type} missing properties"))?;
 
     let required: Vec<String> = object
         .get("required")
@@ -746,18 +772,18 @@ fn build_responses(
                 "content".to_owned(),
                 json!({
                     "application/json": {
-                        "schema": media.get("schema").cloned().unwrap_or(json!({})),
-                        "example": media.get("example").cloned().unwrap_or(json!(null))
+                        "schema": media.get("schema").cloned().unwrap_or_else(|| json!({})),
+                        "example": media.get("example").cloned().unwrap_or( Value::Null)
                     }
                 }),
             );
             if let Some(content) = response.get_mut("content").and_then(Value::as_object_mut)
-                && let Some(app_json) =
-                    content.get_mut("application/json").and_then(Value::as_object_mut)
+                && let Some(app_json) = content
+                    .get_mut("application/json")
+                    .and_then(Value::as_object_mut)
+                && app_json.get("example") == Some(&Value::Null)
             {
-                if app_json.get("example") == Some(&Value::Null) {
-                    app_json.remove("example");
-                }
+                app_json.remove("example");
             }
         }
 
@@ -810,8 +836,7 @@ fn build_response_description(spec: &ResponseVariantSpec) -> String {
     let msg = spec
         .matrix_error_messages
         .get(first)
-        .map(String::as_str)
-        .unwrap_or("An unknown error occurred");
+        .map_or("An unknown error occurred", String::as_str);
     format!("Possible errcodes: {listed}. Example: {first} - {msg}")
 }
 
@@ -857,8 +882,8 @@ fn extract_schemas_from_dir(dir: &Path) -> Result<HashMap<String, Value>> {
 }
 
 fn extract_schemas_from_file(path: &Path) -> Result<HashMap<String, Value>> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+    let content =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     let parsed: File =
         syn::parse_file(&content).with_context(|| format!("failed to parse {}", path.display()))?;
 
@@ -898,10 +923,18 @@ fn extract_schemas_from_file(path: &Path) -> Result<HashMap<String, Value>> {
     Ok(schemas)
 }
 
-fn convert_field(field_name: &str, field_type: &Type, attrs: &[syn::Attribute]) -> (String, bool, Value) {
+fn convert_field(
+    field_name: &str,
+    field_type: &Type,
+    attrs: &[syn::Attribute],
+) -> (String, bool, Value) {
     let (serialized_name, optional_from_attr) = parse_serde_attrs(field_name, attrs);
     let (schema, optional_from_type) = type_to_schema(field_type);
-    (serialized_name, optional_from_attr || optional_from_type, schema)
+    (
+        serialized_name,
+        optional_from_attr || optional_from_type,
+        schema,
+    )
 }
 
 fn parse_serde_attrs(field_name: &str, attrs: &[syn::Attribute]) -> (String, bool) {
@@ -931,33 +964,28 @@ fn parse_serde_attrs(field_name: &str, attrs: &[syn::Attribute]) -> (String, boo
 fn type_to_schema(ty: &Type) -> (Value, bool) {
     match ty {
         Type::Path(path) => {
-            let segment = match path.path.segments.last() {
-                Some(segment) => segment,
-                None => {
-                    return (
-                        json!({ "type": "object", "additionalProperties": true }),
-                        false,
-                    );
-                }
+            let Some(segment) = path.path.segments.last() else {
+                return (
+                    json!({ "type": "object", "additionalProperties": true }),
+                    false,
+                );
             };
 
             let ident = segment.ident.to_string();
-            if ident == "Option" {
-                if let PathArguments::AngleBracketed(args) = &segment.arguments
-                    && let Some(GenericArgument::Type(inner)) = args.args.first()
-                {
-                    let (inner_schema, _) = type_to_schema(inner);
-                    return (inner_schema, true);
-                }
+            if ident == "Option"
+                && let PathArguments::AngleBracketed(args) = &segment.arguments
+                && let Some(GenericArgument::Type(inner)) = args.args.first()
+            {
+                let (inner_schema, _) = type_to_schema(inner);
+                return (inner_schema, true);
             }
 
-            if ident == "Vec" {
-                if let PathArguments::AngleBracketed(args) = &segment.arguments
-                    && let Some(GenericArgument::Type(inner)) = args.args.first()
-                {
-                    let (inner_schema, _) = type_to_schema(inner);
-                    return (json!({ "type": "array", "items": inner_schema }), false);
-                }
+            if ident == "Vec"
+                && let PathArguments::AngleBracketed(args) = &segment.arguments
+                && let Some(GenericArgument::Type(inner)) = args.args.first()
+            {
+                let (inner_schema, _) = type_to_schema(inner);
+                return (json!({ "type": "array", "items": inner_schema }), false);
             }
 
             if ident == "BTreeMap" || ident == "HashMap" {
@@ -987,17 +1015,21 @@ fn type_to_schema(ty: &Type) -> (Value, bool) {
             match ident.as_str() {
                 "String" => (json!({ "type": "string" }), false),
                 "bool" => (json!({ "type": "boolean" }), false),
-                "i64" | "i32" | "u64" | "u32" | "usize" => {
-                    (json!({ "type": "integer" }), false)
-                }
-                "Value" => (json!({ "type": "object", "additionalProperties": true }), false),
+                "i64" | "i32" | "u64" | "u32" | "usize" => (json!({ "type": "integer" }), false),
+                "Value" => (
+                    json!({ "type": "object", "additionalProperties": true }),
+                    false,
+                ),
                 _ => (
                     json!({ "$ref": format!("#/components/schemas/{}", ident) }),
                     false,
                 ),
             }
         }
-        _ => (json!({ "type": "object", "additionalProperties": true }), false),
+        _ => (
+            json!({ "type": "object", "additionalProperties": true }),
+            false,
+        ),
     }
 }
 

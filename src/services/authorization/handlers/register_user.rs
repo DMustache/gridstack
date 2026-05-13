@@ -1,12 +1,11 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use uuid::Uuid;
+use serde_json::Value;
 
 use crate::services::authorization::entities::AccountKind;
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 pub struct RegisterUserQueryInfo {
     #[serde(default)]
     pub kind: AccountKind,
@@ -21,10 +20,10 @@ pub struct AuthenticationDataInfo {
     pub data: BTreeMap<String, Value>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 pub struct RegisterUserInfo {
     #[serde(rename = "auth")]
-    pub authentification: Option<AuthenticationDataInfo>,
+    pub authentication: Option<AuthenticationDataInfo>,
     #[serde(rename = "device_id")]
     pub device_identifier: Option<String>,
     #[serde(default)]
@@ -46,6 +45,10 @@ pub struct RegisterUserView {
     pub device_identifier: Option<String>,
     #[serde(rename = "home_server", skip_serializing_if = "Option::is_none")]
     pub home_server_name: Option<String>,
+    #[serde(rename = "expires_in_ms", skip_serializing_if = "Option::is_none")]
+    pub expires_in_milliseconds: Option<u64>,
+    #[serde(rename = "refresh_token", skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -59,21 +62,4 @@ pub struct UiaaResponseView {
     pub flows: Vec<AuthenticationFlowView>,
     pub params: Value,
     pub session: String,
-}
-
-impl UiaaResponseView {
-    pub fn password_auth_challenge() -> Self {
-        Self {
-            completed: vec!["example.type.foo".to_owned()],
-            flows: vec![AuthenticationFlowView {
-                stages: vec!["example.type.foo".to_owned()],
-            }],
-            params: json!({
-                "example.type.baz": {
-                    "example_key": "foobar",
-                }
-            }),
-            session: format!("{}xyz", &Uuid::new_v4().to_string()[..5]),
-        }
-    }
 }
