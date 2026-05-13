@@ -1,6 +1,6 @@
 to check
     v1.3
-        /_matrix/client/v3/register
+        /_matrix/client/v3/register +
     v1.17
 
 missing
@@ -12,7 +12,7 @@ https://en.wikipedia.org/wiki/Augmented_Backus%E2%80%93Naur_form
 
 PCI DSS 4.0 Requirement 8.3.6 for password complexity ^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{12,}$
 
-POST /_matrix/client/v3/register
+POST /_matrix/client/v3/register + only m.login.password and user account kind
 GET /_matrix/client/v1/auth_metadata +- On implementation to disable Legacy auth should be updated pass
 GET /_matrix/client/v3/login +- On 1.18 implementation Oauth2.0 auth should be updated, pass
 POST /_matrix/client/v3/login
@@ -21,9 +21,6 @@ Pattenrs
 
 Clean Arhitecture
 
-В каждом слое есть свой сервис, он наследает трейт инфраструктуры для того чтобы при замене сервиса не пропадали методы.
-У слоя нет отдельных реализаций типов, типы реализуются аналогично в инфраструкткре.
-Каждый зависимый слой берет методы только трейта, а не конкретного сервиса.
 
 DDD
     Business Invariants Validation Проверка структуры перед пропуском
@@ -32,3 +29,5 @@ Loose Coupling
 
 Core Principles
      Parse, don't validate
+
+ODR (One Definition Rule).
