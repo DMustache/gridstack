@@ -57,7 +57,7 @@ impl AuthorizationService {
     pub const fn get_auth_metadata(
         &self,
     ) -> Result<GetAuthMetadataView, AuthorizationApplicationError> {
-        Err(AuthorizationApplicationError::Unrecognized)
+        Err(AuthorizationApplicationError::OAuthAuthorizationUnsupported)
     }
 
     pub fn get_login_flows(&self) -> Result<GetLoginFlowsView, AuthorizationApplicationError> {
