@@ -4,7 +4,10 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::{
-    infrastructure::{configuration::AuthenticationConfiguration, username::Username},
+    infrastructure::{
+        configuration::AuthenticationConfiguration, user_identifier::UserIdentifier,
+        username::Username,
+    },
     services::{
         authorization::entities::{AccountKind, ExpirationClock, UiaaFlowType},
         repositories::{SessionRepository, UserRepository},
@@ -13,13 +16,13 @@ use crate::{
 };
 
 use super::{
-    entities::{AccessSession, AccessToken, UserAccount, UserId},
+    entities::{AccessSession, AccessToken, LoginType, UserAccount},
     errors::AuthorizationApplicationError,
     handlers::{
         check_username_available::CheckUsernameAvailableView,
         get_auth_metadata::GetAuthMetadataView,
         get_login_flows::{GetLoginFlowsView, LoginFlow},
-        login_user::{LoginUserInfo, LoginUserView},
+        login_user::{LoginIdentifierInfo, LoginUserInfo, LoginUserView},
         register_user::{AuthenticationFlowView, UiaaResponseView},
         register_user::{RegisterUserInfo, RegisterUserQueryInfo, RegisterUserView},
         who_am_i::WhoAmIView,
@@ -187,7 +190,7 @@ impl AuthorizationService {
             home_server_name: Some(self.home_server_name.clone()),
             expires_in_milliseconds: Some(
                 self.configuration
-                    .access_token_expiry_seconds
+                    .access_token_expiry_as_milliseconds()
                     .saturating_mul(1000),
             ),
             refresh_token,
@@ -198,9 +201,23 @@ impl AuthorizationService {
         &self,
         request: LoginUserInfo,
     ) -> Result<LoginUserView, AuthorizationApplicationError> {
+        if request.login_type != LoginType::Password {
+            return Err(AuthorizationApplicationError::Unrecognized);
+        }
+
         let requested_user = request
             .identifier
-            .map(|login_identifier_info| login_identifier_info.user)
+            .map(|login_identifier_info| match login_identifier_info {
+                LoginIdentifierInfo::MatrixUser { user } => Ok(user),
+                LoginIdentifierInfo::ThirdParty { .. }
+                | LoginIdentifierInfo::PhoneNumber { .. } => {
+                    Err(AuthorizationApplicationError::InvalidCredentials)
+                }
+                LoginIdentifierInfo::Unsupported => {
+                    Err(AuthorizationApplicationError::Unrecognized)
+                }
+            })
+            .transpose()?
             .or(request.user)
             .ok_or(AuthorizationApplicationError::InvalidUsername)?;
 
@@ -224,20 +241,26 @@ impl AuthorizationService {
             })
             .map_err(|_| AuthorizationApplicationError::Internal)?;
 
+        let refresh_token = request
+            .refresh_token
+            .then(|| self.generate_refresh_token())
+            .transpose()?;
+
         Ok(LoginUserView {
             access_token: access_token.into_inner(),
             device_id: request
                 .device_identifier
                 .unwrap_or_else(|| "DEVICEGRIDSTACK".to_owned()),
-            expires_in_ms: 0,
-            refresh_token: String::new(),
+            expires_in_milliseconds: Some(self.configuration.access_token_expiry_as_milliseconds()),
+            home_server: Some(self.home_server_name.clone()),
+            refresh_token,
             user_id: user_identifier.into_inner(),
         })
     }
 
-    pub fn who_am_i_from_user_id(
+    pub fn who_am_i_from_user_identifier(
         &self,
-        user_identifier: UserId,
+        user_identifier: UserIdentifier,
     ) -> Result<WhoAmIView, AuthorizationApplicationError> {
         if self
             .user_repository
@@ -257,7 +280,7 @@ impl AuthorizationService {
     pub fn authenticate_access_token(
         &self,
         access_token: &AccessToken,
-    ) -> Result<UserId, AuthorizationApplicationError> {
+    ) -> Result<UserIdentifier, AuthorizationApplicationError> {
         if !self.json_web_token_adapter.is_token_valid(
             access_token.as_str(),
             &self.configuration.json_web_token_secret,
@@ -276,19 +299,19 @@ impl AuthorizationService {
     fn try_parse_user_id(
         &self,
         username_or_identifier: &str,
-    ) -> Result<UserId, AuthorizationApplicationError> {
+    ) -> Result<UserIdentifier, AuthorizationApplicationError> {
         let candidate = username_or_identifier.trim();
         if candidate.is_empty() {
             return Err(AuthorizationApplicationError::InvalidUsername);
         }
         if candidate.starts_with('@') && candidate.contains(':') {
-            return UserId::parse(candidate.to_owned())
+            return UserIdentifier::parse(candidate.to_owned())
                 .ok_or(AuthorizationApplicationError::InvalidUsername);
         }
 
         let username =
             Username::try_new(candidate).ok_or(AuthorizationApplicationError::InvalidUsername)?;
-        UserId::parse(format!("@{}:{}", username.as_str(), self.home_server_name))
+        UserIdentifier::from_localpart_and_server(username.as_str(), &self.home_server_name)
             .ok_or(AuthorizationApplicationError::InvalidUsername)
     }
 

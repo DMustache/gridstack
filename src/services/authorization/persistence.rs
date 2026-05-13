@@ -11,10 +11,10 @@ use diesel::{
 use uuid::Uuid;
 
 use crate::{
-    infrastructure::schema,
+    infrastructure::{schema, user_identifier::UserIdentifier},
     services::{
         authorization::{
-            entities::{AccessSession, AccessToken, UserAccount, UserId},
+            entities::{AccessSession, AccessToken, UserAccount},
             persistence::users::{CreateUserModel, UserModel},
         },
         errors::DomainError,
@@ -68,7 +68,7 @@ impl UserRepository for AuthorizationPersistence {
         Ok(())
     }
 
-    fn find_user_by_identifier(&self, user_identifier: &UserId) -> Option<UserAccount> {
+    fn find_user_by_identifier(&self, user_identifier: &UserIdentifier) -> Option<UserAccount> {
         use schema::users;
 
         let mut connection = self.connection_pool.get().ok()?;
@@ -82,7 +82,7 @@ impl UserRepository for AuthorizationPersistence {
             .and_then(|model| model.try_into().ok())
     }
 
-    fn user_exists(&self, user_identifier: &UserId) -> bool {
+    fn user_exists(&self, user_identifier: &UserIdentifier) -> bool {
         use schema::users;
 
         let Ok(mut connection) = self.connection_pool.get() else {

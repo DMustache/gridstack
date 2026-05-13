@@ -1,9 +1,16 @@
 to check
     v1.3
         POST /_matrix/client/v3/register +
+        POST /_matrix/client/v3/login +
+        ---
+        refresh tokens
     v1.7
         GET /_matrix/client/v3/login - untill we not support m.login.token
     v1.17
+        POST /_matrix/client/v3/login - untill we not support appservice implementations and usage
+        POST /_matrix/client/v3/login - untill we not support appservice implementations and usage
+        ---
+        appservice implementation
 
 missing
     v1.18
@@ -17,7 +24,7 @@ PCI DSS 4.0 Requirement 8.3.6 for password complexity ^(?=.*[a-z])(?=.*[A-Z])(?=
 POST /_matrix/client/v3/register + only m.login.password and user account kind
 GET /_matrix/client/v1/auth_metadata +- On implementation to disable Legacy auth should be updated pass
 GET /_matrix/client/v3/login +- On 1.18 implementation Oauth2.0 auth should be updated and future m.login.token support, pass
-POST /_matrix/client/v3/login
+POST /_matrix/client/v3/login +- well_known in View not provided untill implementation not ready. appservice not implemented, well_known not supported
 
 Pattenrs
 

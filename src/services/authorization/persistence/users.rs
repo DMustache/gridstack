@@ -3,8 +3,8 @@ use diesel::{AsChangeset, Identifiable, Insertable, Queryable, Selectable};
 use uuid::Uuid;
 
 use crate::{
-    infrastructure::schema::users,
-    services::authorization::entities::{UserAccount, UserId},
+    infrastructure::{schema::users, user_identifier::UserIdentifier},
+    services::authorization::entities::UserAccount,
 };
 
 #[derive(Debug, Clone, Queryable, Selectable, Identifiable, AsChangeset)]
@@ -35,7 +35,7 @@ impl TryFrom<UserModel> for UserAccount {
 
     fn try_from(value: UserModel) -> Result<Self, Self::Error> {
         Ok(Self {
-            user_identifier: UserId::parse(value.user_id).ok_or(())?,
+            user_identifier: UserIdentifier::parse(value.user_id).ok_or(())?,
             password_hash: value.password_hash.unwrap_or_default(),
             display_name: String::new(),
             is_guest: value.is_guest,

@@ -1,3 +1,3 @@
 pub use crate::services::authorization::entities::{
-    AccessSession, AccessToken, UserAccount, UserId,
+    AccessSession, AccessToken, UserAccount, UserIdentifierType,
 };
