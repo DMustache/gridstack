@@ -28,6 +28,7 @@ pub struct AuthenticationConfiguration {
     pub access_token_expiry_seconds: u64,
     pub refresh_token_expiry_seconds: u64,
     pub json_web_token_secret: String,
+    pub password_pepper: String,
 }
 
 impl AuthenticationConfiguration {

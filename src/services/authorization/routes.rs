@@ -10,7 +10,7 @@ use crate::services::{
 };
 
 pub fn routes(state: &ApplicationState) -> Router<ApplicationState> {
-    let public_routes = Router::new()
+    Router::new()
         .route("/_matrix/client/v3/register", post(handlers::register_user))
         .layer(middleware::from_extractor_with_state::<
             RateLimitLayer,
@@ -35,9 +35,7 @@ pub fn routes(state: &ApplicationState) -> Router<ApplicationState> {
         .route(
             "/_matrix/client/v1/auth_metadata",
             get(handlers::get_auth_metadata),
-        );
-
-    let protected_routes = Router::new()
+        )
         .route("/_matrix/client/v3/account/whoami", get(handlers::who_am_i))
         .layer(middleware::from_extractor_with_state::<
             RateLimitLayer,
@@ -46,7 +44,10 @@ pub fn routes(state: &ApplicationState) -> Router<ApplicationState> {
         .layer(middleware::from_extractor_with_state::<
             AuthorizationLayer,
             ApplicationState,
-        >(state.clone()));
-
-    Router::new().merge(public_routes).merge(protected_routes)
+        >(state.clone()))
+        .route("/_matrix/client/v3/logout", post(handlers::logout_user))
+        .layer(middleware::from_extractor_with_state::<
+            AuthorizationLayer,
+            ApplicationState,
+        >(state.clone()))
 }

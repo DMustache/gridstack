@@ -5,8 +5,8 @@ use uuid::Uuid;
 
 use crate::{
     infrastructure::{
-        configuration::AuthenticationConfiguration, user_identifier::UserIdentifier,
-        username::Username,
+        configuration::AuthenticationConfiguration, password_hash::PasswordHash,
+        user_identifier::UserIdentifier, username::Username,
     },
     services::{
         authorization::entities::{AccountKind, ExpirationClock, UiaaFlowType},
@@ -23,6 +23,7 @@ use super::{
         get_auth_metadata::GetAuthMetadataView,
         get_login_flows::{GetLoginFlowsView, LoginFlow},
         login_user::{LoginIdentifierInfo, LoginUserInfo, LoginUserView},
+        logout_user::LogoutUserView,
         register_user::{AuthenticationFlowView, UiaaResponseView},
         register_user::{RegisterUserInfo, RegisterUserQueryInfo, RegisterUserView},
         who_am_i::WhoAmIView,
@@ -144,10 +145,13 @@ impl AuthorizationService {
             return Err(AuthorizationApplicationError::UserInUse);
         }
 
+        let encoded_password = PasswordHash::encode(password, &self.configuration.password_pepper)
+            .map_err(|_| AuthorizationApplicationError::Internal)?;
+
         self.user_repository
             .create_user(UserAccount {
                 user_identifier: user_identifier.clone(),
-                password_hash: password.to_owned(),
+                password_hash: encoded_password,
                 display_name: user_identifier.as_str().to_owned(),
                 is_guest,
             })
@@ -227,7 +231,18 @@ impl AuthorizationService {
             .find_user_by_identifier(&user_identifier)
             .ok_or(AuthorizationApplicationError::InvalidCredentials)?;
 
-        if user_account.password_hash != request.password {
+        if !PasswordHash::verify(
+            &request.password,
+            &self.configuration.password_pepper,
+            &user_account.password_hash,
+        ) {
+            return Err(AuthorizationApplicationError::InvalidCredentials);
+        }
+
+        if !self
+            .user_repository
+            .is_user_password_matches(&user_identifier, &request.password)
+        {
             return Err(AuthorizationApplicationError::InvalidCredentials);
         }
 
@@ -275,6 +290,17 @@ impl AuthorizationService {
             is_guest: false,
             device_id: None,
         })
+    }
+
+    pub fn logout_user(
+        &self,
+        access_token: AccessToken,
+    ) -> Result<LogoutUserView, AuthorizationApplicationError> {
+        self.session_repository
+            .delete_session_by_access_token(access_token)
+            .map_err(|_| AuthorizationApplicationError::Internal)?;
+
+        Ok(LogoutUserView {})
     }
 
     pub fn authenticate_access_token(
