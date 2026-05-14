@@ -1,4 +1,6 @@
 pub mod authorization;
+pub mod events;
+pub mod rooms;
 
 pub mod configuration;
 pub mod entities;
