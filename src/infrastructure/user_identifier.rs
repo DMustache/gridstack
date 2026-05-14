@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::infrastructure::server_name;
+
 /// format @localpart:domain
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct UserIdentifier(String);
@@ -16,9 +18,8 @@ impl UserIdentifier {
             return None;
         }
 
-        let (localpart, server_name) = candidate[1..].split_once(':')?;
-
-        if localpart.is_empty() || server_name.is_empty() {
+        let (localpart, _) = server_name::split_localpart_and_server_name(&candidate[1..])?;
+        if localpart.is_empty() {
             return None;
         }
 
@@ -31,6 +32,11 @@ impl UserIdentifier {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    pub fn server_name(&self) -> Option<&str> {
+        let (_, server_name) = self.0.split_once(':')?;
+        server_name::is_valid_server_name(server_name).then_some(server_name)
     }
 
     pub fn into_inner(self) -> String {
