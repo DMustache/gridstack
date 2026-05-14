@@ -35,6 +35,13 @@ pub struct UserAccount {
     pub is_guest: bool,
 }
 
+/// Available via Extension(access_session): Extension<AccessSession> by layer
+/// ```rust
+/// .layer(middleware::from_extractor_with_state::<
+///     RateLimitLayer,
+///     ApplicationState,
+/// >(state.clone()))
+/// ```
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AccessSession {
     pub access_token: AccessToken,

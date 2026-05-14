@@ -16,6 +16,10 @@ use crate::{
         },
         errors::set_rate_limit_retry_after_ms,
         repositories::{SessionRepository, UserRepository},
+        rooms::{
+            persistence::{RoomPersistence, RoomRepository},
+            service::RoomsService,
+        },
         traits::{Clock, JsonWebTokenAdapter},
     },
 };
@@ -24,6 +28,7 @@ use crate::{
 #[non_exhaustive]
 pub struct ApplicationState {
     pub authorization_service: Arc<AuthorizationService>,
+    pub rooms_service: Arc<RoomsService>,
     pub session_repository: Arc<dyn SessionRepository>,
     pub home_server_name: String,
     pub allow_registration: bool,
@@ -72,10 +77,16 @@ impl ApplicationState {
             home_server_name.clone(),
             application_configuration.authenification.clone(),
         ));
+        let room_repository: Arc<dyn RoomRepository> = Arc::new(
+            RoomPersistence::new(&application_configuration.database.url)
+                .expect("failed to initialize room postgres pool"),
+        );
+        let rooms_service = Arc::new(RoomsService::new(room_repository, home_server_name.clone()));
         let rate_limiter = Arc::new(RateLimiterState::new(Duration::from_mins(1), 120));
 
         Self {
             authorization_service,
+            rooms_service,
             session_repository,
             home_server_name,
             allow_registration: application_configuration.authenification.allow_registration,
