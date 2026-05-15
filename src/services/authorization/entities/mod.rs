@@ -51,6 +51,10 @@ impl ExistingUserIdentifier {
     pub(in crate::services::authorization) const fn new(user_identifier: UserIdentifier) -> Self {
         Self(user_identifier)
     }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -74,6 +78,10 @@ impl AuthorizedUserIdentifier {
         existing_user_identifier: ExistingUserIdentifier,
     ) -> Self {
         Self(existing_user_identifier)
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
     }
 }
 
