@@ -1,5 +1,10 @@
 use serde_json::json;
-use std::{str::FromStr, sync::Arc};
+use std::{
+    collections::HashSet,
+    str::FromStr,
+    sync::{Arc, RwLock},
+};
+use tracing::error;
 use uuid::Uuid;
 
 use crate::{
@@ -43,6 +48,7 @@ pub struct AuthorizationService {
 
     server_name: Arc<ServerName>,
     configuration: AuthenticationConfiguration,
+    registration_sessions: RwLock<HashSet<String>>,
 }
 
 impl AuthorizationService {
@@ -63,6 +69,7 @@ impl AuthorizationService {
             server_name: Arc::new(server_name.clone()),
 
             configuration,
+            registration_sessions: RwLock::new(HashSet::new()),
         }
     }
 
@@ -85,6 +92,11 @@ impl AuthorizationService {
     }
 
     pub fn registration_uiaa_challenge(&self) -> UiaaResponseView {
+        let session = Uuid::new_v4().to_string();
+        if let Ok(mut sessions) = self.registration_sessions.write() {
+            sessions.insert(session.clone());
+        }
+
         UiaaResponseView {
             completed: Vec::new(),
             flows: vec![AuthenticationFlowView {
@@ -94,7 +106,7 @@ impl AuthorizationService {
                     .collect(),
             }],
             params: json!({}),
-            session: Uuid::new_v4().to_string(),
+            session,
         }
     }
 
@@ -123,10 +135,23 @@ impl AuthorizationService {
             return Err(AuthorizationApplicationError::GuestRegistrationDisabled);
         }
 
+        let authentication = info
+            .authentication
+            .as_ref()
+            .ok_or(AuthorizationApplicationError::Unauthorized)?;
+
+        let session_identifier = authentication
+            .session
+            .as_deref()
+            .ok_or(AuthorizationApplicationError::Unauthorized)?;
+        if !self.is_known_registration_session(session_identifier) {
+            return Err(AuthorizationApplicationError::Unauthorized);
+        }
+
         let authentication_type = UiaaFlowType::from_str(
-            info.authentication
-                .as_ref()
-                .and_then(|authentication| authentication.authentication_type.as_deref())
+            authentication
+                .authentication_type
+                .as_deref()
                 .unwrap_or_default(),
         )
         .map_err(|_| AuthorizationApplicationError::Unauthorized)?;
@@ -153,7 +178,10 @@ impl AuthorizationService {
         }
 
         let encoded_password = PasswordHash::encode(password, &self.configuration.password_pepper)
-            .map_err(|_| AuthorizationApplicationError::Internal)?;
+            .map_err(|encoding_error| {
+                error!(error = %encoding_error, "failed to encode password");
+                AuthorizationApplicationError::Internal
+            })?;
 
         self.user_repository
             .create_user(UserAccount {
@@ -162,7 +190,12 @@ impl AuthorizationService {
                 display_name: user_identifier.to_string(),
                 is_guest,
             })
-            .map_err(|_| AuthorizationApplicationError::Internal)?;
+            .map_err(|repository_error| {
+                error!(error = %repository_error, "failed to create user");
+                AuthorizationApplicationError::Internal
+            })?;
+
+        self.remove_registration_session(session_identifier);
 
         let refresh_token = info
             .refresh_token
@@ -180,8 +213,9 @@ impl AuthorizationService {
             });
         }
 
-        let access_token = AccessToken::parse(self.generate_access_token()?)
-            .ok_or(AuthorizationApplicationError::Internal)?;
+        let (raw_access_token, access_token_expiry_seconds) = self.generate_access_token()?;
+        let access_token =
+            AccessToken::parse(raw_access_token).ok_or(AuthorizationApplicationError::Internal)?;
 
         let device_id = info
             .device_identifier
@@ -196,8 +230,15 @@ impl AuthorizationService {
                     user_identifier.clone(),
                 )),
                 device_id.clone(),
+                access_token_expiry_seconds,
             )))
-            .map_err(|_| AuthorizationApplicationError::Internal)?;
+            .map_err(|repository_error| {
+                error!(
+                    error = %repository_error,
+                    "failed to create registration session"
+                );
+                AuthorizationApplicationError::Internal
+            })?;
 
         Ok(RegisterUserView {
             user_identifier: user_identifier.into_inner(),
@@ -251,8 +292,9 @@ impl AuthorizationService {
             return Err(AuthorizationApplicationError::InvalidCredentials);
         }
 
-        let access_token = AccessToken::parse(self.generate_access_token()?)
-            .ok_or(AuthorizationApplicationError::Internal)?;
+        let (raw_access_token, access_token_expiry_seconds) = self.generate_access_token()?;
+        let access_token =
+            AccessToken::parse(raw_access_token).ok_or(AuthorizationApplicationError::Internal)?;
 
         let device_id = request
             .device_identifier
@@ -267,8 +309,12 @@ impl AuthorizationService {
                     user_identifier.clone(),
                 )),
                 device_id.clone(),
+                access_token_expiry_seconds,
             )))
-            .map_err(|_| AuthorizationApplicationError::Internal)?;
+            .map_err(|repository_error| {
+                error!(error = %repository_error, "failed to create login session");
+                AuthorizationApplicationError::Internal
+            })?;
 
         let refresh_token = request
             .refresh_token
@@ -312,7 +358,10 @@ impl AuthorizationService {
     ) -> Result<LogoutUserView, AuthorizationApplicationError> {
         self.session_repository
             .delete_session_by_access_token(access_token)
-            .map_err(|_| AuthorizationApplicationError::Internal)?;
+            .map_err(|repository_error| {
+                error!(error = %repository_error, "failed to delete session");
+                AuthorizationApplicationError::Internal
+            })?;
 
         Ok(LogoutUserView {})
     }
@@ -391,13 +440,18 @@ impl AuthorizationService {
         format!("{prefix}_{suffix}")
     }
 
-    fn generate_access_token(&self) -> Result<String, AuthorizationApplicationError> {
+    fn generate_access_token(&self) -> Result<(String, i64), AuthorizationApplicationError> {
         let expires_at_seconds =
             self.expiry_from_now(self.configuration.access_token_expiry_seconds)?;
         let expiry_clock = ExpirationClock::new(expires_at_seconds);
-        self.json_web_token_adapter
+        let token = self
+            .json_web_token_adapter
             .encode(&expiry_clock, &self.configuration.json_web_token_secret)
-            .map_err(|_| AuthorizationApplicationError::Internal)
+            .map_err(|token_error| {
+                error!(error = %token_error, "failed to generate access token");
+                AuthorizationApplicationError::Internal
+            })?;
+        Ok((token, expires_at_seconds))
     }
 
     fn generate_refresh_token(&self) -> Result<String, AuthorizationApplicationError> {
@@ -406,7 +460,10 @@ impl AuthorizationService {
         let expiry_clock = ExpirationClock::new(expires_at_seconds);
         self.json_web_token_adapter
             .encode(&expiry_clock, &self.configuration.json_web_token_secret)
-            .map_err(|_| AuthorizationApplicationError::Internal)
+            .map_err(|token_error| {
+                error!(error = %token_error, "failed to generate refresh token");
+                AuthorizationApplicationError::Internal
+            })
     }
 
     fn expiry_from_now(
@@ -417,5 +474,18 @@ impl AuthorizationService {
             i64::try_from(valid_for_seconds)
                 .map_err(|_| AuthorizationApplicationError::Internal)?,
         ))
+    }
+
+    fn is_known_registration_session(&self, session_identifier: &str) -> bool {
+        self.registration_sessions
+            .read()
+            .map(|sessions| sessions.contains(session_identifier))
+            .unwrap_or(false)
+    }
+
+    fn remove_registration_session(&self, session_identifier: &str) {
+        if let Ok(mut sessions) = self.registration_sessions.write() {
+            sessions.remove(session_identifier);
+        }
     }
 }

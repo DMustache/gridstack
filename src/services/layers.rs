@@ -3,6 +3,7 @@ use std::{convert::Infallible, time::Instant};
 use axum::{extract::FromRequestParts, http::request::Parts};
 use http::header::AUTHORIZATION;
 use thiserror::Error;
+use tracing::{error, info};
 
 use crate::services::{authorization::entities::AccessToken, state::ApplicationState};
 
@@ -24,15 +25,22 @@ impl FromRequestParts<ApplicationState> for AuthorizationLayer {
         parts: &mut Parts,
         state: &ApplicationState,
     ) -> Result<Self, Self::Rejection> {
-        let raw_token = Self::try_extract_access_token_from_parts(parts)
-            .ok_or(AuthorizationLayerError::MissingToken)?;
-        let access_token =
-            AccessToken::parse(raw_token).ok_or(AuthorizationLayerError::UnknownToken)?;
+        let raw_token = Self::try_extract_access_token_from_parts(parts).ok_or_else(|| {
+            info!("authorization failed: missing token");
+            AuthorizationLayerError::MissingToken
+        })?;
+        let access_token = AccessToken::parse(raw_token).ok_or_else(|| {
+            info!("authorization failed: token parse error");
+            AuthorizationLayerError::UnknownToken
+        })?;
 
         let access_session = state
             .authorization_service
             .authenticate_access_token(&access_token)
-            .map_err(|_| AuthorizationLayerError::UnknownToken)?;
+            .map_err(|error| {
+                info!(error = %error, "authorization failed: token rejected");
+                AuthorizationLayerError::UnknownToken
+            })?;
 
         parts.extensions.insert(access_session);
 
@@ -117,8 +125,12 @@ impl FromRequestParts<ApplicationState> for RateLimitLayer {
         let allowed = state
             .rate_limiter
             .allow_request(&key, Instant::now())
-            .map_err(|_| RateLimitLayerError::Internal)?;
+            .map_err(|error| {
+                error!(error = %error, key, "rate limiter failure");
+                RateLimitLayerError::Internal
+            })?;
         if !allowed {
+            info!(key, "rate limit exceeded");
             return Err(RateLimitLayerError::RateLimited);
         }
 

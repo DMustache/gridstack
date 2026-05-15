@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use tracing::error;
 
 use crate::{
     infrastructure::server_name::ServerName,
@@ -33,13 +34,19 @@ impl RoomsService {
         info: CreateRoomInfo,
     ) -> Result<CreatedRoom, RoomsApplicationError> {
         let contract = Room::try_create_contract(creator_user_id, info, &self.server_name)
-            .map_err(|error| map_contract_error(&error))?;
+            .map_err(|error| {
+                error!(error = %error, "failed to create room contract");
+                map_contract_error(&error)
+            })?;
 
         if let Some(room_alias_name) = contract.persistence_payload.room_alias_name.as_deref()
             && !self
                 .room_repository
                 .reserve_room_alias(room_alias_name)
-                .map_err(|_| RoomsApplicationError::Internal)?
+                .map_err(|error| {
+                    error!(error = %error, "failed to reserve room alias");
+                    RoomsApplicationError::Internal
+                })?
         {
             return Err(RoomsApplicationError::RoomInUse);
         }
@@ -48,6 +55,7 @@ impl RoomsService {
             .save_room(&contract.persistence_payload)
             .map_err(|error| {
                 let message = error.to_string();
+                error!(error = %message, "failed to persist room");
                 if message.contains("room_aliases") && message.contains("duplicate") {
                     return RoomsApplicationError::RoomInUse;
                 }
