@@ -2,7 +2,7 @@ use super::super::{
     CreatorPowerLevels, EventIdentifierFormat, RoomIdentifierFormat, RoomVersion, RoomVersionRules,
 };
 
-pub fn rules() -> RoomVersionRules {
+pub const fn rules() -> RoomVersionRules {
     RoomVersionRules {
         version: RoomVersion::V10,
         description: "Requires integer-only power levels and adds knock_restricted join rule.",

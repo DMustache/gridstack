@@ -1,7 +1,10 @@
-use crate::infrastructure::user_identifier::UserIdentifier;
+use crate::{
+    infrastructure::user_identifier::UserIdentifier,
+    services::authorization::persistence::access_session_storage_unit::AccessSessionStorageUnit,
+};
 
 use super::{
-    authorization::entities::{AccessSession, AccessToken, UserAccount},
+    authorization::entities::{AccessToken, UserAccount},
     errors::DomainError,
 };
 
@@ -12,8 +15,11 @@ pub trait UserRepository: Send + Sync {
 }
 
 pub trait SessionRepository: Send + Sync {
-    fn create_session(&self, access_session: AccessSession) -> Result<(), DomainError>;
-    fn find_session_by_access_token(&self, access_token: &AccessToken) -> Option<AccessSession>;
+    fn create_session(&self, access_session: AccessSessionStorageUnit) -> Result<(), DomainError>;
+    fn find_session_by_access_token(
+        &self,
+        access_token: &AccessToken,
+    ) -> Option<AccessSessionStorageUnit>;
     fn delete_session_by_access_token(&self, access_token: &AccessToken)
     -> Result<(), DomainError>;
 }

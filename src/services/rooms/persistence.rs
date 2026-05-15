@@ -7,7 +7,7 @@ use diesel::{
 use uuid::Uuid;
 
 use crate::{
-    infrastructure::{schema, user_identifier::UserIdentifier},
+    infrastructure::schema,
     services::{
         errors::DomainError,
         rooms::{

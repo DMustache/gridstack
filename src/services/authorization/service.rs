@@ -9,14 +9,19 @@ use crate::{
         password_hash::PasswordHash, user_identifier::UserIdentifier, username::Username,
     },
     services::{
-        authorization::entities::{AccountKind, ExpirationClock, UiaaFlowType},
+        authorization::{
+            entities::{AccessSession, AccountKind, ExpirationClock, UiaaFlowType},
+            persistence::access_session_storage_unit::AccessSessionStorageUnit,
+        },
         repositories::{SessionRepository, UserRepository},
         traits::{Clock, JsonWebTokenAdapter},
     },
 };
 
 use super::{
-    entities::{AccessSession, AccessToken, LoginType, UserAccount},
+    entities::{
+        AccessToken, AuthorizedUserIdentifier, ExistingUserIdentifier, LoginType, UserAccount,
+    },
     errors::AuthorizationApplicationError,
     handlers::{
         check_username_available::CheckUsernameAvailableView,
@@ -152,7 +157,7 @@ impl AuthorizationService {
             .create_user(UserAccount {
                 user_identifier: user_identifier.clone(),
                 password_hash: encoded_password,
-                display_name: user_identifier.as_str().to_owned(),
+                display_name: user_identifier.to_string(),
                 is_guest,
             })
             .map_err(|_| AuthorizationApplicationError::Internal)?;
@@ -183,11 +188,13 @@ impl AuthorizationService {
             .unwrap_or_default();
 
         self.session_repository
-            .create_session(AccessSession {
-                access_token: access_token.clone(),
-                user_identifier: user_identifier.clone(),
-                device_id: device_id.clone(),
-            })
+            .create_session(AccessSessionStorageUnit::from(AccessSession::new(
+                access_token.clone(),
+                super::entities::AuthorizedUserIdentifier::new(ExistingUserIdentifier::new(
+                    user_identifier.clone(),
+                )),
+                device_id.clone(),
+            )))
             .map_err(|_| AuthorizationApplicationError::Internal)?;
 
         Ok(RegisterUserView {
@@ -252,11 +259,13 @@ impl AuthorizationService {
             .unwrap_or_default();
 
         self.session_repository
-            .create_session(AccessSession {
-                access_token: access_token.clone(),
-                user_identifier: user_identifier.clone(),
-                device_id: device_id.clone(),
-            })
+            .create_session(AccessSessionStorageUnit::from(AccessSession::new(
+                access_token.clone(),
+                super::entities::AuthorizedUserIdentifier::new(ExistingUserIdentifier::new(
+                    user_identifier.clone(),
+                )),
+                device_id.clone(),
+            )))
             .map_err(|_| AuthorizationApplicationError::Internal)?;
 
         let refresh_token = request
@@ -276,17 +285,22 @@ impl AuthorizationService {
 
     pub fn who_am_i_from_session(
         &self,
-        access_session: AccessSession,
+        access_session: &AccessSessionStorageUnit,
     ) -> Result<WhoAmIView, AuthorizationApplicationError> {
         let user_account = self
             .user_repository
-            .find_user_by_identifier(&access_session.user_identifier)
+            .find_user_by_identifier(access_session.user_identifier().as_user_identifier())
             .ok_or(AuthorizationApplicationError::Unauthorized)?;
 
         Ok(WhoAmIView {
-            user_id: access_session.user_identifier.into_inner(),
+            user_id: access_session
+                .user_identifier()
+                .clone()
+                .into_inner()
+                .into_inner()
+                .into_inner(),
             is_guest: user_account.is_guest,
-            device_id: Some(access_session.device_id.into_inner()),
+            device_id: Some(access_session.device_id().clone().into_inner()),
         })
     }
 
@@ -304,7 +318,7 @@ impl AuthorizationService {
     pub fn authenticate_access_token(
         &self,
         access_token: &AccessToken,
-    ) -> Result<AccessSession, AuthorizationApplicationError> {
+    ) -> Result<AccessSessionStorageUnit, AuthorizationApplicationError> {
         if !self.json_web_token_adapter.is_token_valid(
             access_token.as_str(),
             &self.configuration.json_web_token_secret,
@@ -318,6 +332,24 @@ impl AuthorizationService {
             .ok_or(AuthorizationApplicationError::Unauthorized)?;
 
         Ok(session)
+    }
+
+    pub fn require_existing_user_identifier(
+        &self,
+        user_identifier: UserIdentifier,
+    ) -> Result<ExistingUserIdentifier, AuthorizationApplicationError> {
+        if !self.user_repository.user_exists(&user_identifier) {
+            return Err(AuthorizationApplicationError::Unauthorized);
+        }
+
+        Ok(ExistingUserIdentifier::new(user_identifier))
+    }
+
+    pub const fn authorize_existing_user_identifier(
+        &self,
+        existing_user_identifier: ExistingUserIdentifier,
+    ) -> AuthorizedUserIdentifier {
+        AuthorizedUserIdentifier::new(existing_user_identifier)
     }
 
     fn try_parse_user_id(

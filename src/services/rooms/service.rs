@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::{
-    infrastructure::user_identifier::UserIdentifier,
+    services::authorization::entities::AuthorizedUserIdentifier,
     services::rooms::{
         entities::{CreatedRoom, Room, RoomCreateContractError},
         errors::RoomsApplicationError,
@@ -25,11 +25,11 @@ impl RoomsService {
 
     pub fn create_room(
         &self,
-        creator_user_id: &UserIdentifier,
+        creator_user_id: &AuthorizedUserIdentifier,
         info: CreateRoomInfo,
     ) -> Result<CreatedRoom, RoomsApplicationError> {
         let contract = Room::try_create_contract(&self.home_server_name, creator_user_id, info)
-            .map_err(map_contract_error)?;
+            .map_err(|error| map_contract_error(&error))?;
 
         if let Some(room_alias_name) = contract.persistence_payload.room_alias_name.as_deref()
             && !self
@@ -56,7 +56,7 @@ impl RoomsService {
     }
 }
 
-fn map_contract_error(error: RoomCreateContractError) -> RoomsApplicationError {
+const fn map_contract_error(error: &RoomCreateContractError) -> RoomsApplicationError {
     match error {
         RoomCreateContractError::UnsupportedRoomVersion { .. } => {
             RoomsApplicationError::UnsupportedRoomVersion
