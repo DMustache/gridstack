@@ -32,7 +32,7 @@ impl RoomsService {
         creator_user_id: &AuthorizedUserIdentifier,
         info: CreateRoomInfo,
     ) -> Result<CreatedRoom, RoomsApplicationError> {
-        let contract = Room::try_create_contract(self.server_name.as_str(), creator_user_id, info)
+        let contract = Room::try_create_contract(creator_user_id, info, &self.server_name)
             .map_err(|error| map_contract_error(&error))?;
 
         if let Some(room_alias_name) = contract.persistence_payload.room_alias_name.as_deref()

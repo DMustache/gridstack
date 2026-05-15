@@ -21,8 +21,8 @@ impl ServerName {
     pub fn try_new(value: impl Into<String>) -> Option<Self> {
         let value = value.into();
         let candidate = value.trim();
-        let parts = parse_server_name(candidate)?;
-        let host = parse_server_host(parts.host)?;
+        let parts = Self::parse_parts(candidate)?;
+        let host = Self::parse_host(parts.host)?;
         let port = parts.port.map(str::parse).transpose().ok().flatten();
 
         Some(Self {
@@ -56,6 +56,166 @@ impl ServerName {
             ServerNamePresentationFormat::Canonical => self.homeserver_name.clone(),
             ServerNamePresentationFormat::HostOnly => self.host.to_string(),
         }
+    }
+
+    pub fn is_valid(value: &str) -> bool {
+        Self::parse_parts(value).is_some()
+    }
+
+    pub fn split_localpart_and_server_name(value: &str) -> Option<(&str, &str)> {
+        let (localpart, server_name) = value.split_once(':')?;
+        if localpart.is_empty() || !Self::is_valid(server_name) {
+            return None;
+        }
+
+        Some((localpart, server_name))
+    }
+
+    pub fn split_opaque_identifier_and_server_name(value: &str) -> Option<(&str, &str)> {
+        for (index, character) in value.char_indices() {
+            if character != ':' {
+                continue;
+            }
+
+            let opaque_identifier = &value[..index];
+            let server_name = &value[index + 1..];
+            if opaque_identifier.is_empty() || !Self::is_valid(server_name) {
+                continue;
+            }
+
+            return Some((opaque_identifier, server_name));
+        }
+
+        None
+    }
+
+    fn parse_parts(value: &str) -> Option<ServerNameParts<'_>> {
+        let candidate = value.trim();
+        if candidate.is_empty() {
+            return None;
+        }
+
+        if candidate.starts_with('[') {
+            let (host, port) = Self::split_ipv6_literal_and_port(candidate)?;
+            if !Self::is_valid_ipv6_literal(host) {
+                return None;
+            }
+
+            return Some(ServerNameParts { host, port });
+        }
+
+        let (host, port) = Self::split_host_and_optional_port(candidate)?;
+        if !(Self::is_valid_ipv4_literal(host) || Self::is_valid_dns_name(host)) {
+            return None;
+        }
+
+        Some(ServerNameParts { host, port })
+    }
+
+    fn split_ipv6_literal_and_port(candidate: &str) -> Option<(&str, Option<&str>)> {
+        let end_bracket_index = candidate.find(']')?;
+        let host = &candidate[..=end_bracket_index];
+        let remainder = &candidate[end_bracket_index + 1..];
+
+        if remainder.is_empty() {
+            return Some((host, None));
+        }
+
+        let port = remainder.strip_prefix(':')?;
+        if !Self::is_valid_port(port) {
+            return None;
+        }
+
+        Some((host, Some(port)))
+    }
+
+    fn split_host_and_optional_port(candidate: &str) -> Option<(&str, Option<&str>)> {
+        if let Some((host, port)) = candidate.rsplit_once(':') {
+            if host.contains(':') {
+                return None;
+            }
+
+            if !Self::is_valid_port(port) {
+                return None;
+            }
+
+            return Some((host, Some(port)));
+        }
+
+        Some((candidate, None))
+    }
+
+    fn parse_host(value: &str) -> Option<ServerHost> {
+        if Self::is_valid_ipv6_literal(value) {
+            let inner = value.strip_prefix('[')?.strip_suffix(']')?;
+            return Ipv6Addr::from_str(inner).ok().map(ServerHost::Ipv6);
+        }
+        if let Ok(ipv4) = Ipv4Addr::from_str(value) {
+            return Some(ServerHost::Ipv4(ipv4));
+        }
+        Self::is_valid_dns_name(value).then_some(ServerHost::DnsName(value.to_owned()))
+    }
+
+    fn is_valid_port(value: &str) -> bool {
+        let length = value.len();
+        if length == 0 || length > 5 {
+            return false;
+        }
+
+        value.chars().all(|character| character.is_ascii_digit())
+    }
+
+    fn is_valid_ipv4_literal(value: &str) -> bool {
+        Ipv4Addr::from_str(value).is_ok()
+    }
+
+    fn is_valid_ipv6_literal(value: &str) -> bool {
+        let inner = value
+            .strip_prefix('[')
+            .and_then(|host| host.strip_suffix(']'));
+        let Some(inner) = inner else {
+            return false;
+        };
+        if inner.len() < 2 || inner.len() > 45 {
+            return false;
+        }
+
+        Ipv6Addr::from_str(inner).is_ok()
+    }
+
+    fn is_valid_dns_name(value: &str) -> bool {
+        if value.is_empty() || value.len() > 255 {
+            return false;
+        }
+        if value.starts_with('.') || value.ends_with('.') {
+            return false;
+        }
+
+        for label in value.split('.') {
+            if label.is_empty() || label.len() > 63 {
+                return false;
+            }
+
+            let label_bytes = label.as_bytes();
+            let first = label_bytes[0] as char;
+            let last = label_bytes[label_bytes.len() - 1] as char;
+            if !Self::is_ascii_alphanumeric(first) || !Self::is_ascii_alphanumeric(last) {
+                return false;
+            }
+
+            if !label
+                .chars()
+                .all(|character| Self::is_ascii_alphanumeric(character) || character == '-')
+            {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    const fn is_ascii_alphanumeric(character: char) -> bool {
+        character.is_ascii_alphanumeric()
     }
 }
 
@@ -101,198 +261,38 @@ impl std::fmt::Display for ServerHost {
     }
 }
 
-pub fn is_valid_server_name(value: &str) -> bool {
-    parse_server_name(value).is_some()
-}
-
-pub fn parse_server_name(value: &str) -> Option<ServerNameParts<'_>> {
-    let candidate = value.trim();
-    if candidate.is_empty() {
-        return None;
-    }
-
-    if candidate.starts_with('[') {
-        let (host, port) = split_ipv6_literal_and_port(candidate)?;
-        if !is_valid_ipv6_literal(host) {
-            return None;
-        }
-
-        return Some(ServerNameParts { host, port });
-    }
-
-    let (host, port) = split_host_and_optional_port(candidate)?;
-    if !(is_valid_ipv4_literal(host) || is_valid_dns_name(host)) {
-        return None;
-    }
-
-    Some(ServerNameParts { host, port })
-}
-
-pub fn split_localpart_and_server_name(value: &str) -> Option<(&str, &str)> {
-    let (localpart, server_name) = value.split_once(':')?;
-    if localpart.is_empty() || !is_valid_server_name(server_name) {
-        return None;
-    }
-
-    Some((localpart, server_name))
-}
-
-pub fn split_opaque_identifier_and_server_name(value: &str) -> Option<(&str, &str)> {
-    for (index, character) in value.char_indices() {
-        if character != ':' {
-            continue;
-        }
-
-        let opaque_identifier = &value[..index];
-        let server_name = &value[index + 1..];
-        if opaque_identifier.is_empty() || !is_valid_server_name(server_name) {
-            continue;
-        }
-
-        return Some((opaque_identifier, server_name));
-    }
-
-    None
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ServerNameParts<'a> {
+struct ServerNameParts<'a> {
     pub host: &'a str,
     pub port: Option<&'a str>,
 }
 
-fn split_ipv6_literal_and_port(candidate: &str) -> Option<(&str, Option<&str>)> {
-    let end_bracket_index = candidate.find(']')?;
-    let host = &candidate[..=end_bracket_index];
-    let remainder = &candidate[end_bracket_index + 1..];
-
-    if remainder.is_empty() {
-        return Some((host, None));
-    }
-
-    let port = remainder.strip_prefix(':')?;
-    if !is_valid_port(port) {
-        return None;
-    }
-
-    Some((host, Some(port)))
-}
-
-fn split_host_and_optional_port(candidate: &str) -> Option<(&str, Option<&str>)> {
-    if let Some((host, port)) = candidate.rsplit_once(':') {
-        if host.contains(':') {
-            return None;
-        }
-
-        if !is_valid_port(port) {
-            return None;
-        }
-
-        return Some((host, Some(port)));
-    }
-
-    Some((candidate, None))
-}
-
-fn parse_server_host(value: &str) -> Option<ServerHost> {
-    if is_valid_ipv6_literal(value) {
-        let inner = value.strip_prefix('[')?.strip_suffix(']')?;
-        return Ipv6Addr::from_str(inner).ok().map(ServerHost::Ipv6);
-    }
-    if let Ok(ipv4) = Ipv4Addr::from_str(value) {
-        return Some(ServerHost::Ipv4(ipv4));
-    }
-    is_valid_dns_name(value).then_some(ServerHost::DnsName(value.to_owned()))
-}
-
-fn is_valid_port(value: &str) -> bool {
-    let length = value.len();
-    if length == 0 || length > 5 {
-        return false;
-    }
-
-    value.chars().all(|character| character.is_ascii_digit())
-}
-
-fn is_valid_ipv4_literal(value: &str) -> bool {
-    Ipv4Addr::from_str(value).is_ok()
-}
-
-fn is_valid_ipv6_literal(value: &str) -> bool {
-    let inner = value
-        .strip_prefix('[')
-        .and_then(|host| host.strip_suffix(']'));
-    let Some(inner) = inner else {
-        return false;
-    };
-    if inner.len() < 2 || inner.len() > 45 {
-        return false;
-    }
-
-    Ipv6Addr::from_str(inner).is_ok()
-}
-
-fn is_valid_dns_name(value: &str) -> bool {
-    if value.is_empty() || value.len() > 255 {
-        return false;
-    }
-    if value.starts_with('.') || value.ends_with('.') {
-        return false;
-    }
-
-    for label in value.split('.') {
-        if label.is_empty() || label.len() > 63 {
-            return false;
-        }
-
-        let label_bytes = label.as_bytes();
-        let first = label_bytes[0] as char;
-        let last = label_bytes[label_bytes.len() - 1] as char;
-        if !is_ascii_alphanumeric(first) || !is_ascii_alphanumeric(last) {
-            return false;
-        }
-
-        if !label
-            .chars()
-            .all(|character| is_ascii_alphanumeric(character) || character == '-')
-        {
-            return false;
-        }
-    }
-
-    true
-}
-
-const fn is_ascii_alphanumeric(character: char) -> bool {
-    character.is_ascii_alphanumeric()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{ServerHost, ServerName, ServerNamePresentationFormat, is_valid_server_name};
+    use super::{ServerHost, ServerName, ServerNamePresentationFormat};
 
     #[test]
     fn accepts_matrix_spec_examples() {
-        assert!(is_valid_server_name("matrix.org"));
-        assert!(is_valid_server_name("matrix.org:8888"));
-        assert!(is_valid_server_name("1.2.3.4"));
-        assert!(is_valid_server_name("1.2.3.4:1234"));
-        assert!(is_valid_server_name("[1234:5678::abcd]"));
-        assert!(is_valid_server_name("[1234:5678::abcd]:5678"));
+        assert!(ServerName::is_valid("matrix.org"));
+        assert!(ServerName::is_valid("matrix.org:8888"));
+        assert!(ServerName::is_valid("1.2.3.4"));
+        assert!(ServerName::is_valid("1.2.3.4:1234"));
+        assert!(ServerName::is_valid("[1234:5678::abcd]"));
+        assert!(ServerName::is_valid("[1234:5678::abcd]:5678"));
     }
 
     #[test]
     fn rejects_invalid_server_names() {
-        assert!(!is_valid_server_name(""));
-        assert!(!is_valid_server_name("matrix.org:"));
-        assert!(!is_valid_server_name("matrix.org:abc"));
-        assert!(!is_valid_server_name("matrix.org:123456"));
-        assert!(!is_valid_server_name("1.2.3.999"));
-        assert!(!is_valid_server_name("[1234:5678::abcd"));
-        assert!(!is_valid_server_name("1234:5678::abcd"));
-        assert!(!is_valid_server_name("-matrix.org"));
-        assert!(!is_valid_server_name("matrix-.org"));
-        assert!(!is_valid_server_name("matrix..org"));
+        assert!(!ServerName::is_valid(""));
+        assert!(!ServerName::is_valid("matrix.org:"));
+        assert!(!ServerName::is_valid("matrix.org:abc"));
+        assert!(!ServerName::is_valid("matrix.org:123456"));
+        assert!(!ServerName::is_valid("1.2.3.999"));
+        assert!(!ServerName::is_valid("[1234:5678::abcd"));
+        assert!(!ServerName::is_valid("1234:5678::abcd"));
+        assert!(!ServerName::is_valid("-matrix.org"));
+        assert!(!ServerName::is_valid("matrix-.org"));
+        assert!(!ServerName::is_valid("matrix..org"));
     }
 
     #[test]
