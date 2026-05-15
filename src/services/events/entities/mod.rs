@@ -248,8 +248,8 @@ impl RoomV1PersistentDataUnit {
             return Err(RoomEventValidationError::MissingSignatures);
         }
 
-        self.validate_event_references("auth_events", &self.auth_events)?;
-        self.validate_event_references("prev_events", &self.prev_events)?;
+        Self::validate_event_references("auth_events", &self.auth_events)?;
+        Self::validate_event_references("prev_events", &self.prev_events)?;
 
         if self.event_type == "m.room.create" {
             self.validate_create_event_rules(RoomVersion::V1)?;
@@ -263,7 +263,6 @@ impl RoomV1PersistentDataUnit {
     }
 
     fn validate_event_references(
-        &self,
         reference_list_name: &'static str,
         references: &[EventReference],
     ) -> Result<(), RoomEventValidationError> {
@@ -403,10 +402,14 @@ impl RoomV2PersistentDataUnit {
             return Err(RoomEventValidationError::MissingSignatures);
         }
 
-        self.inner
-            .validate_event_references("auth_events", &self.inner.auth_events)?;
-        self.inner
-            .validate_event_references("prev_events", &self.inner.prev_events)?;
+        RoomV1PersistentDataUnit::validate_event_references(
+            "auth_events",
+            &self.inner.auth_events,
+        )?;
+        RoomV1PersistentDataUnit::validate_event_references(
+            "prev_events",
+            &self.inner.prev_events,
+        )?;
 
         if self.inner.event_type == "m.room.create" {
             self.inner.validate_create_event_rules(RoomVersion::V2)?;
@@ -571,7 +574,7 @@ fn partition_unconflicted_and_conflicted_state_sets(
             continue;
         }
 
-        conflicted_state_set.extend(values.into_iter());
+        conflicted_state_set.extend(values);
     }
 
     (unconflicted_state, conflicted_state_set)
@@ -762,7 +765,7 @@ fn order_by_mainline(
 
     let power_level_key = StateEventTypeAndKey {
         event_type: "m.room.power_levels".to_owned(),
-        state_key: "".to_owned(),
+        state_key: String::new(),
     };
     let power_event_id = partially_resolved_state.get(&power_level_key).cloned();
     let mainline_positions = build_mainline_positions(input, power_event_id.as_ref())?;
@@ -824,7 +827,8 @@ fn build_mainline_positions(
     mainline.reverse();
     let mut positions = BTreeMap::new();
     for (index, event_id) in mainline.into_iter().enumerate() {
-        positions.insert(event_id, index as i64);
+        let index_as_i64 = i64::try_from(index).unwrap_or(i64::MAX);
+        positions.insert(event_id, index_as_i64);
     }
 
     Ok(positions)
@@ -841,9 +845,8 @@ fn closest_mainline_position(
             return *position;
         }
 
-        let next_event = match input.events.get(&power_event_id) {
-            Some(next_event) => next_event,
-            None => break,
+        let Some(next_event) = input.events.get(&power_event_id) else {
+            break;
         };
         cursor = select_power_level_auth_event_id(input, &next_event.auth_events);
     }
@@ -861,8 +864,7 @@ fn select_power_level_auth_event_id(
             input
                 .events
                 .get(*event_id)
-                .map(|event| event.event_type == "m.room.power_levels")
-                .unwrap_or(false)
+                .is_some_and(|event| event.event_type == "m.room.power_levels")
         })
         .cloned()
         .min_by(|left, right| left.as_str().cmp(right.as_str()))
@@ -962,6 +964,6 @@ pub enum RoomEventValidationError {
     InvalidRoomIdentifier(#[from] crate::services::rooms::entities::RoomIdentifierValidationError),
 }
 
-fn default_true() -> bool {
+const fn default_true() -> bool {
     true
 }

@@ -1,5 +1,21 @@
+use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ServerName(String);
+
+impl ServerName {
+    pub fn try_new(value: impl Into<String>) -> Option<Self> {
+        let value = value.into();
+        is_valid_server_name(&value).then_some(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 pub fn is_valid_server_name(value: &str) -> bool {
     parse_server_name(value).is_some()
@@ -152,7 +168,7 @@ fn is_valid_dns_name(value: &str) -> bool {
     true
 }
 
-fn is_ascii_alphanumeric(character: char) -> bool {
+const fn is_ascii_alphanumeric(character: char) -> bool {
     character.is_ascii_alphanumeric()
 }
 

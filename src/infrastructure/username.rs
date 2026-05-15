@@ -4,7 +4,7 @@ use std::sync::LazyLock;
 static USERNAME_REGULAR_EXPRESSION: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[a-z0-9\-._=/]+$").unwrap());
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Username(String);
 
 impl Username {

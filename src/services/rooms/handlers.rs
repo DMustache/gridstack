@@ -2,7 +2,7 @@ use axum::{Extension, Json, extract::State};
 use response_derive::IntoResponseEnum;
 
 use crate::services::{
-    entities::AccessSession,
+    authorization::persistence::access_session_storage_unit::AccessSessionStorageUnit,
     rooms::{
         errors::RoomsApplicationError,
         handlers::create_room::{CreateRoomInfo, CreateRoomView},
@@ -34,13 +34,13 @@ pub enum CreateRoomResponse {
 
 pub async fn create_room(
     State(application_state): State<ApplicationState>,
-    Extension(access_session): Extension<AccessSession>,
+    Extension(access_session): Extension<AccessSessionStorageUnit>,
     Json(request): Json<CreateRoomInfo>,
 ) -> CreateRoomResponse {
     CreateRoomResponse::from_result(
         application_state
             .rooms_service
-            .create_room(&access_session.user_identifier, request)
+            .create_room(access_session.user_identifier(), request)
             .map(CreateRoomView::from),
     )
 }

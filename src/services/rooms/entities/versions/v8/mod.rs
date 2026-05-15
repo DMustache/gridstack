@@ -2,7 +2,7 @@ use super::super::{
     CreatorPowerLevels, EventIdentifierFormat, RoomIdentifierFormat, RoomVersion, RoomVersionRules,
 };
 
-pub fn rules() -> RoomVersionRules {
+pub const fn rules() -> RoomVersionRules {
     RoomVersionRules {
         version: RoomVersion::V8,
         description: "Adds restricted join rules based on membership in another room.",

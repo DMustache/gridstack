@@ -35,7 +35,49 @@ pub struct UserAccount {
     pub is_guest: bool,
 }
 
-/// Available via Extension(access_session): Extension<AccessSession> by layer
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ExistingUserIdentifier(UserIdentifier);
+
+impl ExistingUserIdentifier {
+    pub const fn as_user_identifier(&self) -> &UserIdentifier {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> UserIdentifier {
+        self.0
+    }
+
+    pub(in crate::services::authorization) const fn new(user_identifier: UserIdentifier) -> Self {
+        Self(user_identifier)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AuthorizedUserIdentifier(ExistingUserIdentifier);
+
+impl AuthorizedUserIdentifier {
+    pub const fn as_existing_user_identifier(&self) -> &ExistingUserIdentifier {
+        &self.0
+    }
+
+    pub const fn as_user_identifier(&self) -> &UserIdentifier {
+        self.0.as_user_identifier()
+    }
+
+    pub fn into_inner(self) -> ExistingUserIdentifier {
+        self.0
+    }
+
+    pub(in crate::services::authorization) const fn new(
+        existing_user_identifier: ExistingUserIdentifier,
+    ) -> Self {
+        Self(existing_user_identifier)
+    }
+}
+
+/// Available via `Extension(access_session)`: `Extension<AccessSession>` by layer
 /// ```rust
 /// .layer(middleware::from_extractor_with_state::<
 ///     RateLimitLayer,
@@ -44,9 +86,35 @@ pub struct UserAccount {
 /// ```
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AccessSession {
-    pub access_token: AccessToken,
-    pub user_identifier: UserIdentifier,
-    pub device_id: DeviceId,
+    access_token: AccessToken,
+    user_identifier: AuthorizedUserIdentifier,
+    device_id: DeviceId,
+}
+
+impl AccessSession {
+    pub(in crate::services::authorization) const fn new(
+        access_token: AccessToken,
+        user_identifier: AuthorizedUserIdentifier,
+        device_id: DeviceId,
+    ) -> Self {
+        Self {
+            access_token,
+            user_identifier,
+            device_id,
+        }
+    }
+
+    pub const fn access_token(&self) -> &AccessToken {
+        &self.access_token
+    }
+
+    pub const fn user_identifier(&self) -> &AuthorizedUserIdentifier {
+        &self.user_identifier
+    }
+
+    pub const fn device_id(&self) -> &DeviceId {
+        &self.device_id
+    }
 }
 
 #[derive(Debug, Default, Deserialize, Clone, PartialEq, Eq)]

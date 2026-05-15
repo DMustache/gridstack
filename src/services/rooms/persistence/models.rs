@@ -40,6 +40,7 @@ pub struct CreateRoomStateEventModel {
 
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = crate::infrastructure::schema::room_aliases)]
+#[expect(dead_code, reason = "read model reserved for room alias fetch flows")]
 pub struct RoomAliasModel {
     pub alias_localpart: String,
     pub room_id: String,

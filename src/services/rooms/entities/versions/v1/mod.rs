@@ -8,7 +8,7 @@ pub type RoomVersionRulesV1 = RoomVersionRules;
 
 impl RoomVersionRulesContract for RoomVersionRulesV1 {
     fn rules() -> RoomVersionRules {
-        RoomVersionRules {
+        Self {
             version: RoomVersion::V1,
             description: "Initial room version.",
             event_identifier_format: EventIdentifierFormat::ServerAssignedWithDomain,

@@ -18,8 +18,8 @@ use crate::services::{
             },
             who_am_i::WhoAmIView,
         },
+        persistence::access_session_storage_unit::AccessSessionStorageUnit,
     },
-    entities::AccessSession,
     shared::MatrixErrorResponse,
     state::ApplicationState,
 };
@@ -173,12 +173,12 @@ pub enum WhoAmIResponse {
 
 pub async fn who_am_i(
     State(application_state): State<ApplicationState>,
-    Extension(access_session): Extension<AccessSession>,
+    Extension(access_session): Extension<AccessSessionStorageUnit>,
 ) -> WhoAmIResponse {
     WhoAmIResponse::from_result(
         application_state
             .authorization_service
-            .who_am_i_from_session(access_session),
+            .who_am_i_from_session(&access_session),
     )
 }
 
@@ -192,11 +192,11 @@ pub enum LogoutUserResponse {
 
 pub async fn logout_user(
     State(application_state): State<ApplicationState>,
-    Extension(access_session): Extension<AccessSession>,
+    Extension(access_session): Extension<AccessSessionStorageUnit>,
 ) -> LogoutUserResponse {
     LogoutUserResponse::from_result(
         application_state
             .authorization_service
-            .logout_user(&access_session.access_token),
+            .logout_user(access_session.access_token()),
     )
 }

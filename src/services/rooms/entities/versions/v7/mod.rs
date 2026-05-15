@@ -2,7 +2,7 @@ use super::super::{
     CreatorPowerLevels, EventIdentifierFormat, RoomIdentifierFormat, RoomVersion, RoomVersionRules,
 };
 
-pub fn rules() -> RoomVersionRules {
+pub const fn rules() -> RoomVersionRules {
     RoomVersionRules {
         version: RoomVersion::V7,
         description: "Introduces knocking membership and join behavior.",

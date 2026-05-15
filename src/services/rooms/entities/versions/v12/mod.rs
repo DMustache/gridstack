@@ -2,7 +2,7 @@ use super::super::{
     CreatorPowerLevels, EventIdentifierFormat, RoomIdentifierFormat, RoomVersion, RoomVersionRules,
 };
 
-pub fn rules() -> RoomVersionRules {
+pub const fn rules() -> RoomVersionRules {
     RoomVersionRules {
         version: RoomVersion::V12,
         description: "Room IDs are hash-derived, room creators are formalized with infinite power, and state resolution is updated.",

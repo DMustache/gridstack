@@ -14,14 +14,19 @@ use crate::{
     infrastructure::{schema, user_identifier::UserIdentifier},
     services::{
         authorization::{
-            entities::{AccessSession, AccessToken, UserAccount},
-            persistence::users::{CreateUserModel, UserModel},
+            entities::{AccessToken, UserAccount},
+            persistence::{
+                access_session_storage_unit::AccessSessionStorageUnit,
+                users::{CreateUserModel, UserModel},
+            },
         },
         errors::DomainError,
         repositories::{SessionRepository, UserRepository},
     },
 };
 mod users;
+
+pub mod access_session_storage_unit;
 
 #[derive(Clone)]
 pub struct AuthorizationPersistence {
@@ -97,22 +102,25 @@ impl UserRepository for AuthorizationPersistence {
 
 #[derive(Default)]
 pub struct InMemorySessionRepository {
-    sessions_by_token: RwLock<std::collections::HashMap<String, AccessSession>>,
+    sessions_by_token: RwLock<std::collections::HashMap<String, AccessSessionStorageUnit>>,
 }
 
 impl SessionRepository for InMemorySessionRepository {
-    fn create_session(&self, access_session: AccessSession) -> Result<(), DomainError> {
+    fn create_session(&self, access_session: AccessSessionStorageUnit) -> Result<(), DomainError> {
         self.sessions_by_token
             .write()
             .map_err(|_| DomainError::InvalidRequest("session storage lock failure".to_owned()))?
             .insert(
-                access_session.access_token.as_str().to_owned(),
+                access_session.access_token().clone().into_inner(),
                 access_session,
             );
         Ok(())
     }
 
-    fn find_session_by_access_token(&self, access_token: &AccessToken) -> Option<AccessSession> {
+    fn find_session_by_access_token(
+        &self,
+        access_token: &AccessToken,
+    ) -> Option<AccessSessionStorageUnit> {
         let sessions_by_token = self.sessions_by_token.read().ok()?;
         sessions_by_token.get(access_token.as_str()).cloned()
     }

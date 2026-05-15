@@ -7,6 +7,7 @@ use uuid::Uuid;
 use crate::{
     infrastructure::{server_name, user_identifier::UserIdentifier},
     services::{
+        authorization::entities::AuthorizedUserIdentifier,
         events::entities::event_kinds::EventDefinitionKey,
         rooms::{
             entities::versions::RoomVersion,
@@ -86,6 +87,10 @@ pub enum CreatorPowerLevels {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "room version capability matrix"
+)]
 pub struct RoomVersionRules {
     pub version: RoomVersion,
     pub description: &'static str,
@@ -176,7 +181,7 @@ pub struct RoomVersionBusinessRules {
 }
 
 impl RoomVersionBusinessRules {
-    pub fn new(room_version: RoomVersion) -> Self {
+    pub const fn new(room_version: RoomVersion) -> Self {
         Self { room_version }
     }
 
@@ -244,7 +249,7 @@ impl RoomVersionBusinessRules {
         }
     }
 
-    pub fn supported_events(self) -> &'static [EventDefinitionKey] {
+    pub const fn supported_events(self) -> &'static [EventDefinitionKey] {
         const EVENTS_V1: &[EventDefinitionKey] = &[
             EventDefinitionKey::RoomCreate,
             EventDefinitionKey::RoomAliases,
@@ -378,7 +383,7 @@ impl Room {
 
     pub fn try_create_contract(
         home_server_name: &str,
-        creator_user_id: &UserIdentifier,
+        creator_user_id: &AuthorizedUserIdentifier,
         info: CreateRoomInfo,
     ) -> Result<CreateRoomContract, RoomCreateContractError> {
         if !server_name::is_valid_server_name(home_server_name) {
@@ -402,7 +407,7 @@ impl Room {
                 room_id: room_id_value.clone(),
             }
         })?;
-        let room = Self::new(room_id.clone(), room_version)?;
+        let room = Self::new(room_id, room_version)?;
 
         if let Some(room_alias_name) = info.room_alias_name.as_deref()
             && room_alias_name.trim().is_empty()
@@ -445,7 +450,7 @@ impl Room {
         }
 
         let payload = CreateRoomPersistencePayload {
-            creator_user_id: creator_user_id.as_str().to_owned(),
+            creator_user_id: creator_user_id.as_user_identifier().as_str().to_owned(),
             initial_state: initial_state_payload,
             is_direct: info.is_direct,
             name: info.name,
@@ -470,11 +475,11 @@ impl Room {
         })
     }
 
-    pub fn business_rules(&self) -> RoomVersionBusinessRules {
+    pub const fn business_rules(&self) -> RoomVersionBusinessRules {
         RoomVersionBusinessRules::new(self.room_version)
     }
 
-    pub fn supported_events(&self) -> &'static [EventDefinitionKey] {
+    pub const fn supported_events(&self) -> &'static [EventDefinitionKey] {
         self.business_rules().supported_events()
     }
 
@@ -625,18 +630,18 @@ pub struct RoomForVersion<V: RoomVersionMarker> {
 }
 
 impl<V: RoomVersionMarker> RoomForVersion<V> {
-    fn new(room_id: RoomIdentifier) -> Self {
+    const fn new(room_id: RoomIdentifier) -> Self {
         Self {
             room_id,
             marker: PhantomData,
         }
     }
 
-    pub fn room_id(&self) -> &RoomIdentifier {
+    pub const fn room_id(&self) -> &RoomIdentifier {
         &self.room_id
     }
 
-    pub fn version(&self) -> RoomVersion {
+    pub const fn version(&self) -> RoomVersion {
         V::VERSION
     }
 
@@ -646,25 +651,25 @@ impl<V: RoomVersionMarker> RoomForVersion<V> {
 }
 
 impl<V: SupportsKnocking> RoomForVersion<V> {
-    pub fn knocking_capability(&self) -> &'static str {
+    pub const fn knocking_capability(&self) -> &'static str {
         "knock membership and knock join rules are valid in this room version"
     }
 }
 
 impl<V: SupportsRestrictedJoinRules> RoomForVersion<V> {
-    pub fn restricted_join_rule_capability(&self) -> &'static str {
+    pub const fn restricted_join_rule_capability(&self) -> &'static str {
         "restricted join rules are valid in this room version"
     }
 }
 
 impl<V: SupportsKnockRestrictedJoinRule> RoomForVersion<V> {
-    pub fn knock_restricted_join_rule_capability(&self) -> &'static str {
+    pub const fn knock_restricted_join_rule_capability(&self) -> &'static str {
         "knock_restricted join rule is valid in this room version"
     }
 }
 
 impl<V: SupportsAdditionalRoomCreators> RoomForVersion<V> {
-    pub fn additional_room_creators_capability(&self) -> &'static str {
+    pub const fn additional_room_creators_capability(&self) -> &'static str {
         "additional room creators are valid in this room version"
     }
 }
@@ -686,7 +691,7 @@ pub enum VersionedRoom {
 }
 
 impl VersionedRoom {
-    pub fn version(&self) -> RoomVersion {
+    pub const fn version(&self) -> RoomVersion {
         match self {
             Self::V1(_) => RoomVersion::V1,
             Self::V2(_) => RoomVersion::V2,
@@ -707,11 +712,11 @@ impl VersionedRoom {
         self.version().rules()
     }
 
-    pub fn business_rules(&self) -> RoomVersionBusinessRules {
+    pub const fn business_rules(&self) -> RoomVersionBusinessRules {
         RoomVersionBusinessRules::new(self.version())
     }
 
-    pub fn supported_events(&self) -> &'static [EventDefinitionKey] {
+    pub const fn supported_events(&self) -> &'static [EventDefinitionKey] {
         self.business_rules().supported_events()
     }
 }

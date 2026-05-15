@@ -74,7 +74,7 @@ pub enum RoomVersion {
 }
 
 impl RoomVersion {
-    pub fn as_number(self) -> u8 {
+    pub const fn as_number(self) -> u8 {
         self as u8
     }
 

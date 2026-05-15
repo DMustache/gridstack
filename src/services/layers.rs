@@ -4,9 +4,7 @@ use axum::{extract::FromRequestParts, http::request::Parts};
 use http::header::AUTHORIZATION;
 use thiserror::Error;
 
-use crate::services::{
-    authorization::entities::AccessToken, entities::AccessSession, state::ApplicationState,
-};
+use crate::services::{authorization::entities::AccessToken, state::ApplicationState};
 
 pub struct AuthorizationLayer;
 pub struct OptionalAuthorizationLayer;
@@ -35,10 +33,6 @@ impl FromRequestParts<ApplicationState> for AuthorizationLayer {
             .authorization_service
             .authenticate_access_token(&access_token)
             .map_err(|_| AuthorizationLayerError::UnknownToken)?;
-        let access_session = AccessSession {
-            access_token,
-            ..access_session
-        };
 
         parts.extensions.insert(access_session);
 
@@ -53,17 +47,18 @@ impl FromRequestParts<ApplicationState> for OptionalAuthorizationLayer {
         parts: &mut Parts,
         state: &ApplicationState,
     ) -> Result<Self, Self::Rejection> {
-        let user_id = AuthorizationLayer::try_extract_access_token_from_parts(parts)
-            .and_then(AccessToken::parse)
-            .and_then(|access_token| {
-                state
-                    .authorization_service
-                    .authenticate_access_token(&access_token)
-                    .ok()
-                    .map(|access_session| access_session.user_identifier)
-            });
+        let authorized_user_identifier =
+            AuthorizationLayer::try_extract_access_token_from_parts(parts)
+                .and_then(AccessToken::parse)
+                .and_then(|access_token| {
+                    state
+                        .authorization_service
+                        .authenticate_access_token(&access_token)
+                        .ok()
+                        .map(|access_session| access_session.user_identifier().clone())
+                });
 
-        parts.extensions.insert(user_id);
+        parts.extensions.insert(authorized_user_identifier);
 
         Ok(Self)
     }
