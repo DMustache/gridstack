@@ -7,7 +7,7 @@ use crate::infrastructure::server_name;
 pub struct UserIdentifier(String);
 
 impl UserIdentifier {
-    pub fn parse(value: impl Into<String>) -> Option<Self> {
+    fn parse(value: impl Into<String>) -> Option<Self> {
         let value = value.into();
         let candidate = value.trim();
         if candidate.is_empty() {
@@ -41,5 +41,13 @@ impl UserIdentifier {
 
     pub fn into_inner(self) -> String {
         self.0
+    }
+}
+
+impl TryFrom<String> for UserIdentifier {
+    type Error = &'static str;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(value).ok_or("invalid user identifier")
     }
 }

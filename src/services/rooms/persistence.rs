@@ -11,7 +11,7 @@ use crate::{
     services::{
         errors::DomainError,
         rooms::{
-            handlers::create_room::{CreateRoomInfo, RoomPreset, RoomVisibility},
+            entities::CreateRoomPersistencePayload,
             persistence::models::{
                 CreateRoomAliasModel, CreateRoomModel, CreateRoomStateEventModel,
             },
@@ -23,12 +23,7 @@ mod models;
 
 pub trait RoomRepository: Send + Sync {
     fn reserve_room_alias(&self, room_alias_name: &str) -> Result<bool, DomainError>;
-    fn save_room(
-        &self,
-        room_id: &str,
-        creator_user_id: &UserIdentifier,
-        request: &CreateRoomInfo,
-    ) -> Result<(), DomainError>;
+    fn save_room(&self, payload: &CreateRoomPersistencePayload) -> Result<(), DomainError>;
 }
 
 #[derive(Clone)]
@@ -66,12 +61,7 @@ impl RoomRepository for RoomPersistence {
         Ok(existing.is_none())
     }
 
-    fn save_room(
-        &self,
-        room_id: &str,
-        creator_user_id: &UserIdentifier,
-        request: &CreateRoomInfo,
-    ) -> Result<(), DomainError> {
+    fn save_room(&self, payload: &CreateRoomPersistencePayload) -> Result<(), DomainError> {
         use schema::{room_aliases, room_state_events, rooms};
 
         let mut connection = self
@@ -83,24 +73,14 @@ impl RoomRepository for RoomPersistence {
             .transaction(|connection| {
                 let now = Utc::now().naive_utc();
                 let create_room = CreateRoomModel {
-                    room_id: room_id.to_owned(),
-                    room_version: request.room_version.clone(),
-                    creator_user_id: creator_user_id.as_str().to_owned(),
-                    is_direct: request.is_direct,
-                    name: request.name.clone(),
-                    topic: request.topic.clone(),
-                    visibility: request
-                        .visibility
-                        .as_ref()
-                        .map(|visibility| match visibility {
-                            RoomVisibility::Public => "public".to_owned(),
-                            RoomVisibility::Private => "private".to_owned(),
-                        }),
-                    preset: request.preset.as_ref().map(|preset| match preset {
-                        RoomPreset::PrivateChat => "private_chat".to_owned(),
-                        RoomPreset::PublicChat => "public_chat".to_owned(),
-                        RoomPreset::TrustedPrivateChat => "trusted_private_chat".to_owned(),
-                    }),
+                    room_id: payload.room_id.clone(),
+                    room_version: Some(payload.room_version.clone()),
+                    creator_user_id: payload.creator_user_id.clone(),
+                    is_direct: payload.is_direct,
+                    name: payload.name.clone(),
+                    topic: payload.topic.clone(),
+                    visibility: payload.visibility.clone(),
+                    preset: payload.preset.clone(),
                     created_at: now,
                     updated_at: now,
                 };
@@ -109,27 +89,27 @@ impl RoomRepository for RoomPersistence {
                     .values(create_room)
                     .execute(connection)?;
 
-                if let Some(alias_localpart) = request.room_alias_name.as_ref() {
+                if let Some(alias_localpart) = payload.room_alias_name.as_ref() {
                     insert_into(room_aliases::table)
                         .values(CreateRoomAliasModel {
                             alias_localpart: alias_localpart.clone(),
-                            room_id: room_id.to_owned(),
+                            room_id: payload.room_id.clone(),
                             created_at: now,
                         })
                         .execute(connection)?;
                 }
 
-                if let Some(initial_state) = request.initial_state.as_ref() {
-                    let events = initial_state
+                if !payload.initial_state.is_empty() {
+                    let events = payload
+                        .initial_state
                         .iter()
-                        .enumerate()
-                        .map(|(index, event)| CreateRoomStateEventModel {
+                        .map(|event| CreateRoomStateEventModel {
                             id: Uuid::new_v4(),
-                            room_id: room_id.to_owned(),
+                            room_id: payload.room_id.clone(),
                             event_type: event.event_type.clone(),
-                            state_key: event.state_key.clone().unwrap_or_default(),
+                            state_key: event.state_key.clone(),
                             content: event.content.clone(),
-                            ordering: i32::try_from(index).unwrap_or(i32::MAX),
+                            ordering: event.ordering,
                             created_at: now,
                         })
                         .collect::<Vec<_>>();

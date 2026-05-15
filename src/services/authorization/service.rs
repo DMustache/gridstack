@@ -329,8 +329,8 @@ impl AuthorizationService {
             return Err(AuthorizationApplicationError::InvalidUsername);
         }
         if candidate.starts_with('@') && candidate.contains(':') {
-            return UserIdentifier::parse(candidate.to_owned())
-                .ok_or(AuthorizationApplicationError::InvalidUsername);
+            return UserIdentifier::try_from(candidate.to_owned())
+                .map_err(|_| AuthorizationApplicationError::InvalidUsername);
         }
 
         let username =
