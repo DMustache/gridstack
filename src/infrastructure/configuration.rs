@@ -3,6 +3,8 @@ use std::net::SocketAddr;
 use config::Config;
 use serde::Deserialize;
 
+use crate::infrastructure::server_name::{ServerName, ServerNamePresentationFormat};
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct ApplicationConfiguration {
     pub server: ServerConfiguration,
@@ -15,6 +17,8 @@ pub struct ApplicationConfiguration {
 pub struct ServerConfiguration {
     pub host: String,
     pub port: u16,
+    #[serde(default)]
+    pub server_name_presentation: ServerNamePresentationFormat,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -57,5 +61,16 @@ impl ApplicationConfiguration {
 impl ServerConfiguration {
     pub fn socket_address(&self) -> anyhow::Result<SocketAddr> {
         Ok(format!("{}:{}", self.host, self.port).parse()?)
+    }
+
+    pub fn server_name(&self) -> anyhow::Result<ServerName> {
+        ServerName::try_new(format!("{}:{}", self.host, self.port))
+            .ok_or_else(|| anyhow::anyhow!("invalid server name in server.host/server.port"))
+    }
+
+    pub fn presented_server_name(&self) -> anyhow::Result<String> {
+        Ok(self
+            .server_name()?
+            .present(self.server_name_presentation))
     }
 }
