@@ -1,12 +1,12 @@
-use std::{str::FromStr, sync::Arc};
-
 use serde_json::json;
+use std::{str::FromStr, sync::Arc};
 use uuid::Uuid;
 
 use crate::{
     infrastructure::{
         configuration::AuthenticationConfiguration, device_id::DeviceId,
-        password_hash::PasswordHash, user_identifier::UserIdentifier, username::Username,
+        password_hash::PasswordHash, server_name::ServerName, user_identifier::UserIdentifier,
+        username::Username,
     },
     services::{
         authorization::{
@@ -40,7 +40,8 @@ pub struct AuthorizationService {
     session_repository: Arc<dyn SessionRepository>,
     clock: Arc<dyn Clock>,
     json_web_token_adapter: Arc<dyn JsonWebTokenAdapter>,
-    home_server_name: String,
+
+    server_name: Arc<ServerName>,
     configuration: AuthenticationConfiguration,
 }
 
@@ -50,7 +51,7 @@ impl AuthorizationService {
         session_repository: Arc<dyn SessionRepository>,
         json_web_token_adapter: Arc<dyn JsonWebTokenAdapter>,
         clock: Arc<dyn Clock>,
-        home_server_name: String,
+        server_name: &ServerName,
         configuration: AuthenticationConfiguration,
     ) -> Self {
         Self {
@@ -58,7 +59,8 @@ impl AuthorizationService {
             session_repository,
             clock,
             json_web_token_adapter,
-            home_server_name,
+
+            server_name: Arc::new(server_name.clone()),
             configuration,
         }
     }
@@ -110,9 +112,8 @@ impl AuthorizationService {
         &self,
         query: &RegisterUserQueryInfo,
         info: &RegisterUserInfo,
-        allow_registration: bool,
     ) -> Result<RegisterUserView, AuthorizationApplicationError> {
-        if !allow_registration {
+        if !self.configuration.allow_registration {
             return Err(AuthorizationApplicationError::RegistrationDisabled);
         }
 
@@ -201,7 +202,7 @@ impl AuthorizationService {
             user_identifier: user_identifier.into_inner(),
             access_token: Some(access_token.into_inner()),
             device_identifier: Some(device_id.into_inner()),
-            home_server_name: Some(self.home_server_name.clone()),
+            home_server_name: Some(self.server_name.as_str().to_string()),
             expires_in_milliseconds: Some(
                 self.configuration
                     .access_token_expiry_as_milliseconds()
@@ -277,7 +278,7 @@ impl AuthorizationService {
             access_token: access_token.into_inner(),
             device_id: device_id.into_inner(),
             expires_in_milliseconds: Some(self.configuration.access_token_expiry_as_milliseconds()),
-            home_server: Some(self.home_server_name.clone()),
+            home_server: Some(self.server_name.as_str().to_string()),
             refresh_token,
             user_id: user_identifier.into_inner(),
         })
@@ -367,7 +368,7 @@ impl AuthorizationService {
 
         let username =
             Username::try_new(candidate).ok_or(AuthorizationApplicationError::InvalidUsername)?;
-        UserIdentifier::from_localpart_and_server(username.as_str(), &self.home_server_name)
+        UserIdentifier::from_localpart_and_server(username.as_str(), self.server_name.as_str())
             .ok_or(AuthorizationApplicationError::InvalidUsername)
     }
 

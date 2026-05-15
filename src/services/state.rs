@@ -7,7 +7,7 @@ use std::{
 use crate::{
     infrastructure::{
         chrono_clock::ChronoClock, configuration::ApplicationConfiguration,
-        json_web_token::JsonWebToken,
+        json_web_token::JsonWebToken, server_name::ServerName,
     },
     services::{
         authorization::{
@@ -30,7 +30,7 @@ pub struct ApplicationState {
     pub authorization_service: Arc<AuthorizationService>,
     pub rooms_service: Arc<RoomsService>,
     pub session_repository: Arc<dyn SessionRepository>,
-    pub home_server_name: String,
+    pub server_name: ServerName,
     pub allow_registration: bool,
     pub rate_limiter: Arc<RateLimiterState>,
 }
@@ -68,27 +68,28 @@ impl ApplicationState {
             "{}:{}",
             application_configuration.server.host, application_configuration.server.port
         );
+        let server_name = ServerName::try_new(home_server_name).expect("Server Name Invalid");
 
         let authorization_service = Arc::new(AuthorizationService::new(
             user_repository,
             Arc::<dyn SessionRepository>::clone(&session_repository),
             json_web_token_adapter,
             clock,
-            home_server_name.clone(),
+            &server_name,
             application_configuration.authenification.clone(),
         ));
         let room_repository: Arc<dyn RoomRepository> = Arc::new(
             RoomPersistence::new(&application_configuration.database.url)
                 .expect("failed to initialize room postgres pool"),
         );
-        let rooms_service = Arc::new(RoomsService::new(room_repository, home_server_name.clone()));
+        let rooms_service = Arc::new(RoomsService::new(room_repository, &server_name));
         let rate_limiter = Arc::new(RateLimiterState::new(Duration::from_mins(1), 120));
 
         Self {
             authorization_service,
             rooms_service,
             session_repository,
-            home_server_name,
+            server_name,
             allow_registration: application_configuration.authenification.allow_registration,
             rate_limiter,
         }
