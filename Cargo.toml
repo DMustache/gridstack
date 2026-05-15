@@ -24,6 +24,9 @@ diesel = { version = "2.3.5", features = ["postgres", "chrono", "serde_json", "u
 anyhow = "1.0.100"
 thiserror = "2.0.17"
 regex = "1.12.2"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+tower-http = { version = "0.6.6", features = ["trace"] }
 
 config = "0.15.22"
 

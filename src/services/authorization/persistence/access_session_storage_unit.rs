@@ -8,6 +8,7 @@ pub struct AccessSessionStorageUnit {
     access_token: AccessToken,
     user_identifier: AuthorizedUserIdentifier,
     device_id: DeviceId,
+    expires_at_seconds: i64,
 }
 
 impl AccessSessionStorageUnit {
@@ -22,6 +23,24 @@ impl AccessSessionStorageUnit {
     pub const fn device_id(&self) -> &DeviceId {
         &self.device_id
     }
+
+    pub const fn expires_at_seconds(&self) -> i64 {
+        self.expires_at_seconds
+    }
+
+    pub(in crate::services::authorization) const fn new(
+        access_token: AccessToken,
+        user_identifier: AuthorizedUserIdentifier,
+        device_id: DeviceId,
+        expires_at_seconds: i64,
+    ) -> Self {
+        Self {
+            access_token,
+            user_identifier,
+            device_id,
+            expires_at_seconds,
+        }
+    }
 }
 
 impl From<AccessSession> for AccessSessionStorageUnit {
@@ -30,6 +49,7 @@ impl From<AccessSession> for AccessSessionStorageUnit {
             access_token: value.access_token().clone(),
             user_identifier: value.user_identifier().clone(),
             device_id: value.device_id().clone(),
+            expires_at_seconds: value.expires_at_seconds(),
         }
     }
 }

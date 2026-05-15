@@ -7,6 +7,7 @@ use axum::{
 use response_derive::IntoResponseEnum;
 use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
+use tracing::{error, info};
 
 use crate::services::{
     layers::{AuthorizationLayerError, RateLimitLayerError},
@@ -74,6 +75,15 @@ fn configured_rate_limit_retry_after_ms() -> u64 {
 
 impl IntoResponse for ApplicationError {
     fn into_response(self) -> Response {
+        match &self {
+            Self::Internal(internal_error) => {
+                error!(error = %internal_error, "application internal error");
+            }
+            _ => {
+                info!(error = %self, "application request failed");
+            }
+        }
+
         let status_code = match self {
             Self::Conflict => StatusCode::CONFLICT,
             Self::NotFound => StatusCode::NOT_FOUND,
@@ -132,6 +142,7 @@ pub enum RateLimitLayerResponse {
 
 impl IntoResponse for AuthorizationLayerError {
     fn into_response(self) -> Response {
+        info!(error = %self, "authorization layer rejected request");
         match self {
             Self::MissingToken => (
                 StatusCode::UNAUTHORIZED,
@@ -155,6 +166,10 @@ impl IntoResponse for AuthorizationLayerError {
 
 impl IntoResponse for RateLimitLayerError {
     fn into_response(self) -> Response {
+        match &self {
+            Self::Internal => error!("rate limit layer internal failure"),
+            Self::RateLimited => info!("rate limit layer rejected request"),
+        }
         match self {
             Self::RateLimited => (
                 StatusCode::TOO_MANY_REQUESTS,

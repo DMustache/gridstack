@@ -22,4 +22,7 @@ pub trait SessionRepository: Send + Sync {
     ) -> Option<AccessSessionStorageUnit>;
     fn delete_session_by_access_token(&self, access_token: &AccessToken)
     -> Result<(), DomainError>;
+    fn flush(&self) -> Result<(), DomainError> {
+        Ok(())
+    }
 }

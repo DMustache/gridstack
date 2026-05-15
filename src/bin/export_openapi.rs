@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     env, fs,
     path::{Path, PathBuf},
 };
@@ -17,26 +17,35 @@ fn main() -> Result<()> {
         .nth(1)
         .map_or_else(|| PathBuf::from("openapi.json"), PathBuf::from);
 
-    let routes_file = Path::new("src/services/authorization/routes.rs");
-    let handlers_dir = Path::new("src/services/authorization/handlers");
-    let handlers_file = handlers_dir.join("../handlers.rs");
+    let services_root = Path::new("src/services");
+    let route_files = discover_route_files(services_root)?;
+    let source_files = discover_source_files(services_root)?;
+
+    if route_files.is_empty() {
+        bail!(
+            "no service route files were detected in {}",
+            services_root.display()
+        );
+    }
+
+    let entities_dir = Path::new("src/services/authorization/entities");
     let layer_responses_file = Path::new("src/services/errors.rs");
     let shared_file = Path::new("src/services/shared.rs");
 
-    let operations = extract_operations(routes_file)?;
-    let handler_specs = extract_handler_specs(&handlers_file)?;
-    let response_specs = extract_response_specs(&handlers_file)?;
+    let operations = extract_operations(&route_files)?;
+    let handler_specs = extract_handler_specs_from_files(&source_files)?;
+    let response_specs = extract_response_specs_from_files(&source_files)?;
     let layer_response_specs = extract_response_specs(layer_responses_file)?;
-    let error_messages = collect_error_messages(&[
-        handlers_file.as_path(),
-        layer_responses_file,
-        Path::new("src/services/authorization/errors.rs"),
-        Path::new("src/services/layers.rs"),
-    ])?;
+    let source_paths = source_files
+        .iter()
+        .map(PathBuf::as_path)
+        .collect::<Vec<_>>();
+    let error_messages = collect_error_messages(&source_paths)?;
     let response_specs = enrich_response_specs(response_specs, &error_messages);
     let layer_response_specs = enrich_response_specs(layer_response_specs, &error_messages);
 
-    let mut schemas = extract_schemas_from_dir(handlers_dir)?;
+    let mut schemas = extract_schemas_from_files(&source_files)?;
+    schemas.extend(extract_schemas_from_dir(entities_dir)?);
     schemas.extend(extract_schemas_from_file(shared_file)?);
 
     let mut paths: BTreeMap<String, Value> = BTreeMap::new();
@@ -58,8 +67,10 @@ fn main() -> Result<()> {
         object.insert(op.method, method_object);
     }
 
+    let referenced_schemas = retain_referenced_schemas(&paths, &schemas);
+
     let mut schema_map = Map::new();
-    for (name, schema) in schemas {
+    for (name, schema) in referenced_schemas {
         schema_map.insert(name, schema);
     }
 
@@ -107,6 +118,7 @@ struct RouteOperation {
     path: String,
     method: String,
     operation_id: String,
+    service_tag: String,
     layers: Vec<String>,
 }
 
@@ -133,35 +145,85 @@ enum AuthRequirement {
     Optional,
 }
 
-fn extract_operations(routes_file: &Path) -> Result<Vec<RouteOperation>> {
-    let content = fs::read_to_string(routes_file)
-        .with_context(|| format!("failed to read {}", routes_file.display()))?;
-    let parsed: File = syn::parse_file(&content)
-        .with_context(|| format!("failed to parse {}", routes_file.display()))?;
+fn discover_route_files(services_root: &Path) -> Result<Vec<PathBuf>> {
+    let mut route_files = Vec::new();
+    for path in discover_source_files(services_root)? {
+        if path.file_name().and_then(|v| v.to_str()) == Some("routes.rs") {
+            route_files.push(path);
+        }
+    }
+    route_files.sort();
+    Ok(route_files)
+}
 
+fn discover_source_files(root: &Path) -> Result<Vec<PathBuf>> {
+    fn walk(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+        for entry in
+            fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, files)?;
+            } else if path.extension().and_then(|v| v.to_str()) == Some("rs") {
+                files.push(path);
+            }
+        }
+        Ok(())
+    }
+
+    let mut files = Vec::new();
+    walk(root, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
+fn service_tag_from_routes_file(routes_file: &Path) -> String {
+    routes_file
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|v| v.to_str())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| "services".to_owned())
+}
+
+fn extract_operations(route_files: &[PathBuf]) -> Result<Vec<RouteOperation>> {
     let mut operations = Vec::new();
-    for item in parsed.items {
-        if let Item::Fn(function) = item {
-            collect_route_calls_from_block(&function.block.stmts, &mut operations);
+    for routes_file in route_files {
+        let content = fs::read_to_string(routes_file)
+            .with_context(|| format!("failed to read {}", routes_file.display()))?;
+        let parsed: File = syn::parse_file(&content)
+            .with_context(|| format!("failed to parse {}", routes_file.display()))?;
+        let service_tag = service_tag_from_routes_file(routes_file);
+
+        for item in parsed.items {
+            if let Item::Fn(function) = item {
+                collect_route_calls_from_block(
+                    &function.block.stmts,
+                    &service_tag,
+                    &mut operations,
+                );
+            }
         }
     }
 
     if operations.is_empty() {
-        bail!(
-            "no authorization routes were detected in {}",
-            routes_file.display()
-        );
+        bail!("no service routes were detected");
     }
 
     Ok(operations)
 }
 
-fn collect_route_calls_from_block(stmts: &[syn::Stmt], operations: &mut Vec<RouteOperation>) {
+fn collect_route_calls_from_block(
+    stmts: &[syn::Stmt],
+    service_tag: &str,
+    operations: &mut Vec<RouteOperation>,
+) {
     for stmt in stmts {
         if let syn::Stmt::Expr(expr, _) = stmt {
             let mut steps = Vec::new();
             flatten_router_steps(expr, &mut steps);
-            apply_router_steps(&steps, operations);
+            apply_router_steps(&steps, service_tag, operations);
         }
     }
 }
@@ -216,11 +278,15 @@ fn extract_layer_name(expr: &Expr) -> Option<String> {
     layer_type.path.segments.last().map(|s| s.ident.to_string())
 }
 
-fn apply_router_steps(steps: &[RouterStep], operations: &mut Vec<RouteOperation>) {
+fn apply_router_steps(
+    steps: &[RouterStep],
+    service_tag: &str,
+    operations: &mut Vec<RouteOperation>,
+) {
     for step in steps {
         match step {
             RouterStep::Route { path, route_expr } => {
-                collect_http_methods(route_expr, path, operations);
+                collect_http_methods(route_expr, path, service_tag, operations);
             }
             RouterStep::Layer { layer_name } => {
                 for op in operations.iter_mut() {
@@ -233,7 +299,12 @@ fn apply_router_steps(steps: &[RouterStep], operations: &mut Vec<RouteOperation>
     }
 }
 
-fn collect_http_methods(expr: &Expr, path: &str, operations: &mut Vec<RouteOperation>) {
+fn collect_http_methods(
+    expr: &Expr,
+    path: &str,
+    service_tag: &str,
+    operations: &mut Vec<RouteOperation>,
+) {
     if let Expr::Call(call) = expr
         && let Expr::Path(path_expr) = &*call.func
         && let Some(segment) = path_expr.path.segments.last()
@@ -247,6 +318,7 @@ fn collect_http_methods(expr: &Expr, path: &str, operations: &mut Vec<RouteOpera
                 path: path.to_owned(),
                 method,
                 operation_id: handler_segment.ident.to_string(),
+                service_tag: service_tag.to_owned(),
                 layers: Vec::new(),
             });
         }
@@ -254,7 +326,7 @@ fn collect_http_methods(expr: &Expr, path: &str, operations: &mut Vec<RouteOpera
     }
 
     if let Expr::MethodCall(call) = expr {
-        collect_http_methods(&call.receiver, path, operations);
+        collect_http_methods(&call.receiver, path, service_tag, operations);
         let method = call.method.to_string();
         if matches!(method.as_str(), "get" | "post" | "put" | "patch" | "delete")
             && let Some(Expr::Path(handler_path)) = call.args.first()
@@ -264,6 +336,7 @@ fn collect_http_methods(expr: &Expr, path: &str, operations: &mut Vec<RouteOpera
                 path: path.to_owned(),
                 method,
                 operation_id: handler_segment.ident.to_string(),
+                service_tag: service_tag.to_owned(),
                 layers: Vec::new(),
             });
         }
@@ -319,6 +392,15 @@ fn extract_handler_specs(handlers_file: &Path) -> Result<HashMap<String, Handler
     }
 
     Ok(specs)
+}
+
+fn extract_handler_specs_from_files(paths: &[PathBuf]) -> Result<HashMap<String, HandlerSpec>> {
+    let mut all_specs = HashMap::new();
+    for path in paths {
+        let specs = extract_handler_specs(path)?;
+        all_specs.extend(specs);
+    }
+    Ok(all_specs)
 }
 
 const fn merge_auth_requirement(
@@ -465,6 +547,17 @@ fn extract_response_specs(
     }
 
     Ok(specs)
+}
+
+fn extract_response_specs_from_files(
+    paths: &[PathBuf],
+) -> Result<HashMap<String, Vec<ResponseVariantSpec>>> {
+    let mut all_specs = HashMap::new();
+    for path in paths {
+        let specs = extract_response_specs(path)?;
+        all_specs.extend(specs);
+    }
+    Ok(all_specs)
 }
 
 fn parse_error_entry(expr: Expr) -> Option<(String, String)> {
@@ -616,7 +709,7 @@ fn build_method_object(
     let handler = handler_specs.get(&op.operation_id);
 
     let mut method = Map::new();
-    method.insert("tags".to_owned(), json!(["authorization"]));
+    method.insert("tags".to_owned(), json!([op.service_tag]));
     method.insert("operationId".to_owned(), json!(op.operation_id));
 
     if let Some(query_type) = handler.and_then(|h| h.query_type.as_ref()) {
@@ -868,6 +961,61 @@ fn merge_response_spec(
     }
 }
 
+fn retain_referenced_schemas(
+    paths: &BTreeMap<String, Value>,
+    schemas: &HashMap<String, Value>,
+) -> BTreeMap<String, Value> {
+    let mut required = BTreeSet::new();
+    for path_item in paths.values() {
+        collect_schema_refs_from_value(path_item, &mut required);
+    }
+
+    let mut queue = required.iter().cloned().collect::<Vec<_>>();
+    while let Some(name) = queue.pop() {
+        let Some(schema) = schemas.get(&name) else {
+            continue;
+        };
+
+        let mut nested = BTreeSet::new();
+        collect_schema_refs_from_value(schema, &mut nested);
+        for nested_name in nested {
+            if required.insert(nested_name.clone()) {
+                queue.push(nested_name);
+            }
+        }
+    }
+
+    let mut filtered = BTreeMap::new();
+    for name in required {
+        if let Some(schema) = schemas.get(&name) {
+            filtered.insert(name, schema.clone());
+        }
+    }
+    filtered
+}
+
+fn collect_schema_refs_from_value(value: &Value, refs: &mut BTreeSet<String>) {
+    match value {
+        Value::Object(object) => {
+            if let Some(Value::String(reference)) = object.get("$ref") {
+                const COMPONENT_PREFIX: &str = "#/components/schemas/";
+                if let Some(name) = reference.strip_prefix(COMPONENT_PREFIX) {
+                    refs.insert(name.to_owned());
+                }
+            }
+            for child in object.values() {
+                collect_schema_refs_from_value(child, refs);
+            }
+        }
+        Value::Array(array) => {
+            for child in array {
+                collect_schema_refs_from_value(child, refs);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn extract_schemas_from_dir(dir: &Path) -> Result<HashMap<String, Value>> {
     let mut schemas = HashMap::new();
     for entry in fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))? {
@@ -881,6 +1029,14 @@ fn extract_schemas_from_dir(dir: &Path) -> Result<HashMap<String, Value>> {
     Ok(schemas)
 }
 
+fn extract_schemas_from_files(paths: &[PathBuf]) -> Result<HashMap<String, Value>> {
+    let mut schemas = HashMap::new();
+    for path in paths {
+        schemas.extend(extract_schemas_from_file(path)?);
+    }
+    Ok(schemas)
+}
+
 fn extract_schemas_from_file(path: &Path) -> Result<HashMap<String, Value>> {
     let content =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
@@ -889,38 +1045,173 @@ fn extract_schemas_from_file(path: &Path) -> Result<HashMap<String, Value>> {
 
     let mut schemas = HashMap::new();
     for item in parsed.items {
-        if let Item::Struct(item_struct) = item {
-            let struct_name = item_struct.ident.to_string();
-            let fields = match item_struct.fields {
-                syn::Fields::Named(named) => named.named,
-                _ => continue,
-            };
+        match item {
+            Item::Struct(item_struct) => {
+                let struct_name = item_struct.ident.to_string();
+                let fields = match item_struct.fields {
+                    syn::Fields::Named(named) => named.named,
+                    _ => continue,
+                };
 
-            let mut properties = Map::new();
-            let mut required = Vec::new();
+                let mut properties = Map::new();
+                let mut required = Vec::new();
 
-            for field in fields {
-                let field_name = field.ident.context("missing field name")?.to_string();
-                let (serialized_name, optional, schema) =
-                    convert_field(&field_name, &field.ty, &field.attrs);
-                if !optional {
-                    required.push(serialized_name.clone());
+                for field in fields {
+                    let field_name = field.ident.context("missing field name")?.to_string();
+                    let (serialized_name, optional, schema) =
+                        convert_field(&field_name, &field.ty, &field.attrs);
+                    if !optional {
+                        required.push(serialized_name.clone());
+                    }
+                    properties.insert(serialized_name, schema);
                 }
-                properties.insert(serialized_name, schema);
-            }
 
-            let mut schema = Map::new();
-            schema.insert("type".to_owned(), json!("object"));
-            schema.insert("properties".to_owned(), Value::Object(properties));
-            if !required.is_empty() {
-                schema.insert("required".to_owned(), json!(required));
-            }
+                let mut schema = Map::new();
+                schema.insert("type".to_owned(), json!("object"));
+                schema.insert("properties".to_owned(), Value::Object(properties));
+                if !required.is_empty() {
+                    schema.insert("required".to_owned(), json!(required));
+                }
 
-            schemas.insert(struct_name, Value::Object(schema));
+                schemas.insert(struct_name, Value::Object(schema));
+            }
+            Item::Enum(item_enum) => {
+                let enum_name = item_enum.ident.to_string();
+                let schema = enum_to_schema(&item_enum);
+                schemas.insert(enum_name, schema);
+            }
+            _ => {}
         }
     }
 
     Ok(schemas)
+}
+
+fn enum_to_schema(item_enum: &syn::ItemEnum) -> Value {
+    let rename_all = serde_rename_all(&item_enum.attrs);
+    let mut variants = Vec::new();
+    let mut has_payload = false;
+
+    for variant in &item_enum.variants {
+        if variant_serde_other(&variant.attrs) {
+            continue;
+        }
+
+        match &variant.fields {
+            syn::Fields::Unit => {
+                variants.push(enum_variant_serialized_name(
+                    &variant.ident.to_string(),
+                    &variant.attrs,
+                    rename_all.as_deref(),
+                ));
+            }
+            _ => {
+                has_payload = true;
+                break;
+            }
+        }
+    }
+
+    if !has_payload && !variants.is_empty() {
+        return json!({
+            "type": "string",
+            "enum": variants,
+        });
+    }
+
+    json!({
+        "type": "object",
+        "additionalProperties": true
+    })
+}
+
+fn serde_rename_all(attrs: &[syn::Attribute]) -> Option<String> {
+    for attr in attrs {
+        if !attr.path().is_ident("serde") {
+            continue;
+        }
+
+        let mut rename_all = None;
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("rename_all") {
+                let value: LitStr = meta.value()?.parse()?;
+                rename_all = Some(value.value());
+            }
+            Ok(())
+        });
+        if rename_all.is_some() {
+            return rename_all;
+        }
+    }
+    None
+}
+
+fn variant_serde_other(attrs: &[syn::Attribute]) -> bool {
+    for attr in attrs {
+        if !attr.path().is_ident("serde") {
+            continue;
+        }
+
+        let mut is_other = false;
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("other") {
+                is_other = true;
+            }
+            Ok(())
+        });
+        if is_other {
+            return true;
+        }
+    }
+    false
+}
+
+fn enum_variant_serialized_name(
+    variant_name: &str,
+    attrs: &[syn::Attribute],
+    rename_all: Option<&str>,
+) -> String {
+    for attr in attrs {
+        if !attr.path().is_ident("serde") {
+            continue;
+        }
+
+        let mut renamed = None;
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("rename") {
+                let value: LitStr = meta.value()?.parse()?;
+                renamed = Some(value.value());
+            }
+            Ok(())
+        });
+        if let Some(name) = renamed {
+            return name;
+        }
+    }
+
+    apply_rename_rule(variant_name, rename_all)
+}
+
+fn apply_rename_rule(name: &str, rename_all: Option<&str>) -> String {
+    match rename_all {
+        Some("snake_case") => {
+            let mut out = String::new();
+            for (index, ch) in name.chars().enumerate() {
+                if ch.is_uppercase() {
+                    if index > 0 {
+                        out.push('_');
+                    }
+                    for lower in ch.to_lowercase() {
+                        out.push(lower);
+                    }
+                } else {
+                    out.push(ch);
+                }
+            }
+            out
+        }
+        _ => name.to_owned(),
+    }
 }
 
 fn convert_field(
@@ -986,6 +1277,13 @@ fn type_to_schema(ty: &Type) -> (Value, bool) {
             {
                 let (inner_schema, _) = type_to_schema(inner);
                 return (json!({ "type": "array", "items": inner_schema }), false);
+            }
+
+            if matches!(ident.as_str(), "Arc" | "Box")
+                && let PathArguments::AngleBracketed(args) = &segment.arguments
+                && let Some(GenericArgument::Type(inner)) = args.args.first()
+            {
+                return type_to_schema(inner);
             }
 
             if ident == "BTreeMap" || ident == "HashMap" {

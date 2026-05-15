@@ -97,6 +97,7 @@ pub struct AccessSession {
     access_token: AccessToken,
     user_identifier: AuthorizedUserIdentifier,
     device_id: DeviceId,
+    expires_at_seconds: i64,
 }
 
 impl AccessSession {
@@ -104,11 +105,13 @@ impl AccessSession {
         access_token: AccessToken,
         user_identifier: AuthorizedUserIdentifier,
         device_id: DeviceId,
+        expires_at_seconds: i64,
     ) -> Self {
         Self {
             access_token,
             user_identifier,
             device_id,
+            expires_at_seconds,
         }
     }
 
@@ -122,6 +125,10 @@ impl AccessSession {
 
     pub const fn device_id(&self) -> &DeviceId {
         &self.device_id
+    }
+
+    pub const fn expires_at_seconds(&self) -> i64 {
+        self.expires_at_seconds
     }
 }
 

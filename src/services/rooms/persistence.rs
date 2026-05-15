@@ -32,13 +32,12 @@ pub struct RoomPersistence {
 }
 
 impl RoomPersistence {
-    pub fn new(database_url: &str) -> Result<Self, DomainError> {
+    #[must_use]
+    pub fn new(database_url: &str) -> Self {
         let manager = ConnectionManager::<PgConnection>::new(database_url);
-        let connection_pool = r2d2::Pool::builder()
-            .build(manager)
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+        let connection_pool = r2d2::Pool::builder().build_unchecked(manager);
 
-        Ok(Self { connection_pool })
+        Self { connection_pool }
     }
 }
 

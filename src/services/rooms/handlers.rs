@@ -1,5 +1,6 @@
 use axum::{Extension, Json, extract::State};
 use response_derive::IntoResponseEnum;
+use tracing::{error, info};
 
 use crate::services::{
     authorization::persistence::access_session_storage_unit::AccessSessionStorageUnit,
@@ -37,10 +38,23 @@ pub async fn create_room(
     Extension(access_session): Extension<AccessSessionStorageUnit>,
     Json(request): Json<CreateRoomInfo>,
 ) -> CreateRoomResponse {
-    CreateRoomResponse::from_result(
-        application_state
-            .rooms_service
-            .create_room(access_session.user_identifier(), request)
-            .map(CreateRoomView::from),
-    )
+    match application_state
+        .rooms_service
+        .create_room(access_session.user_identifier(), request)
+        .map(CreateRoomView::from)
+    {
+        Ok(view) => {
+            info!("room creation completed");
+            CreateRoomResponse::Ok(Json(view))
+        }
+        Err(error_kind) => {
+            match error_kind {
+                RoomsApplicationError::Internal => {
+                    error!("room creation failed with internal error");
+                }
+                _ => info!(error = %error_kind, "room creation rejected"),
+            }
+            CreateRoomResponse::from_mapped_error(error_kind)
+        }
+    }
 }

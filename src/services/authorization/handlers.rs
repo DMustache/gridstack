@@ -1,8 +1,10 @@
 use axum::{
     Extension, Json,
     extract::{Query, State},
+    http::{HeaderMap, header::AUTHORIZATION},
 };
 use response_derive::IntoResponseEnum;
+use tracing::{error, info};
 
 use crate::services::{
     authorization::{
@@ -43,9 +45,16 @@ pub enum GetAuthMetadataResponse {
 pub async fn get_auth_metadata(
     State(application_state): State<ApplicationState>,
 ) -> GetAuthMetadataResponse {
-    GetAuthMetadataResponse::from_result(
-        application_state.authorization_service.get_auth_metadata(),
-    )
+    match application_state.authorization_service.get_auth_metadata() {
+        Ok(view) => {
+            info!("authorization metadata requested");
+            GetAuthMetadataResponse::Ok(Json(view))
+        }
+        Err(error_kind) => {
+            info!(error = %error_kind, "authorization metadata request failed");
+            GetAuthMetadataResponse::from_mapped_error(error_kind)
+        }
+    }
 }
 
 #[derive(IntoResponseEnum)]
@@ -59,7 +68,16 @@ pub enum GetLoginFlowsResponse {
 pub async fn get_login_flows(
     State(application_state): State<ApplicationState>,
 ) -> GetLoginFlowsResponse {
-    GetLoginFlowsResponse::from_result(application_state.authorization_service.get_login_flows())
+    match application_state.authorization_service.get_login_flows() {
+        Ok(view) => {
+            info!("login flows requested");
+            GetLoginFlowsResponse::Ok(Json(view))
+        }
+        Err(error_kind) => {
+            info!(error = %error_kind, "login flows request failed");
+            GetLoginFlowsResponse::from_mapped_error(error_kind)
+        }
+    }
 }
 
 #[derive(IntoResponseEnum)]
@@ -81,11 +99,19 @@ pub async fn check_username_available(
     State(application_state): State<ApplicationState>,
     Query(query_info): Query<CheckUsernameAvailableInfo>,
 ) -> CheckUsernameAvailableResponse {
-    CheckUsernameAvailableResponse::from_result(
-        application_state
-            .authorization_service
-            .check_username_available(query_info.username),
-    )
+    match application_state
+        .authorization_service
+        .check_username_available(query_info.username)
+    {
+        Ok(view) => {
+            info!("username availability checked");
+            CheckUsernameAvailableResponse::Ok(Json(view))
+        }
+        Err(error_kind) => {
+            info!(error = %error_kind, "username availability check failed");
+            CheckUsernameAvailableResponse::from_mapped_error(error_kind)
+        }
+    }
 }
 
 #[derive(IntoResponseEnum)]
@@ -121,15 +147,27 @@ pub async fn register_user(
         .authorization_service
         .register_user(&query_info, &register_user_info)
     {
-        Ok(response) => RegisterUserResponse::Ok(Json(response)),
+        Ok(response) => {
+            info!("user registration completed");
+            RegisterUserResponse::Ok(Json(response))
+        }
         Err(AuthorizationApplicationError::Unauthorized) => {
+            info!("user registration requires additional auth");
             RegisterUserResponse::Unauthorized(Json(
                 application_state
                     .authorization_service
                     .registration_uiaa_challenge(),
             ))
         }
-        Err(error) => RegisterUserResponse::from_mapped_error(error),
+        Err(error_kind) => {
+            match error_kind {
+                AuthorizationApplicationError::Internal => {
+                    error!("user registration failed with internal error");
+                }
+                _ => info!(error = %error_kind, "user registration rejected"),
+            }
+            RegisterUserResponse::from_mapped_error(error_kind)
+        }
     }
 }
 
@@ -153,11 +191,24 @@ pub async fn login_user(
     State(application_state): State<ApplicationState>,
     Json(login_user_info): Json<LoginUserInfo>,
 ) -> LoginUserResponse {
-    LoginUserResponse::from_result(
-        application_state
-            .authorization_service
-            .login_user(login_user_info),
-    )
+    match application_state
+        .authorization_service
+        .login_user(login_user_info)
+    {
+        Ok(view) => {
+            info!("user login completed");
+            LoginUserResponse::Ok(Json(view))
+        }
+        Err(error_kind) => {
+            match error_kind {
+                AuthorizationApplicationError::Internal => {
+                    error!("user login failed with internal error");
+                }
+                _ => info!(error = %error_kind, "user login rejected"),
+            }
+            LoginUserResponse::from_mapped_error(error_kind)
+        }
+    }
 }
 
 #[derive(IntoResponseEnum)]
@@ -174,28 +225,95 @@ pub async fn who_am_i(
     State(application_state): State<ApplicationState>,
     Extension(access_session): Extension<AccessSessionStorageUnit>,
 ) -> WhoAmIResponse {
-    WhoAmIResponse::from_result(
-        application_state
-            .authorization_service
-            .who_am_i_from_session(&access_session),
-    )
+    match application_state
+        .authorization_service
+        .who_am_i_from_session(&access_session)
+    {
+        Ok(view) => {
+            info!("whoami requested");
+            WhoAmIResponse::Ok(Json(view))
+        }
+        Err(error_kind) => {
+            info!(error = %error_kind, "whoami request failed");
+            WhoAmIResponse::from_mapped_error(error_kind)
+        }
+    }
 }
 
 #[derive(IntoResponseEnum)]
 pub enum LogoutUserResponse {
     #[matrix(status = 200)]
     Ok(Json<LogoutUserView>),
-    #[matrix(status = 401, error = [(matrix_error = "M_UNKNOWN_TOKEN", from = AuthorizationApplicationError::Unauthorized)])]
-    Unauthorized(Json<MatrixErrorResponse>),
 }
 
 pub async fn logout_user(
     State(application_state): State<ApplicationState>,
-    Extension(access_session): Extension<AccessSessionStorageUnit>,
+    Query(query_info): Query<LogoutQueryInfo>,
+    headers: HeaderMap,
 ) -> LogoutUserResponse {
-    LogoutUserResponse::from_result(
-        application_state
+    if let Some(raw_access_token) = extract_logout_access_token(&headers, &query_info)
+        && let Some(access_token) =
+            crate::services::authorization::entities::AccessToken::parse(raw_access_token)
+    {
+        match application_state
             .authorization_service
-            .logout_user(access_session.access_token()),
-    )
+            .authenticate_access_token(&access_token)
+        {
+            Ok(_) => match application_state
+                .authorization_service
+                .logout_user(&access_token)
+            {
+                Ok(_) => info!("user logout completed for valid token"),
+                Err(error_kind) => match error_kind {
+                    AuthorizationApplicationError::Internal => {
+                        error!("user logout failed with internal error");
+                    }
+                    _ => {
+                        info!(error = %error_kind, "user logout rejected after auth success");
+                    }
+                },
+            },
+            Err(error_kind) => match error_kind {
+                AuthorizationApplicationError::Unauthorized => {
+                    info!("user logout called with invalid or expired token");
+                }
+                _ => {
+                    error!(error = %error_kind, "user logout token validation failed");
+                }
+            },
+        }
+    } else {
+        info!("user logout called without token; returning success");
+    }
+
+    LogoutUserResponse::Ok(Json(LogoutUserView {}))
+}
+
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+pub struct LogoutQueryInfo {
+    pub access_token: Option<String>,
+}
+
+fn extract_logout_access_token(
+    headers: &HeaderMap,
+    query_info: &LogoutQueryInfo,
+) -> Option<String> {
+    if let Some(value) = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+    {
+        let mut tokens = value.split_whitespace();
+        if let (Some(scheme), Some(token)) = (tokens.next(), tokens.next())
+            && scheme.eq_ignore_ascii_case("bearer")
+            && !token.is_empty()
+        {
+            return Some(token.to_owned());
+        }
+    }
+
+    query_info
+        .access_token
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
 }

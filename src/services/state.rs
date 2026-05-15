@@ -1,8 +1,11 @@
+use diesel::{Connection, pg::PgConnection};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
+use tracing::info;
+use tracing::warn;
 
 use crate::{
     infrastructure::{
@@ -53,14 +56,16 @@ impl ApplicationState {
     #[allow(clippy::expect_used)]
     #[must_use]
     pub fn new(application_configuration: &ApplicationConfiguration) -> Self {
+        info!("initializing application state");
         set_rate_limit_retry_after_ms(application_configuration.rate_limit.retry_after_ms);
+        log_database_startup_status(&application_configuration.database.url);
 
-        let user_repository: Arc<dyn UserRepository> = Arc::new(
-            AuthorizationPersistence::new(&application_configuration.database.url)
-                .expect("failed to initialize authorization postgres pool"),
+        let user_repository: Arc<dyn UserRepository> = Arc::new(AuthorizationPersistence::new(
+            &application_configuration.database.url,
+        ));
+        let session_repository: Arc<dyn SessionRepository> = Arc::new(
+            InMemorySessionRepository::from_storage_path("generated/state/access_sessions.tsv"),
         );
-        let session_repository: Arc<dyn SessionRepository> =
-            Arc::new(InMemorySessionRepository::default());
         let json_web_token_adapter: Arc<dyn JsonWebTokenAdapter> = Arc::new(JsonWebToken);
         let clock: Arc<dyn Clock> = Arc::new(ChronoClock);
 
@@ -77,12 +82,12 @@ impl ApplicationState {
             &server_name,
             application_configuration.authenification.clone(),
         ));
-        let room_repository: Arc<dyn RoomRepository> = Arc::new(
-            RoomPersistence::new(&application_configuration.database.url)
-                .expect("failed to initialize room postgres pool"),
-        );
+        let room_repository: Arc<dyn RoomRepository> = Arc::new(RoomPersistence::new(
+            &application_configuration.database.url,
+        ));
         let rooms_service = Arc::new(RoomsService::new(room_repository, &server_name));
         let rate_limiter = Arc::new(RateLimiterState::new(Duration::from_mins(1), 120));
+        info!("application state initialized");
 
         Self {
             authorization_service,
@@ -92,6 +97,24 @@ impl ApplicationState {
             allow_registration: application_configuration.authenification.allow_registration,
             rate_limiter,
         }
+    }
+
+    pub fn flush_runtime_state(&self) {
+        if let Err(error) = self.session_repository.flush() {
+            tracing::error!(error = %error, "failed to flush runtime state");
+        } else {
+            tracing::info!("runtime state flushed");
+        }
+    }
+}
+
+fn log_database_startup_status(database_url: &str) {
+    match PgConnection::establish(database_url) {
+        Ok(_) => info!("database connection confirmed during startup"),
+        Err(error) => warn!(
+            error = %error,
+            "database is unavailable at startup; continuing and retrying on demand"
+        ),
     }
 }
 
