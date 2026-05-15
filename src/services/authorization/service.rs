@@ -61,6 +61,7 @@ impl AuthorizationService {
             json_web_token_adapter,
 
             server_name: Arc::new(server_name.clone()),
+
             configuration,
         }
     }

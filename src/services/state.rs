@@ -64,11 +64,10 @@ impl ApplicationState {
         let json_web_token_adapter: Arc<dyn JsonWebTokenAdapter> = Arc::new(JsonWebToken);
         let clock: Arc<dyn Clock> = Arc::new(ChronoClock);
 
-        let home_server_name = format!(
-            "{}:{}",
-            application_configuration.server.host, application_configuration.server.port
-        );
-        let server_name = ServerName::try_new(home_server_name).expect("Server Name Invalid");
+        let server_name = application_configuration
+            .server
+            .server_name()
+            .expect("Server Name Invalid");
 
         let authorization_service = Arc::new(AuthorizationService::new(
             user_repository,
