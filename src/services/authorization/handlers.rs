@@ -117,11 +117,10 @@ pub async fn register_user(
     Query(query_info): Query<RegisterUserQueryInfo>,
     Json(register_user_info): Json<RegisterUserInfo>,
 ) -> RegisterUserResponse {
-    match application_state.authorization_service.register_user(
-        &query_info,
-        &register_user_info,
-        application_state.allow_registration,
-    ) {
+    match application_state
+        .authorization_service
+        .register_user(&query_info, &register_user_info)
+    {
         Ok(response) => RegisterUserResponse::Ok(Json(response)),
         Err(AuthorizationApplicationError::Unauthorized) => {
             RegisterUserResponse::Unauthorized(Json(

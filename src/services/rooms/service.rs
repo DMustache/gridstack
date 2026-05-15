@@ -1,25 +1,29 @@
 use std::sync::Arc;
 
 use crate::{
-    services::authorization::entities::AuthorizedUserIdentifier,
-    services::rooms::{
-        entities::{CreatedRoom, Room, RoomCreateContractError},
-        errors::RoomsApplicationError,
-        handlers::create_room::CreateRoomInfo,
-        persistence::RoomRepository,
+    infrastructure::server_name::ServerName,
+    services::{
+        authorization::entities::AuthorizedUserIdentifier,
+        rooms::{
+            entities::{CreatedRoom, Room, RoomCreateContractError},
+            errors::RoomsApplicationError,
+            handlers::create_room::CreateRoomInfo,
+            persistence::RoomRepository,
+        },
     },
 };
 
 pub struct RoomsService {
     room_repository: Arc<dyn RoomRepository>,
-    home_server_name: String,
+
+    server_name: Arc<ServerName>,
 }
 
 impl RoomsService {
-    pub fn new(room_repository: Arc<dyn RoomRepository>, home_server_name: String) -> Self {
+    pub fn new(room_repository: Arc<dyn RoomRepository>, server_name: &ServerName) -> Self {
         Self {
             room_repository,
-            home_server_name,
+            server_name: Arc::new(server_name.clone()),
         }
     }
 
@@ -28,7 +32,7 @@ impl RoomsService {
         creator_user_id: &AuthorizedUserIdentifier,
         info: CreateRoomInfo,
     ) -> Result<CreatedRoom, RoomsApplicationError> {
-        let contract = Room::try_create_contract(&self.home_server_name, creator_user_id, info)
+        let contract = Room::try_create_contract(self.server_name.as_str(), creator_user_id, info)
             .map_err(|error| map_contract_error(&error))?;
 
         if let Some(room_alias_name) = contract.persistence_payload.room_alias_name.as_deref()
