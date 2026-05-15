@@ -1,11 +1,11 @@
-use std::{marker::PhantomData, str::FromStr};
+use std::{marker::PhantomData, str::FromStr, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    infrastructure::{server_name, user_identifier::UserIdentifier},
+    infrastructure::{server_name::ServerName, user_identifier::UserIdentifier},
     services::{
         authorization::entities::AuthorizedUserIdentifier,
         events::entities::event_kinds::EventDefinitionKey,
@@ -280,36 +280,41 @@ impl RoomVersionBusinessRules {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct RoomIdentifier(String);
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RoomIdentifier {
+    localpart: String,
+    server_name: Option<ServerName>,
+    full_identifier: Arc<String>,
+}
 
 impl RoomIdentifier {
+    /// # Panics
+    ///
+    /// Panics if a UUID-generated localpart or the provided validated `home_server_name`
+    /// cannot form a valid room identifier.
+    pub fn generate(home_server_name: &ServerName) -> Self {
+        let localpart = Uuid::new_v4().simple().to_string();
+        Self::from_localpart_and_server(&localpart, home_server_name)
+            .expect("generated room identifier must be valid")
+    }
+
     pub fn parse(value: impl Into<String>) -> Option<Self> {
         let candidate = value.into();
-        let (localpart, _) =
-            server_name::split_localpart_and_server_name(candidate.strip_prefix('!')?)?;
-        if localpart.is_empty() {
-            return None;
-        }
-
-        Some(Self(candidate))
+        let (localpart, server_name) =
+            ServerName::split_localpart_and_server_name(candidate.strip_prefix('!')?)?;
+        Self::from_localpart_and_server(localpart, &ServerName::try_new(server_name)?)
     }
 
     pub fn parse_domain_less(value: impl Into<String>) -> Option<Self> {
         let candidate = value.into();
         let localpart = candidate.strip_prefix('!')?;
-        if localpart.is_empty() || localpart.contains(':') {
-            return None;
-        }
-
-        Some(Self(candidate))
+        Self::from_localpart(localpart)
     }
 
     pub fn validate(&self) -> Result<(), RoomIdentifierValidationError> {
-        if Self::parse(self.0.clone()).is_none() {
+        if self.server_name.is_none() {
             return Err(RoomIdentifierValidationError::InvalidStructure {
-                room_id: self.0.clone(),
+                room_id: self.as_str().to_owned(),
                 expected: "room IDs must use the `!localpart:server.name` format",
             });
         }
@@ -324,12 +329,12 @@ impl RoomIdentifier {
         match room_version {
             1 | 2 => self.validate(),
             _ => {
-                if self.validate().is_ok() || Self::parse_domain_less(self.0.clone()).is_some() {
+                if self.validate().is_ok() || self.server_name.is_none() {
                     return Ok(());
                 }
 
                 Err(RoomIdentifierValidationError::InvalidStructure {
-                    room_id: self.0.clone(),
+                    room_id: self.as_str().to_owned(),
                     expected: "room IDs must use `!localpart:server.name` or hash-only `!localpart` form depending on version rules",
                 })
             }
@@ -337,12 +342,70 @@ impl RoomIdentifier {
     }
 
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.full_identifier
     }
 
     pub fn server_name(&self) -> Option<&str> {
-        let (_, server_name) = self.0.strip_prefix('!')?.split_once(':')?;
-        server_name::is_valid_server_name(server_name).then_some(server_name)
+        self.server_name.as_ref().map(ServerName::as_str)
+    }
+
+    pub fn localpart(&self) -> &str {
+        &self.localpart
+    }
+
+    pub const fn server_name_value(&self) -> Option<&ServerName> {
+        self.server_name.as_ref()
+    }
+
+    pub fn from_localpart_and_server(localpart: &str, server_name: &ServerName) -> Option<Self> {
+        if !is_valid_room_localpart(localpart) {
+            return None;
+        }
+
+        let full_identifier = format!("!{}:{}", localpart, server_name.as_str());
+        Some(Self {
+            localpart: localpart.to_owned(),
+            server_name: Some(server_name.clone()),
+            full_identifier: Arc::new(full_identifier),
+        })
+    }
+
+    pub fn from_localpart(localpart: &str) -> Option<Self> {
+        if !is_valid_room_localpart(localpart) {
+            return None;
+        }
+
+        let full_identifier = format!("!{localpart}");
+        Some(Self {
+            localpart: localpart.to_owned(),
+            server_name: None,
+            full_identifier: Arc::new(full_identifier),
+        })
+    }
+}
+
+fn is_valid_room_localpart(localpart: &str) -> bool {
+    !localpart.is_empty() && !localpart.contains(':')
+}
+
+impl Serialize for RoomIdentifier {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for RoomIdentifier {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value.clone())
+            .or_else(|| Self::parse_domain_less(value.clone()))
+            .ok_or_else(|| serde::de::Error::custom("invalid room identifier"))
     }
 }
 
@@ -367,12 +430,12 @@ pub struct Room {
 
 impl Room {
     pub fn new(
-        room_id: RoomIdentifier,
+        room_id: &RoomIdentifier,
         room_version: RoomVersion,
     ) -> Result<Self, RoomIdentifierValidationError> {
         room_id.validate_for_room_version(room_version.as_number())?;
         Ok(Self {
-            room_id,
+            room_id: room_id.clone(),
             room_version,
         })
     }
@@ -382,32 +445,21 @@ impl Room {
     }
 
     pub fn try_create_contract(
-        home_server_name: &str,
         creator_user_id: &AuthorizedUserIdentifier,
         info: CreateRoomInfo,
+        home_server_name: &ServerName,
     ) -> Result<CreateRoomContract, RoomCreateContractError> {
-        if !server_name::is_valid_server_name(home_server_name) {
-            return Err(RoomCreateContractError::InvalidHomeServerName {
-                home_server_name: home_server_name.to_owned(),
-            });
-        }
-
         let room_version = match info.room_version.as_deref() {
             Some(version) => RoomVersion::from_str(version.trim()).map_err(|_| {
                 RoomCreateContractError::UnsupportedRoomVersion {
                     room_version: version.to_owned(),
                 }
             })?,
-            None => RoomVersion::V1,
+            None => RoomVersion::default(),
         };
 
-        let room_id_value = format!("!{}:{}", Uuid::new_v4().simple(), home_server_name);
-        let room_id = RoomIdentifier::parse(room_id_value.clone()).ok_or_else(|| {
-            RoomCreateContractError::InvalidGeneratedRoomIdentifier {
-                room_id: room_id_value.clone(),
-            }
-        })?;
-        let room = Self::new(room_id, room_version)?;
+        let room_id = RoomIdentifier::generate(home_server_name);
+        let room = Self::new(&room_id, room_version)?;
 
         if let Some(room_alias_name) = info.room_alias_name.as_deref()
             && room_alias_name.trim().is_empty()
@@ -460,7 +512,7 @@ impl Room {
                 RoomPreset::TrustedPrivateChat => "trusted_private_chat".to_owned(),
             }),
             room_alias_name: info.room_alias_name,
-            room_id: room_id_value,
+            room_id: room_id.as_str().to_string(),
             room_version: room_version.to_string(),
             topic: info.topic,
             visibility: info.visibility.map(|visibility| match visibility {

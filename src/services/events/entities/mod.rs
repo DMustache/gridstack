@@ -5,7 +5,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::{
-    infrastructure::{server_name, user_identifier::UserIdentifier},
+    infrastructure::{server_name::ServerName, user_identifier::UserIdentifier},
     services::rooms::entities::{RoomIdentifier, versions::RoomVersion},
 };
 
@@ -68,7 +68,7 @@ impl EventIdentifier {
         match room_version {
             RoomVersion::V1 | RoomVersion::V2 => {
                 let suffix = self.0.strip_prefix('$').and_then(|identifier| {
-                    server_name::split_opaque_identifier_and_server_name(identifier)
+                    ServerName::split_opaque_identifier_and_server_name(identifier)
                 });
                 if suffix.is_none() {
                     return Err(RoomEventValidationError::EventIdentifierMissingDomain {

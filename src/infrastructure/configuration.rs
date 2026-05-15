@@ -69,8 +69,6 @@ impl ServerConfiguration {
     }
 
     pub fn presented_server_name(&self) -> anyhow::Result<String> {
-        Ok(self
-            .server_name()?
-            .present(self.server_name_presentation))
+        Ok(self.server_name()?.present(self.server_name_presentation))
     }
 }

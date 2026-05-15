@@ -2,10 +2,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::infrastructure::{
-    server_name::{self, ServerName},
-    username::Username,
-};
+use crate::infrastructure::{server_name::ServerName, username::Username};
 
 /// format @localpart:domain
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -29,7 +26,7 @@ impl UserIdentifier {
         }
 
         let (localpart, server_name) =
-            server_name::split_localpart_and_server_name(&candidate[1..])?;
+            ServerName::split_localpart_and_server_name(&candidate[1..])?;
         Self::from_localpart_and_server(localpart, server_name)
     }
 
