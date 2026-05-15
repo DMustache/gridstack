@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
-use uuid::Uuid;
-
 use crate::{
     infrastructure::user_identifier::UserIdentifier,
     services::rooms::{
-        entities::CreatedRoom, errors::RoomsApplicationError,
-        handlers::create_room::CreateRoomInfo, persistence::RoomRepository,
+        entities::{CreatedRoom, Room, RoomCreateContractError},
+        errors::RoomsApplicationError,
+        handlers::create_room::CreateRoomInfo,
+        persistence::RoomRepository,
     },
 };
 
@@ -28,9 +28,10 @@ impl RoomsService {
         creator_user_id: &UserIdentifier,
         info: CreateRoomInfo,
     ) -> Result<CreatedRoom, RoomsApplicationError> {
-        self.validate_create_room_request(&info)?;
+        let contract = Room::try_create_contract(&self.home_server_name, creator_user_id, info)
+            .map_err(map_contract_error)?;
 
-        if let Some(room_alias_name) = info.room_alias_name.as_deref()
+        if let Some(room_alias_name) = contract.persistence_payload.room_alias_name.as_deref()
             && !self
                 .room_repository
                 .reserve_room_alias(room_alias_name)
@@ -39,9 +40,8 @@ impl RoomsService {
             return Err(RoomsApplicationError::RoomInUse);
         }
 
-        let room_id = format!("!{}:{}", Uuid::new_v4().simple(), self.home_server_name);
         self.room_repository
-            .save_room(&room_id, creator_user_id, &info)
+            .save_room(&contract.persistence_payload)
             .map_err(|error| {
                 let message = error.to_string();
                 if message.contains("room_aliases") && message.contains("duplicate") {
@@ -50,40 +50,27 @@ impl RoomsService {
                 RoomsApplicationError::Internal
             })?;
 
-        Ok(CreatedRoom { room_id })
+        Ok(CreatedRoom {
+            room_id: contract.persistence_payload.room_id,
+        })
     }
+}
 
-    fn validate_create_room_request(
-        &self,
-        info: &CreateRoomInfo,
-    ) -> Result<(), RoomsApplicationError> {
-        if let Some(room_alias_name) = info.room_alias_name.as_deref()
-            && room_alias_name.trim().is_empty()
-        {
-            return Err(RoomsApplicationError::InvalidParameter);
+fn map_contract_error(error: RoomCreateContractError) -> RoomsApplicationError {
+    match error {
+        RoomCreateContractError::UnsupportedRoomVersion { .. } => {
+            RoomsApplicationError::UnsupportedRoomVersion
         }
-
-        if let Some(room_version) = info.room_version.as_deref()
-            && (room_version.trim().is_empty()
-                || !room_version.chars().all(|char| char.is_ascii_digit()))
-        {
-            return Err(RoomsApplicationError::UnsupportedRoomVersion);
+        RoomCreateContractError::InvalidRoomStateEventType
+        | RoomCreateContractError::UnsupportedStateEventForRoomVersion { .. } => {
+            RoomsApplicationError::InvalidRoomState
         }
-
-        if let Some(invitees) = info.invite.as_ref()
-            && invitees.iter().any(|invitee| !invitee.starts_with('@'))
-        {
-            return Err(RoomsApplicationError::InvalidParameter);
+        RoomCreateContractError::InvalidHomeServerName { .. }
+        | RoomCreateContractError::InvalidGeneratedRoomIdentifier { .. }
+        | RoomCreateContractError::InvalidRoomIdentifier(_)
+        | RoomCreateContractError::InvalidRoomAlias
+        | RoomCreateContractError::InvalidInviteUserIdentifier => {
+            RoomsApplicationError::InvalidParameter
         }
-
-        if let Some(initial_state) = info.initial_state.as_ref()
-            && initial_state
-                .iter()
-                .any(|state| state.event_type.trim().is_empty())
-        {
-            return Err(RoomsApplicationError::InvalidRoomState);
-        }
-
-        Ok(())
     }
 }

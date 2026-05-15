@@ -1,10 +1,21 @@
-use std::marker::PhantomData;
+use std::{marker::PhantomData, str::FromStr};
 
 use serde::{Deserialize, Serialize};
-use strum::{Display, EnumString};
 use thiserror::Error;
+use uuid::Uuid;
 
-use crate::{infrastructure::server_name, services::rooms::handlers::create_room::CreateRoomView};
+use crate::{
+    infrastructure::{server_name, user_identifier::UserIdentifier},
+    services::{
+        events::entities::event_kinds::EventDefinitionKey,
+        rooms::{
+            entities::versions::RoomVersion,
+            handlers::create_room::{CreateRoomInfo, CreateRoomView, RoomPreset, RoomVisibility},
+        },
+    },
+};
+
+pub mod versions;
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct RoomStateEventInfo {
@@ -19,227 +30,38 @@ pub struct CreatedRoom {
     pub room_id: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct CreateRoomStateEventPayload {
+    pub content: serde_json::Value,
+    pub event_type: String,
+    pub ordering: i32,
+    pub state_key: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct CreateRoomPersistencePayload {
+    pub creator_user_id: String,
+    pub initial_state: Vec<CreateRoomStateEventPayload>,
+    pub is_direct: Option<bool>,
+    pub name: Option<String>,
+    pub preset: Option<String>,
+    pub room_alias_name: Option<String>,
+    pub room_id: String,
+    pub room_version: String,
+    pub topic: Option<String>,
+    pub visibility: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CreateRoomContract {
+    pub persistence_payload: CreateRoomPersistencePayload,
+    pub room: Room,
+}
+
 impl From<CreatedRoom> for CreateRoomView {
     fn from(value: CreatedRoom) -> Self {
         Self {
             room_id: value.room_id,
-        }
-    }
-}
-
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    Default,
-    EnumString,
-    Display,
-    PartialEq,
-    Eq,
-    Ord,
-    PartialOrd,
-    Serialize,
-    Deserialize,
-)]
-pub enum RoomVersion {
-    #[default]
-    #[serde(rename = "1")]
-    #[strum(serialize = "1")]
-    V1 = 1,
-    #[serde(rename = "2")]
-    #[strum(serialize = "2")]
-    V2 = 2,
-    #[serde(rename = "3")]
-    #[strum(serialize = "3")]
-    V3 = 3,
-    #[serde(rename = "4")]
-    #[strum(serialize = "4")]
-    V4 = 4,
-    #[serde(rename = "5")]
-    #[strum(serialize = "5")]
-    V5 = 5,
-    #[serde(rename = "6")]
-    #[strum(serialize = "6")]
-    V6 = 6,
-    #[serde(rename = "7")]
-    #[strum(serialize = "7")]
-    V7 = 7,
-    #[serde(rename = "8")]
-    #[strum(serialize = "8")]
-    V8 = 8,
-    #[serde(rename = "9")]
-    #[strum(serialize = "9")]
-    V9 = 9,
-    #[serde(rename = "10")]
-    #[strum(serialize = "10")]
-    V10 = 10,
-    #[serde(rename = "11")]
-    #[strum(serialize = "11")]
-    V11 = 11,
-    #[serde(rename = "12")]
-    #[strum(serialize = "12")]
-    V12 = 12,
-}
-
-impl RoomVersion {
-    pub fn as_number(self) -> u8 {
-        self as u8
-    }
-
-    pub fn requires_creator_field(self) -> bool {
-        self <= Self::V11
-    }
-
-    pub fn supports_additional_creators(self) -> bool {
-        self >= Self::V12
-    }
-
-    pub fn rules(self) -> RoomVersionRules {
-        match self {
-            Self::V1 => RoomVersionRules {
-                version: self,
-                description: "Initial room version.",
-                event_identifier_format: EventIdentifierFormat::ServerAssignedWithDomain,
-                room_identifier_format: RoomIdentifierFormat::LocalPartWithDomain,
-                creator_power_levels: CreatorPowerLevels::DefaultLevel100ForCreator,
-                supports_knocking: false,
-                supports_restricted_join_rules: false,
-                supports_knock_restricted_join_rule: false,
-                supports_additional_room_creators: false,
-                power_levels_must_be_integer_values: false,
-            },
-            Self::V2 => RoomVersionRules {
-                version: self,
-                description: "Implements State Resolution Version 2.",
-                event_identifier_format: EventIdentifierFormat::ServerAssignedWithDomain,
-                room_identifier_format: RoomIdentifierFormat::LocalPartWithDomain,
-                creator_power_levels: CreatorPowerLevels::DefaultLevel100ForCreator,
-                supports_knocking: false,
-                supports_restricted_join_rules: false,
-                supports_knock_restricted_join_rule: false,
-                supports_additional_room_creators: false,
-                power_levels_must_be_integer_values: false,
-            },
-            Self::V3 => RoomVersionRules {
-                version: self,
-                description: "Event IDs are reference-hash based and may include slash characters.",
-                event_identifier_format: EventIdentifierFormat::ReferenceHashUnpaddedBase64,
-                room_identifier_format: RoomIdentifierFormat::LocalPartWithDomain,
-                creator_power_levels: CreatorPowerLevels::DefaultLevel100ForCreator,
-                supports_knocking: false,
-                supports_restricted_join_rules: false,
-                supports_knock_restricted_join_rule: false,
-                supports_additional_room_creators: false,
-                power_levels_must_be_integer_values: false,
-            },
-            Self::V4 => RoomVersionRules {
-                version: self,
-                description: "Builds on v3 with URL-safe base64 event identifiers.",
-                event_identifier_format: EventIdentifierFormat::ReferenceHashUrlSafeBase64,
-                room_identifier_format: RoomIdentifierFormat::LocalPartWithDomain,
-                creator_power_levels: CreatorPowerLevels::DefaultLevel100ForCreator,
-                supports_knocking: false,
-                supports_restricted_join_rules: false,
-                supports_knock_restricted_join_rule: false,
-                supports_additional_room_creators: false,
-                power_levels_must_be_integer_values: false,
-            },
-            Self::V5 => RoomVersionRules {
-                version: self,
-                description: "Introduces enforcement of signing key validity periods.",
-                event_identifier_format: EventIdentifierFormat::ReferenceHashUrlSafeBase64,
-                room_identifier_format: RoomIdentifierFormat::LocalPartWithDomain,
-                creator_power_levels: CreatorPowerLevels::DefaultLevel100ForCreator,
-                supports_knocking: false,
-                supports_restricted_join_rules: false,
-                supports_knock_restricted_join_rule: false,
-                supports_additional_room_creators: false,
-                power_levels_must_be_integer_values: false,
-            },
-            Self::V6 => RoomVersionRules {
-                version: self,
-                description: "Alters authorization rules for events.",
-                event_identifier_format: EventIdentifierFormat::ReferenceHashUrlSafeBase64,
-                room_identifier_format: RoomIdentifierFormat::LocalPartWithDomain,
-                creator_power_levels: CreatorPowerLevels::DefaultLevel100ForCreator,
-                supports_knocking: false,
-                supports_restricted_join_rules: false,
-                supports_knock_restricted_join_rule: false,
-                supports_additional_room_creators: false,
-                power_levels_must_be_integer_values: false,
-            },
-            Self::V7 => RoomVersionRules {
-                version: self,
-                description: "Introduces knocking membership and join behavior.",
-                event_identifier_format: EventIdentifierFormat::ReferenceHashUrlSafeBase64,
-                room_identifier_format: RoomIdentifierFormat::LocalPartWithDomain,
-                creator_power_levels: CreatorPowerLevels::DefaultLevel100ForCreator,
-                supports_knocking: true,
-                supports_restricted_join_rules: false,
-                supports_knock_restricted_join_rule: false,
-                supports_additional_room_creators: false,
-                power_levels_must_be_integer_values: false,
-            },
-            Self::V8 => RoomVersionRules {
-                version: self,
-                description: "Adds restricted join rules based on membership in another room.",
-                event_identifier_format: EventIdentifierFormat::ReferenceHashUrlSafeBase64,
-                room_identifier_format: RoomIdentifierFormat::LocalPartWithDomain,
-                creator_power_levels: CreatorPowerLevels::DefaultLevel100ForCreator,
-                supports_knocking: true,
-                supports_restricted_join_rules: true,
-                supports_knock_restricted_join_rule: false,
-                supports_additional_room_creators: false,
-                power_levels_must_be_integer_values: false,
-            },
-            Self::V9 => RoomVersionRules {
-                version: self,
-                description: "Builds on v8 and fixes membership redaction edge cases.",
-                event_identifier_format: EventIdentifierFormat::ReferenceHashUrlSafeBase64,
-                room_identifier_format: RoomIdentifierFormat::LocalPartWithDomain,
-                creator_power_levels: CreatorPowerLevels::DefaultLevel100ForCreator,
-                supports_knocking: true,
-                supports_restricted_join_rules: true,
-                supports_knock_restricted_join_rule: false,
-                supports_additional_room_creators: false,
-                power_levels_must_be_integer_values: false,
-            },
-            Self::V10 => RoomVersionRules {
-                version: self,
-                description: "Requires integer-only power levels and adds knock_restricted join rule.",
-                event_identifier_format: EventIdentifierFormat::ReferenceHashUrlSafeBase64,
-                room_identifier_format: RoomIdentifierFormat::LocalPartWithDomain,
-                creator_power_levels: CreatorPowerLevels::DefaultLevel100ForCreator,
-                supports_knocking: true,
-                supports_restricted_join_rules: true,
-                supports_knock_restricted_join_rule: true,
-                supports_additional_room_creators: false,
-                power_levels_must_be_integer_values: true,
-            },
-            Self::V11 => RoomVersionRules {
-                version: self,
-                description: "Clarifies redaction algorithm behavior.",
-                event_identifier_format: EventIdentifierFormat::ReferenceHashUrlSafeBase64,
-                room_identifier_format: RoomIdentifierFormat::LocalPartWithDomain,
-                creator_power_levels: CreatorPowerLevels::DefaultLevel100ForCreator,
-                supports_knocking: true,
-                supports_restricted_join_rules: true,
-                supports_knock_restricted_join_rule: true,
-                supports_additional_room_creators: false,
-                power_levels_must_be_integer_values: true,
-            },
-            Self::V12 => RoomVersionRules {
-                version: self,
-                description: "Room IDs are hash-derived, room creators are formalized with infinite power, and state resolution is updated.",
-                event_identifier_format: EventIdentifierFormat::ReferenceHashUrlSafeBase64,
-                room_identifier_format: RoomIdentifierFormat::HashBasedRoomId,
-                creator_power_levels: CreatorPowerLevels::InfiniteForRoomCreators,
-                supports_knocking: true,
-                supports_restricted_join_rules: true,
-                supports_knock_restricted_join_rule: true,
-                supports_additional_room_creators: true,
-                power_levels_must_be_integer_values: true,
-            },
         }
     }
 }
@@ -275,6 +97,182 @@ pub struct RoomVersionRules {
     pub supports_knock_restricted_join_rule: bool,
     pub supports_additional_room_creators: bool,
     pub power_levels_must_be_integer_values: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RoomBusinessMethod {
+    CreateEventContentValidation,
+    PersistentDataUnitValidation,
+    StateResolutionV2,
+    KnockingMembership,
+    RestrictedJoinRules,
+    KnockRestrictedJoinRule,
+    AdditionalRoomCreators,
+}
+
+impl RoomBusinessMethod {
+    pub const ALL: [Self; 7] = [
+        Self::CreateEventContentValidation,
+        Self::PersistentDataUnitValidation,
+        Self::StateResolutionV2,
+        Self::KnockingMembership,
+        Self::RestrictedJoinRules,
+        Self::KnockRestrictedJoinRule,
+        Self::AdditionalRoomCreators,
+    ];
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CreateEventContentValidationRule;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PersistentDataUnitValidationRule;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StateResolutionV2Rule;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KnockingMembershipRule;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RestrictedJoinRulesRule;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KnockRestrictedJoinRuleRule;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AdditionalRoomCreatorsRule;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoomBusinessMethodImplementation {
+    CreateEventContentValidation(CreateEventContentValidationRule),
+    PersistentDataUnitValidation(PersistentDataUnitValidationRule),
+    StateResolutionV2(StateResolutionV2Rule),
+    KnockingMembership(KnockingMembershipRule),
+    RestrictedJoinRules(RestrictedJoinRulesRule),
+    KnockRestrictedJoinRule(KnockRestrictedJoinRuleRule),
+    AdditionalRoomCreators(AdditionalRoomCreatorsRule),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RoomBusinessMethodAvailability {
+    pub method: RoomBusinessMethod,
+    pub implementation: Option<RoomBusinessMethodImplementation>,
+    pub execution_provider: Option<RoomMethodExecutionProvider>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoomMethodExecutionProvider {
+    SharedRoomCreateContentValidator,
+    EventsV1PersistentDataUnitValidator,
+    EventsV2PersistentDataUnitValidator,
+    EventsV2StateResolution,
+    RoomVersionCapabilityFlag,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RoomVersionBusinessRules {
+    pub room_version: RoomVersion,
+}
+
+impl RoomVersionBusinessRules {
+    pub fn new(room_version: RoomVersion) -> Self {
+        Self { room_version }
+    }
+
+    pub fn implementation_for(
+        &self,
+        method: RoomBusinessMethod,
+    ) -> Option<RoomBusinessMethodImplementation> {
+        match method {
+            RoomBusinessMethod::CreateEventContentValidation => Some(
+                RoomBusinessMethodImplementation::CreateEventContentValidation(
+                    CreateEventContentValidationRule,
+                ),
+            ),
+            RoomBusinessMethod::PersistentDataUnitValidation => Some(
+                RoomBusinessMethodImplementation::PersistentDataUnitValidation(
+                    PersistentDataUnitValidationRule,
+                ),
+            ),
+            RoomBusinessMethod::StateResolutionV2 => (self.room_version >= RoomVersion::V2)
+                .then_some(RoomBusinessMethodImplementation::StateResolutionV2(
+                    StateResolutionV2Rule,
+                )),
+            RoomBusinessMethod::KnockingMembership => (self.room_version >= RoomVersion::V7)
+                .then_some(RoomBusinessMethodImplementation::KnockingMembership(
+                    KnockingMembershipRule,
+                )),
+            RoomBusinessMethod::RestrictedJoinRules => (self.room_version >= RoomVersion::V8)
+                .then_some(RoomBusinessMethodImplementation::RestrictedJoinRules(
+                    RestrictedJoinRulesRule,
+                )),
+            RoomBusinessMethod::KnockRestrictedJoinRule => (self.room_version >= RoomVersion::V10)
+                .then_some(RoomBusinessMethodImplementation::KnockRestrictedJoinRule(
+                    KnockRestrictedJoinRuleRule,
+                )),
+            RoomBusinessMethod::AdditionalRoomCreators => (self.room_version >= RoomVersion::V12)
+                .then_some(RoomBusinessMethodImplementation::AdditionalRoomCreators(
+                    AdditionalRoomCreatorsRule,
+                )),
+        }
+    }
+
+    pub fn execution_provider_for(
+        &self,
+        method: RoomBusinessMethod,
+    ) -> Option<RoomMethodExecutionProvider> {
+        match method {
+            RoomBusinessMethod::CreateEventContentValidation => {
+                Some(RoomMethodExecutionProvider::SharedRoomCreateContentValidator)
+            }
+            RoomBusinessMethod::PersistentDataUnitValidation => {
+                Some(if self.room_version == RoomVersion::V1 {
+                    RoomMethodExecutionProvider::EventsV1PersistentDataUnitValidator
+                } else {
+                    RoomMethodExecutionProvider::EventsV2PersistentDataUnitValidator
+                })
+            }
+            RoomBusinessMethod::StateResolutionV2 => (self.room_version >= RoomVersion::V2)
+                .then_some(RoomMethodExecutionProvider::EventsV2StateResolution),
+            RoomBusinessMethod::KnockingMembership
+            | RoomBusinessMethod::RestrictedJoinRules
+            | RoomBusinessMethod::KnockRestrictedJoinRule
+            | RoomBusinessMethod::AdditionalRoomCreators => self
+                .implementation_for(method)
+                .map(|_| RoomMethodExecutionProvider::RoomVersionCapabilityFlag),
+        }
+    }
+
+    pub fn supported_events(self) -> &'static [EventDefinitionKey] {
+        const EVENTS_V1: &[EventDefinitionKey] = &[
+            EventDefinitionKey::RoomCreate,
+            EventDefinitionKey::RoomAliases,
+            EventDefinitionKey::RoomMessage,
+            EventDefinitionKey::GenericStateEvent,
+        ];
+        const EVENTS_V2_PLUS: &[EventDefinitionKey] = &[
+            EventDefinitionKey::RoomCreate,
+            EventDefinitionKey::RoomAliases,
+            EventDefinitionKey::RoomMessage,
+            EventDefinitionKey::GenericStateEvent,
+        ];
+
+        match self.room_version {
+            RoomVersion::V1 => EVENTS_V1,
+            _ => EVENTS_V2_PLUS,
+        }
+    }
+
+    pub fn iter_method_availability(self) -> impl Iterator<Item = RoomBusinessMethodAvailability> {
+        RoomBusinessMethod::ALL
+            .into_iter()
+            .map(move |method| RoomBusinessMethodAvailability {
+                method,
+                implementation: self.implementation_for(method),
+                execution_provider: self.execution_provider_for(method),
+            })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -378,6 +376,108 @@ impl Room {
         self.room_version.rules()
     }
 
+    pub fn try_create_contract(
+        home_server_name: &str,
+        creator_user_id: &UserIdentifier,
+        info: CreateRoomInfo,
+    ) -> Result<CreateRoomContract, RoomCreateContractError> {
+        if !server_name::is_valid_server_name(home_server_name) {
+            return Err(RoomCreateContractError::InvalidHomeServerName {
+                home_server_name: home_server_name.to_owned(),
+            });
+        }
+
+        let room_version = match info.room_version.as_deref() {
+            Some(version) => RoomVersion::from_str(version.trim()).map_err(|_| {
+                RoomCreateContractError::UnsupportedRoomVersion {
+                    room_version: version.to_owned(),
+                }
+            })?,
+            None => RoomVersion::V1,
+        };
+
+        let room_id_value = format!("!{}:{}", Uuid::new_v4().simple(), home_server_name);
+        let room_id = RoomIdentifier::parse(room_id_value.clone()).ok_or_else(|| {
+            RoomCreateContractError::InvalidGeneratedRoomIdentifier {
+                room_id: room_id_value.clone(),
+            }
+        })?;
+        let room = Self::new(room_id.clone(), room_version)?;
+
+        if let Some(room_alias_name) = info.room_alias_name.as_deref()
+            && room_alias_name.trim().is_empty()
+        {
+            return Err(RoomCreateContractError::InvalidRoomAlias);
+        }
+
+        if let Some(invitees) = info.invite.as_ref()
+            && invitees
+                .iter()
+                .any(|invitee| UserIdentifier::try_from(invitee.clone()).is_err())
+        {
+            return Err(RoomCreateContractError::InvalidInviteUserIdentifier);
+        }
+
+        let supported_events = room.supported_events();
+        let mut initial_state_payload = Vec::new();
+        if let Some(initial_state) = info.initial_state {
+            for (index, event) in initial_state.into_iter().enumerate() {
+                if event.event_type.trim().is_empty() {
+                    return Err(RoomCreateContractError::InvalidRoomStateEventType);
+                }
+                let event_key = map_event_type_to_definition_key(&event.event_type);
+                if !supported_events.contains(&event_key) {
+                    return Err(
+                        RoomCreateContractError::UnsupportedStateEventForRoomVersion {
+                            event_type: event.event_type,
+                            room_version,
+                        },
+                    );
+                }
+
+                initial_state_payload.push(CreateRoomStateEventPayload {
+                    content: event.content,
+                    event_type: event.event_type,
+                    ordering: i32::try_from(index).unwrap_or(i32::MAX),
+                    state_key: event.state_key.unwrap_or_default(),
+                });
+            }
+        }
+
+        let payload = CreateRoomPersistencePayload {
+            creator_user_id: creator_user_id.as_str().to_owned(),
+            initial_state: initial_state_payload,
+            is_direct: info.is_direct,
+            name: info.name,
+            preset: info.preset.map(|preset| match preset {
+                RoomPreset::PrivateChat => "private_chat".to_owned(),
+                RoomPreset::PublicChat => "public_chat".to_owned(),
+                RoomPreset::TrustedPrivateChat => "trusted_private_chat".to_owned(),
+            }),
+            room_alias_name: info.room_alias_name,
+            room_id: room_id_value,
+            room_version: room_version.to_string(),
+            topic: info.topic,
+            visibility: info.visibility.map(|visibility| match visibility {
+                RoomVisibility::Public => "public".to_owned(),
+                RoomVisibility::Private => "private".to_owned(),
+            }),
+        };
+
+        Ok(CreateRoomContract {
+            persistence_payload: payload,
+            room,
+        })
+    }
+
+    pub fn business_rules(&self) -> RoomVersionBusinessRules {
+        RoomVersionBusinessRules::new(self.room_version)
+    }
+
+    pub fn supported_events(&self) -> &'static [EventDefinitionKey] {
+        self.business_rules().supported_events()
+    }
+
     pub fn versioned(self) -> VersionedRoom {
         match self.room_version {
             RoomVersion::V1 => VersionedRoom::V1(RoomForVersion::new(self.room_id)),
@@ -393,6 +493,38 @@ impl Room {
             RoomVersion::V11 => VersionedRoom::V11(RoomForVersion::new(self.room_id)),
             RoomVersion::V12 => VersionedRoom::V12(RoomForVersion::new(self.room_id)),
         }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum RoomCreateContractError {
+    #[error("invalid home server name `{home_server_name}`")]
+    InvalidHomeServerName { home_server_name: String },
+    #[error("unsupported room version `{room_version}`")]
+    UnsupportedRoomVersion { room_version: String },
+    #[error("invalid generated room identifier `{room_id}`")]
+    InvalidGeneratedRoomIdentifier { room_id: String },
+    #[error("invalid room alias")]
+    InvalidRoomAlias,
+    #[error("invalid invite user identifier")]
+    InvalidInviteUserIdentifier,
+    #[error("invalid room state event type")]
+    InvalidRoomStateEventType,
+    #[error("event type `{event_type}` is not supported in room version `{room_version}`")]
+    UnsupportedStateEventForRoomVersion {
+        event_type: String,
+        room_version: RoomVersion,
+    },
+    #[error(transparent)]
+    InvalidRoomIdentifier(#[from] RoomIdentifierValidationError),
+}
+
+fn map_event_type_to_definition_key(event_type: &str) -> EventDefinitionKey {
+    match event_type {
+        "m.room.create" => EventDefinitionKey::RoomCreate,
+        "m.room.aliases" => EventDefinitionKey::RoomAliases,
+        "m.room.message" => EventDefinitionKey::RoomMessage,
+        _ => EventDefinitionKey::GenericStateEvent,
     }
 }
 
@@ -574,4 +706,16 @@ impl VersionedRoom {
     pub fn rules(&self) -> RoomVersionRules {
         self.version().rules()
     }
+
+    pub fn business_rules(&self) -> RoomVersionBusinessRules {
+        RoomVersionBusinessRules::new(self.version())
+    }
+
+    pub fn supported_events(&self) -> &'static [EventDefinitionKey] {
+        self.business_rules().supported_events()
+    }
+}
+
+trait RoomVersionRulesContract {
+    fn rules() -> RoomVersionRules;
 }

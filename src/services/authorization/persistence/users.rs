@@ -35,7 +35,7 @@ impl TryFrom<UserModel> for UserAccount {
 
     fn try_from(value: UserModel) -> Result<Self, Self::Error> {
         Ok(Self {
-            user_identifier: UserIdentifier::parse(value.user_id).ok_or(())?,
+            user_identifier: UserIdentifier::try_from(value.user_id).map_err(|_| ())?,
             password_hash: value.password_hash.unwrap_or_default(),
             display_name: String::new(),
             is_guest: value.is_guest,
