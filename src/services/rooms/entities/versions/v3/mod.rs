@@ -1,6 +1,15 @@
+use crate::services::rooms::entities::RoomVersionMarker;
+
 use super::super::{
     CreatorPowerLevels, EventIdentifierFormat, RoomIdentifierFormat, RoomVersion, RoomVersionRules,
 };
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Version3;
+
+impl RoomVersionMarker for Version3 {
+    const VERSION: RoomVersion = RoomVersion::V3;
+}
 
 pub const fn rules() -> RoomVersionRules {
     RoomVersionRules {

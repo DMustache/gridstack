@@ -36,7 +36,7 @@ diesel::table! {
         is_direct -> Nullable<Bool>,
         name -> Nullable<Varchar>,
         topic -> Nullable<Text>,
-        visibility -> Nullable<Varchar>,
+        visibility -> Varchar,
         preset -> Nullable<Varchar>,
         created_at -> Timestamptz,
         updated_at -> Timestamptz,

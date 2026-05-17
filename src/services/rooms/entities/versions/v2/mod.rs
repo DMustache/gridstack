@@ -7,12 +7,19 @@ use crate::services::{
     events::entities::{
         EventIdentifier, RoomEventValidationError, RoomStateSnapshot, StateEventTypeAndKey,
     },
-    rooms::entities::versions::v1::RoomV1PersistentDataUnit,
+    rooms::entities::{RoomVersionMarker, versions::v1::RoomV1PersistentDataUnit},
 };
 
 use super::super::{
     CreatorPowerLevels, EventIdentifierFormat, RoomIdentifierFormat, RoomVersion, RoomVersionRules,
 };
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Version2;
+
+impl RoomVersionMarker for Version2 {
+    const VERSION: RoomVersion = RoomVersion::V2;
+}
 
 pub const fn rules() -> RoomVersionRules {
     RoomVersionRules {

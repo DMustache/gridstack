@@ -12,8 +12,8 @@ pub struct CreateRoomModel {
     pub is_direct: Option<bool>,
     pub name: Option<String>,
     pub topic: Option<String>,
-    pub visibility: Option<String>,
-    pub preset: Option<String>,
+    pub visibility: String,
+    pub preset: String,
     pub created_at: NaiveDateTime,
     pub updated_at: NaiveDateTime,
 }
@@ -40,9 +40,8 @@ pub struct CreateRoomStateEventModel {
 
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = crate::infrastructure::schema::room_aliases)]
-#[expect(dead_code, reason = "read model reserved for room alias fetch flows")]
 pub struct RoomAliasModel {
     pub alias_localpart: String,
     pub room_id: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: NaiveDateTime,
 }

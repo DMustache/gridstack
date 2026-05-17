@@ -6,7 +6,7 @@ use crate::{
     services::{
         authorization::entities::AuthorizedUserIdentifier,
         rooms::{
-            entities::{CreatedRoom, Room, RoomCreateContractError},
+            entities::{CreatedRoom, Room},
             errors::RoomsApplicationError,
             handlers::create_room::CreateRoomInfo,
             persistence::RoomRepository,
@@ -36,7 +36,7 @@ impl RoomsService {
         let contract = Room::try_create_contract(creator_user_id, info, &self.server_name)
             .map_err(|error| {
                 error!(error = %error, "failed to create room contract");
-                map_contract_error(&error)
+                RoomsApplicationError::from(error)
             })?;
 
         if let Some(room_alias_name) = contract.persistence_payload.room_alias_name.as_deref()
@@ -65,24 +65,5 @@ impl RoomsService {
         Ok(CreatedRoom {
             room_id: contract.persistence_payload.room_id,
         })
-    }
-}
-
-const fn map_contract_error(error: &RoomCreateContractError) -> RoomsApplicationError {
-    match error {
-        RoomCreateContractError::UnsupportedRoomVersion { .. } => {
-            RoomsApplicationError::UnsupportedRoomVersion
-        }
-        RoomCreateContractError::InvalidRoomStateEventType
-        | RoomCreateContractError::UnsupportedStateEventForRoomVersion { .. } => {
-            RoomsApplicationError::InvalidRoomState
-        }
-        RoomCreateContractError::InvalidHomeServerName { .. }
-        | RoomCreateContractError::InvalidGeneratedRoomIdentifier { .. }
-        | RoomCreateContractError::InvalidRoomIdentifier(_)
-        | RoomCreateContractError::InvalidRoomAlias
-        | RoomCreateContractError::InvalidInviteUserIdentifier => {
-            RoomsApplicationError::InvalidParameter
-        }
     }
 }

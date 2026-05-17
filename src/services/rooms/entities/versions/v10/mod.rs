@@ -1,6 +1,24 @@
+use crate::services::rooms::entities::{
+    SupportsKnockRestrictedJoinRule, SupportsKnocking, SupportsRestrictedJoinRules,
+    versions::RoomVersionMarker,
+};
+
 use super::super::{
     CreatorPowerLevels, EventIdentifierFormat, RoomIdentifierFormat, RoomVersion, RoomVersionRules,
 };
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Version10;
+
+impl RoomVersionMarker for Version10 {
+    const VERSION: RoomVersion = RoomVersion::V10;
+}
+
+impl SupportsKnocking for Version10 {}
+
+impl SupportsRestrictedJoinRules for Version10 {}
+
+impl SupportsKnockRestrictedJoinRule for Version10 {}
 
 pub const fn rules() -> RoomVersionRules {
     RoomVersionRules {

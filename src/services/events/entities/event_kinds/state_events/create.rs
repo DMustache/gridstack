@@ -29,7 +29,7 @@ impl RoomCreateEvent {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoomCreateContent {
     #[serde(default)]
-    pub additional_creators: Option<Vec<UserIdentifier>>,
+    pub additional_creators: Option<Vec<String>>,
     pub creator: Option<UserIdentifier>,
     #[serde(rename = "m.federate", default = "default_true")]
     pub federate: bool,
@@ -43,17 +43,18 @@ pub struct RoomCreateContent {
 impl RoomCreateContent {
     pub fn validate(&self) -> Result<(), RoomEventValidationError> {
         if self.room_version.supports_additional_creators() {
-            if let Some(additional_creators) = self.additional_creators.as_ref()
-                && additional_creators.is_empty()
-            {
-                return Err(RoomEventValidationError::AdditionalCreatorsCannotBeEmpty {
-                    room_version: self.room_version,
-                });
+            if let Some(additional_creators) = self.additional_creators.as_ref() {
+                for additional_creator in additional_creators {
+                    if UserIdentifier::try_from(additional_creator.clone()).is_err() {
+                        return Err(
+                            RoomEventValidationError::InvalidAdditionalCreatorUserIdentifier {
+                                room_version: self.room_version,
+                                user_identifier: additional_creator.clone(),
+                            },
+                        );
+                    }
+                }
             }
-        } else if self.additional_creators.is_some() {
-            return Err(RoomEventValidationError::AdditionalCreatorsNotSupported {
-                room_version: self.room_version,
-            });
         }
 
         if self.room_version.requires_creator_field() && self.creator.is_none() {

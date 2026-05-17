@@ -59,7 +59,7 @@ impl ServerName {
     }
 
     pub fn is_valid(value: &str) -> bool {
-        Self::parse_parts(value).is_some()
+        Self::try_new(value).is_some()
     }
 
     pub fn split_localpart_and_server_name(value: &str) -> Option<(&str, &str)> {
@@ -105,7 +105,12 @@ impl ServerName {
         }
 
         let (host, port) = Self::split_host_and_optional_port(candidate)?;
-        if !(Self::is_valid_ipv4_literal(host) || Self::is_valid_dns_name(host)) {
+        let is_valid_host = if Self::is_valid_ipv4_literal(host) {
+            true
+        } else {
+            !Self::is_all_numeric_dns_labels(host) && Self::is_valid_dns_name(host)
+        };
+        if !is_valid_host {
             return None;
         }
 
@@ -152,6 +157,9 @@ impl ServerName {
         }
         if let Ok(ipv4) = Ipv4Addr::from_str(value) {
             return Some(ServerHost::Ipv4(ipv4));
+        }
+        if Self::is_all_numeric_dns_labels(value) {
+            return None;
         }
         Self::is_valid_dns_name(value).then_some(ServerHost::DnsName(value.to_owned()))
     }
@@ -212,6 +220,13 @@ impl ServerName {
         }
 
         true
+    }
+
+    fn is_all_numeric_dns_labels(value: &str) -> bool {
+        value.contains('.')
+            && value.split('.').all(|label| {
+                !label.is_empty() && label.chars().all(|character| character.is_ascii_digit())
+            })
     }
 
     const fn is_ascii_alphanumeric(character: char) -> bool {

@@ -1,6 +1,7 @@
 use axum::{Extension, Json, extract::State};
 use response_derive::IntoResponseEnum;
 use tracing::{error, info};
+use utoipa::openapi::info;
 
 use crate::services::{
     authorization::persistence::access_session_storage_unit::AccessSessionStorageUnit,
@@ -48,6 +49,7 @@ pub async fn create_room(
             CreateRoomResponse::Ok(Json(view))
         }
         Err(error_kind) => {
+            #[allow(clippy::single_match_else, reason = "otherwise we need else")]
             match error_kind {
                 RoomsApplicationError::Internal => {
                     error!("room creation failed with internal error");
