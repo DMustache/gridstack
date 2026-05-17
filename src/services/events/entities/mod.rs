@@ -132,11 +132,12 @@ pub enum RoomEventValidationError {
     #[error("room version `{room_version}` does not support `creator` in m.room.create content")]
     CreatorNotSupported { room_version: RoomVersion },
     #[error(
-        "room version `{room_version}` does not support `additional_creators` in m.room.create content"
+        "room version `{room_version}` has invalid `additional_creators` user id `{user_identifier}` in m.room.create content"
     )]
-    AdditionalCreatorsNotSupported { room_version: RoomVersion },
-    #[error("room version `{room_version}` requires non-empty `additional_creators` when provided")]
-    AdditionalCreatorsCannotBeEmpty { room_version: RoomVersion },
+    InvalidAdditionalCreatorUserIdentifier {
+        room_version: RoomVersion,
+        user_identifier: String,
+    },
     #[error(
         "event identifier `{event_identifier}` in room version `{room_version}` must include a valid server-name domain"
     )]

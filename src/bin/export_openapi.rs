@@ -1,3 +1,4 @@
+#[allow(clippy::all)]
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     env, fs,

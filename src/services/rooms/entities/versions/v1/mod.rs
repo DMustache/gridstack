@@ -10,13 +10,20 @@ use crate::{
             EventHash, EventIdentifier, EventReference, EventUnsignedData,
             RoomEventValidationError, event_kinds::state_events::create::RoomCreateContent,
         },
-        rooms::entities::{RoomIdentifier, RoomVersionRulesContract},
+        rooms::entities::{RoomIdentifier, RoomVersionMarker, RoomVersionRulesContract},
     },
 };
 
 use super::super::{
     CreatorPowerLevels, EventIdentifierFormat, RoomIdentifierFormat, RoomVersion, RoomVersionRules,
 };
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Version1;
+
+impl RoomVersionMarker for Version1 {
+    const VERSION: RoomVersion = RoomVersion::V1;
+}
 
 pub type RoomVersionRulesV1 = RoomVersionRules;
 

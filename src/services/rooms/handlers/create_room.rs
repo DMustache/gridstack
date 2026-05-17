@@ -16,18 +16,36 @@ pub struct InviteThirdPartyIdentifierInfo {
     pub address: String,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, strum::Display)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum RoomPreset {
     PrivateChat,
     PublicChat,
     TrustedPrivateChat,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+impl From<RoomVisibility> for RoomPreset {
+    fn from(value: RoomVisibility) -> Self {
+        match value {
+            RoomVisibility::Public => Self::PublicChat,
+            RoomVisibility::Private => Self::PrivateChat,
+        }
+    }
+}
+
+impl Default for RoomPreset {
+    fn default() -> Self {
+        RoomVisibility::default().into()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Default, strum::Display)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum RoomVisibility {
     Public,
+    #[default]
     Private,
 }
 
@@ -40,12 +58,15 @@ pub struct CreateRoomInfo {
     pub invite_3pid: Option<Vec<InviteThirdPartyIdentifierInfo>>,
     pub is_direct: Option<bool>,
     pub name: Option<String>,
+    #[serde(default)]
     pub power_level_content_override: Option<serde_json::Value>,
-    pub preset: Option<RoomPreset>,
+    #[serde(default)]
+    pub preset: RoomPreset,
     pub room_alias_name: Option<String>,
     pub room_version: Option<String>,
     pub topic: Option<String>,
-    pub visibility: Option<RoomVisibility>,
+    #[serde(default)]
+    pub visibility: RoomVisibility,
 }
 
 #[derive(Clone, Debug, Serialize)]

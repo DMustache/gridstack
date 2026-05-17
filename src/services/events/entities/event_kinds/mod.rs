@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use strum::EnumString;
 
 pub mod message_events;
 pub mod state_events;
@@ -9,19 +10,14 @@ pub enum RoomEventKind {
     Message,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, EnumString,
+)]
 pub enum EventDefinitionKey {
+    #[strum(serialize = "m.room.create")]
     RoomCreate,
+    #[strum(serialize = "m.room.aliases")]
     RoomAliases,
+    #[strum(serialize = "m.room.message")]
     RoomMessage,
-    GenericStateEvent,
-}
-
-impl EventDefinitionKey {
-    pub const ALL: [Self; 4] = [
-        Self::RoomCreate,
-        Self::RoomAliases,
-        Self::RoomMessage,
-        Self::GenericStateEvent,
-    ];
 }
