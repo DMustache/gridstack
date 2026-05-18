@@ -1,5 +1,5 @@
 use diesel::{
-    QueryableByName, RunQueryDsl,
+    OptionalExtension, QueryableByName, RunQueryDsl,
     pg::PgConnection,
     r2d2::{self, ConnectionManager},
     sql_query,
@@ -15,6 +15,11 @@ pub trait FilterRepository: Send + Sync {
         user_identifier: &str,
         filter_payload: Value,
     ) -> Result<String, DomainError>;
+    fn fetch_filter(
+        &self,
+        user_identifier: &str,
+        filter_identifier: &str,
+    ) -> Result<Option<Value>, DomainError>;
 }
 
 #[derive(Clone)]
@@ -37,6 +42,12 @@ struct CreatedFilterRecord {
     id: i64,
 }
 
+#[derive(QueryableByName)]
+struct StoredFilterRecord {
+    #[diesel(sql_type = Jsonb)]
+    filter_json: Value,
+}
+
 impl FilterRepository for SyncronizationPersistence {
     fn create_filter(
         &self,
@@ -57,5 +68,32 @@ impl FilterRepository for SyncronizationPersistence {
         .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
 
         Ok(created.id.to_string())
+    }
+
+    fn fetch_filter(
+        &self,
+        user_identifier: &str,
+        filter_identifier: &str,
+    ) -> Result<Option<Value>, DomainError> {
+        let filter_identifier_number = match filter_identifier.parse::<i64>() {
+            Ok(value) => value,
+            Err(_) => return Ok(None),
+        };
+
+        let mut connection = self
+            .connection_pool
+            .get()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        let stored = sql_query(
+            "SELECT filter_json FROM public.user_filters WHERE user_id = $1 AND id = $2",
+        )
+        .bind::<Text, _>(user_identifier)
+        .bind::<BigInt, _>(filter_identifier_number)
+        .get_result::<StoredFilterRecord>(&mut connection)
+        .optional()
+        .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        Ok(stored.map(|record| record.filter_json))
     }
 }

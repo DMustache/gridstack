@@ -6,6 +6,8 @@ pub enum SyncronizationApplicationError {
     Unauthorized,
     #[error("forbidden")]
     Forbidden,
+    #[error("not found")]
+    NotFound,
     #[error("invalid request parameter")]
     InvalidParameter,
     #[error("internal error")]
