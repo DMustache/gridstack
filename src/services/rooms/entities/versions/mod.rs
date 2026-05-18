@@ -117,6 +117,7 @@ impl RoomVersion {
         Self::V11,
         Self::V12,
     ];
+    pub const SUPPORTED: [Self; 1] = [Self::V1];
 
     pub const fn as_number(self) -> u8 {
         self as u8
@@ -145,6 +146,14 @@ impl RoomVersion {
             Self::V11 => versions::v11::rules(),
             Self::V12 => versions::v12::rules(),
         }
+    }
+
+    pub fn is_supported(self) -> bool {
+        Self::SUPPORTED.contains(&self)
+    }
+
+    pub fn supported_versions() -> impl Iterator<Item = Self> {
+        Self::SUPPORTED.into_iter()
     }
 }
 

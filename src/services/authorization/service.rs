@@ -24,9 +24,7 @@ use crate::{
 };
 
 use super::{
-    entities::{
-        AccessToken, AuthorizedUserIdentifier, ExistingUserIdentifier, LoginType, UserAccount,
-    },
+    entities::{AccessToken, ExistingUserIdentifier, LoginType, UserAccount},
     errors::AuthorizationApplicationError,
     handlers::{
         check_username_available::CheckUsernameAvailableView,
@@ -394,13 +392,6 @@ impl AuthorizationService {
         }
 
         Ok(ExistingUserIdentifier::new(user_identifier))
-    }
-
-    pub const fn authorize_existing_user_identifier(
-        &self,
-        existing_user_identifier: ExistingUserIdentifier,
-    ) -> AuthorizedUserIdentifier {
-        AuthorizedUserIdentifier::new(existing_user_identifier)
     }
 
     fn try_parse_user_id(

@@ -1,29 +1,26 @@
-use std::{str::FromStr, sync::Arc};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
 use thiserror::Error;
-use uuid::Uuid;
 
 use crate::{
-    infrastructure::{server_name::ServerName, user_identifier::UserIdentifier},
+    infrastructure::server_name::ServerName,
     services::{
         authorization::entities::AuthorizedUserIdentifier,
-        events::entities::event_kinds::{
-            EventDefinitionKey, state_events::create::RoomCreateContent,
-        },
+        events::entities::event_kinds::EventDefinitionKey,
         rooms::{
+            entities::creation_plan::RoomCreationPlanBuilder,
             entities::versions::{
                 RoomForVersion, RoomVersion, RoomVersionBusinessRules, RoomVersionMarker,
                 VersionedRoom,
             },
-            handlers::create_room::{
-                CreateRoomInfo, CreateRoomView, InviteThirdPartyIdentifierInfo, RoomPreset,
-            },
+            handlers::create_room::CreateRoomView,
+            service::create_room::ValidatedCreateRoomRequest,
         },
     },
 };
 
+pub mod creation_plan;
 pub mod versions;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -184,18 +181,6 @@ pub enum RoomMethodExecutionProvider {
     RoomVersionCapabilityFlag,
 }
 
-impl RoomVersion {
-    pub const SUPPORTED: [Self; 1] = [Self::V1];
-
-    pub fn is_supported(self) -> bool {
-        Self::SUPPORTED.contains(&self)
-    }
-
-    pub fn supported_versions() -> impl Iterator<Item = Self> {
-        Self::SUPPORTED.into_iter()
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RoomIdentifier {
     localpart: String,
@@ -205,7 +190,7 @@ pub struct RoomIdentifier {
 
 impl RoomIdentifier {
     pub fn generate(home_server_name: &ServerName) -> Self {
-        let localpart = Uuid::new_v4().simple().to_string();
+        let localpart = uuid::Uuid::new_v4().simple().to_string();
         Self::from_localpart_and_server(&localpart, home_server_name)
             .expect("generated room identifier must be valid")
     }
@@ -358,10 +343,10 @@ impl Room {
 
     pub fn try_create_contract(
         creator_user_id: &AuthorizedUserIdentifier,
-        info: CreateRoomInfo,
+        info: ValidatedCreateRoomRequest,
         home_server_name: &ServerName,
     ) -> Result<CreateRoomContract, RoomCreateContractError> {
-        let CreateRoomInfo {
+        let ValidatedCreateRoomRequest {
             creation_content,
             initial_state,
             invite,
@@ -371,85 +356,42 @@ impl Room {
             power_level_content_override,
             preset,
             room_alias_name,
-            room_version: requested_room_version,
+            room_version,
             topic,
             visibility,
         } = info;
-
-        let room_version = match requested_room_version.as_deref() {
-            Some(version) => RoomVersion::from_str(version.trim()).map_err(|_| {
-                RoomCreateContractError::UnsupportedRoomVersion {
-                    room_version: version.to_owned(),
-                }
-            })?,
-            None => RoomVersion::default(),
-        };
         if !room_version.is_supported() {
             return Err(RoomCreateContractError::UnsupportedRoomVersion {
                 room_version: room_version.to_string(),
             });
         }
-        let room_create_event_content = build_room_create_event_content(
-            creator_user_id,
-            room_version,
-            &preset,
-            &invite,
-            creation_content,
-        )?;
-
-        if let Some(power_level_content_override) = power_level_content_override.as_ref()
-            && !power_level_content_override.is_object()
-        {
-            return Err(RoomCreateContractError::InvalidPowerLevelContentOverride);
-        }
 
         let room_id = RoomIdentifier::generate(home_server_name);
         let room = Self::new(&room_id, room_version)?;
+        let invitee_user_ids = invite
+            .iter()
+            .map(|invitee| invitee.as_str().to_owned())
+            .collect::<Vec<_>>();
 
-        if let Some(room_alias_name) = room_alias_name.as_deref()
-            && (room_alias_name.trim().is_empty()
-                || room_alias_name.contains(':')
-                || room_alias_name.contains('\0'))
-        {
-            return Err(RoomCreateContractError::InvalidRoomAlias);
-        }
-
-        if let Some(invitees) = invite.as_ref()
-            && invitees
-                .iter()
-                .any(|invitee| UserIdentifier::try_from(invitee.clone()).is_err())
-        {
-            return Err(RoomCreateContractError::InvalidInviteUserIdentifier);
-        }
-
-        if let Some(invitees) = invite_3pid.as_ref()
-            && invitees
-                .iter()
-                .any(InviteThirdPartyIdentifierInfo::has_empty_required_field)
-        {
-            return Err(RoomCreateContractError::InvalidInviteThirdPartyIdentifier);
-        }
-
-        let initial_state_payload = build_ordered_room_state_events(RoomCreationEventPlanInput {
-            creator_user_id: creator_user_id.as_user_identifier().as_str(),
-            room_id: room_id.as_str(),
-            home_server_name: home_server_name.as_str(),
-            room_create_event_content,
-            power_level_content_override,
-            room_alias_name: room_alias_name.as_deref(),
-            preset: &preset,
-            initial_state,
-            name: name.as_deref(),
-            topic: topic.as_deref(),
-            invitees: invite.as_deref().unwrap_or(&[]),
-            third_party_invitees: invite_3pid.as_deref().unwrap_or(&[]),
-            is_direct,
-        })?;
+        let initial_state_payload = RoomCreationPlanBuilder::new(
+            creator_user_id,
+            room_id.as_str(),
+            home_server_name.as_str(),
+            room_version,
+        )
+        .with_room_create_event_content(creation_content.to_event_content_map())
+        .with_preset(&preset)
+        .with_invitees(&invitee_user_ids, &invite_3pid, Some(is_direct))
+        .with_alias(room_alias_name.as_deref())
+        .with_profile(name.as_deref(), topic.as_deref())
+        .with_initial_state(Some(initial_state))
+        .with_power_level_override(Some(power_level_content_override))
+        .build()?;
 
         let payload = CreateRoomPersistencePayload {
             creator_user_id: creator_user_id.as_user_identifier().as_str().to_owned(),
             initial_state: initial_state_payload,
-            is_direct,
+            is_direct: Some(is_direct),
             name,
             preset: preset.to_string(),
             room_alias_name,
@@ -489,394 +431,6 @@ impl Room {
             RoomVersion::V12 => VersionedRoom::V12(RoomForVersion::new(self.room_id)),
         }
     }
-}
-
-fn validate_creation_content(
-    creator_user_id: &AuthorizedUserIdentifier,
-    room_version: RoomVersion,
-    creation_content: Option<Value>,
-) -> Result<Value, RoomCreateContractError> {
-    let mut creation_content = match creation_content {
-        Some(content) => content,
-        None => Value::Object(Map::new()),
-    };
-    let creation_content_object = creation_content
-        .as_object_mut()
-        .ok_or(RoomCreateContractError::InvalidCreationContent)?;
-
-    // `creator` and `room_version` are server-owned keys in createRoom.
-    creation_content_object.insert(
-        "creator".to_owned(),
-        Value::String(creator_user_id.as_user_identifier().as_str().to_owned()),
-    );
-    creation_content_object.insert(
-        "room_version".to_owned(),
-        Value::String(room_version.to_string()),
-    );
-
-    let room_create_content = serde_json::from_value::<RoomCreateContent>(creation_content.clone())
-        .map_err(|error| RoomCreateContractError::InvalidRoomCreateContent {
-            reason: error.to_string(),
-        })?;
-    room_create_content.validate().map_err(|error| {
-        RoomCreateContractError::InvalidRoomCreateContent {
-            reason: error.to_string(),
-        }
-    })?;
-
-    Ok(creation_content)
-}
-
-fn build_room_create_event_content(
-    creator_user_id: &AuthorizedUserIdentifier,
-    room_version: RoomVersion,
-    preset: &RoomPreset,
-    invitees: &Option<Vec<String>>,
-    creation_content: Option<Value>,
-) -> Result<Value, RoomCreateContractError> {
-    let mut room_create_event_content =
-        validate_creation_content(creator_user_id, room_version, creation_content)?;
-    if matches!(preset, RoomPreset::TrustedPrivateChat)
-        && let Some(invitees) = invitees.as_ref()
-        && !invitees.is_empty()
-    {
-        let room_create_content = room_create_event_content
-            .as_object_mut()
-            .ok_or(RoomCreateContractError::InvalidCreationContent)?;
-        let invitee_values = invitees
-            .iter()
-            .cloned()
-            .map(Value::String)
-            .collect::<Vec<_>>();
-        let additional_creators = room_create_content
-            .entry("additional_creators")
-            .or_insert_with(|| Value::Array(Vec::new()));
-        if let Some(additional_creators) = additional_creators.as_array_mut() {
-            for invitee in invitee_values {
-                if !additional_creators.contains(&invitee) {
-                    additional_creators.push(invitee);
-                }
-            }
-        }
-    }
-
-    Ok(room_create_event_content)
-}
-
-fn validate_initial_state_event(
-    event: &crate::services::rooms::handlers::create_room::RoomStateEventInfo,
-) -> Result<(), RoomCreateContractError> {
-    if event.event_type.trim().is_empty() {
-        return Err(RoomCreateContractError::InvalidRoomStateEventType);
-    }
-    if event.event_type == "m.room.create" {
-        return Err(RoomCreateContractError::InitialStateContainsRoomCreateEvent);
-    }
-    if !event.content.is_object() {
-        return Err(RoomCreateContractError::InvalidRoomStateEventContentType {
-            event_type: event.event_type.clone(),
-        });
-    }
-
-    Ok(())
-}
-
-struct RoomCreationEventPlanInput<'a> {
-    creator_user_id: &'a str,
-    room_id: &'a str,
-    home_server_name: &'a str,
-    room_create_event_content: Value,
-    power_level_content_override: Option<Value>,
-    room_alias_name: Option<&'a str>,
-    preset: &'a RoomPreset,
-    initial_state: Option<Vec<crate::services::rooms::handlers::create_room::RoomStateEventInfo>>,
-    name: Option<&'a str>,
-    topic: Option<&'a str>,
-    invitees: &'a [String],
-    third_party_invitees: &'a [InviteThirdPartyIdentifierInfo],
-    is_direct: Option<bool>,
-}
-
-fn build_ordered_room_state_events(
-    input: RoomCreationEventPlanInput<'_>,
-) -> Result<Vec<CreateRoomStateEventPayload>, RoomCreateContractError> {
-    let mut planned_events = Vec::<CreateRoomStateEventPayload>::new();
-
-    // 1. m.room.create
-    push_room_state_event(
-        &mut planned_events,
-        "m.room.create",
-        "",
-        input.room_create_event_content,
-    );
-    // 2. creator join membership
-    push_room_state_event(
-        &mut planned_events,
-        "m.room.member",
-        input.creator_user_id,
-        json!({
-            "membership": "join"
-        }),
-    );
-    // 3. default power levels (with override)
-    let power_levels_content = build_default_power_levels_content(
-        input.creator_user_id,
-        input.preset,
-        input.invitees,
-        input.power_level_content_override,
-    )?;
-    push_room_state_event(
-        &mut planned_events,
-        "m.room.power_levels",
-        "",
-        power_levels_content,
-    );
-    // 4. canonical alias if provided
-    if let Some(alias_localpart) = input.room_alias_name {
-        push_room_state_event(
-            &mut planned_events,
-            "m.room.canonical_alias",
-            "",
-            json!({
-                "alias": format!("#{alias_localpart}:{}", input.home_server_name),
-            }),
-        );
-    }
-    // 5. preset defaults
-    apply_preset_events(&mut planned_events, input.preset);
-    // 6. initial_state
-    if let Some(initial_state) = input.initial_state {
-        for initial_state_event in initial_state {
-            validate_initial_state_event(&initial_state_event)?;
-            push_room_state_event(
-                &mut planned_events,
-                &initial_state_event.event_type,
-                &initial_state_event.state_key.unwrap_or_default(),
-                initial_state_event.content,
-            );
-        }
-    }
-    // 7. name/topic overrides
-    if let Some(name) = input.name {
-        push_room_state_event(
-            &mut planned_events,
-            "m.room.name",
-            "",
-            json!({
-                "name": name,
-            }),
-        );
-    }
-    if let Some(topic) = input.topic {
-        push_room_state_event(
-            &mut planned_events,
-            "m.room.topic",
-            "",
-            json!({
-                "topic": topic,
-            }),
-        );
-    }
-    // 8. invite and third-party invite events
-    for invitee in input.invitees {
-        push_room_state_event(
-            &mut planned_events,
-            "m.room.member",
-            invitee,
-            json!({
-                "membership": "invite",
-                "is_direct": input.is_direct.unwrap_or(false),
-            }),
-        );
-    }
-    for third_party_invitee in input.third_party_invitees {
-        let token = format!("invite_{}", Uuid::new_v4().simple());
-        push_room_state_event(
-            &mut planned_events,
-            "m.room.third_party_invite",
-            &token,
-            json!({
-                "display_name": third_party_invitee.address,
-                "key_validity_url": format!("https://{}/_matrix/identity/api/v1/pubkey/isvalid", third_party_invitee.id_server),
-                "public_key": "",
-                "medium": third_party_invitee.medium,
-                "id_server": third_party_invitee.id_server,
-            }),
-        );
-    }
-
-    planned_events = collapse_duplicate_state_events(planned_events);
-    for (index, event) in planned_events.iter_mut().enumerate() {
-        event.ordering = i32::try_from(index).unwrap_or(i32::MAX);
-    }
-    validate_room_creation_event_order(&planned_events, input.room_id, input.creator_user_id)?;
-
-    Ok(planned_events)
-}
-
-fn collapse_duplicate_state_events(
-    events: Vec<CreateRoomStateEventPayload>,
-) -> Vec<CreateRoomStateEventPayload> {
-    use std::collections::HashMap;
-
-    let mut latest_index_by_state_tuple = HashMap::new();
-    for (index, event) in events.iter().enumerate() {
-        latest_index_by_state_tuple
-            .insert((event.event_type.clone(), event.state_key.clone()), index);
-    }
-
-    let mut collapsed_events = Vec::with_capacity(latest_index_by_state_tuple.len());
-    for (index, event) in events.into_iter().enumerate() {
-        let event_state_tuple = (event.event_type.clone(), event.state_key.clone());
-        if latest_index_by_state_tuple.get(&event_state_tuple).copied() == Some(index) {
-            collapsed_events.push(event);
-        }
-    }
-
-    collapsed_events
-}
-
-fn push_room_state_event(
-    planned_events: &mut Vec<CreateRoomStateEventPayload>,
-    event_type: &str,
-    state_key: &str,
-    content: Value,
-) {
-    planned_events.push(CreateRoomStateEventPayload {
-        content,
-        event_type: event_type.to_owned(),
-        ordering: 0,
-        state_key: state_key.to_owned(),
-    });
-}
-
-fn apply_preset_events(planned_events: &mut Vec<CreateRoomStateEventPayload>, preset: &RoomPreset) {
-    let (join_rule, guest_access) = match preset {
-        RoomPreset::PrivateChat | RoomPreset::TrustedPrivateChat => ("invite", "can_join"),
-        RoomPreset::PublicChat => ("public", "forbidden"),
-    };
-    push_room_state_event(
-        planned_events,
-        "m.room.join_rules",
-        "",
-        json!({ "join_rule": join_rule }),
-    );
-    push_room_state_event(
-        planned_events,
-        "m.room.history_visibility",
-        "",
-        json!({ "history_visibility": "shared" }),
-    );
-    push_room_state_event(
-        planned_events,
-        "m.room.guest_access",
-        "",
-        json!({ "guest_access": guest_access }),
-    );
-}
-
-fn build_default_power_levels_content(
-    creator_user_id: &str,
-    preset: &RoomPreset,
-    invitees: &[String],
-    power_level_content_override: Option<Value>,
-) -> Result<Value, RoomCreateContractError> {
-    let mut users = Map::new();
-    users.insert(creator_user_id.to_owned(), json!(100));
-    if matches!(preset, RoomPreset::TrustedPrivateChat) {
-        for invitee in invitees {
-            users.insert(invitee.clone(), json!(100));
-        }
-    }
-
-    let mut power_levels = Map::new();
-    power_levels.insert("ban".to_owned(), json!(50));
-    power_levels.insert("events".to_owned(), Value::Object(Map::new()));
-    power_levels.insert("events_default".to_owned(), json!(0));
-    power_levels.insert("invite".to_owned(), json!(0));
-    power_levels.insert("kick".to_owned(), json!(50));
-    power_levels.insert("redact".to_owned(), json!(50));
-    power_levels.insert("state_default".to_owned(), json!(50));
-    power_levels.insert("users".to_owned(), Value::Object(users));
-    power_levels.insert("users_default".to_owned(), json!(0));
-
-    if let Some(override_content) = power_level_content_override {
-        let override_content = override_content
-            .as_object()
-            .ok_or(RoomCreateContractError::InvalidPowerLevelContentOverride)?;
-        for (key, value) in override_content {
-            power_levels.insert(key.clone(), value.clone());
-        }
-    }
-
-    Ok(Value::Object(power_levels))
-}
-
-fn validate_room_creation_event_order(
-    planned_events: &[CreateRoomStateEventPayload],
-    room_id: &str,
-    creator_user_id: &str,
-) -> Result<(), RoomCreateContractError> {
-    let Some(first_event) = planned_events.first() else {
-        return Err(RoomCreateContractError::EmptyRoomCreationEventPlan);
-    };
-    if first_event.event_type != "m.room.create" {
-        return Err(RoomCreateContractError::InvalidRoomCreationEventOrder {
-            expected: "m.room.create",
-            received: first_event.event_type.clone(),
-        });
-    }
-
-    let Some(second_event) = planned_events.get(1) else {
-        return Err(RoomCreateContractError::InvalidRoomCreationEventOrder {
-            expected: "m.room.member",
-            received: "missing".to_owned(),
-        });
-    };
-    if second_event.event_type != "m.room.member" || second_event.state_key != creator_user_id {
-        return Err(RoomCreateContractError::InvalidRoomCreationEventOrder {
-            expected: "creator m.room.member",
-            received: format!("{}:{}", second_event.event_type, second_event.state_key),
-        });
-    }
-
-    let Some(third_event) = planned_events.get(2) else {
-        return Err(RoomCreateContractError::InvalidRoomCreationEventOrder {
-            expected: "m.room.power_levels",
-            received: "missing".to_owned(),
-        });
-    };
-    if third_event.event_type != "m.room.power_levels" {
-        return Err(RoomCreateContractError::InvalidRoomCreationEventOrder {
-            expected: "m.room.power_levels",
-            received: third_event.event_type.clone(),
-        });
-    }
-
-    let room_identifier = RoomIdentifier::parse(room_id).ok_or_else(|| {
-        RoomCreateContractError::InvalidGeneratedRoomIdentifier {
-            room_id: room_id.to_owned(),
-        }
-    })?;
-    let room_domain = room_identifier.server_name().ok_or_else(|| {
-        RoomCreateContractError::InvalidGeneratedRoomIdentifier {
-            room_id: room_id.to_owned(),
-        }
-    })?;
-    let creator_domain = creator_user_id
-        .split_once(':')
-        .map(|(_, domain)| domain)
-        .ok_or(RoomCreateContractError::InvalidInviteUserIdentifier)?;
-    if room_domain != creator_domain {
-        return Err(
-            RoomCreateContractError::RoomDomainAndCreatorDomainMismatch {
-                room_domain: room_domain.to_owned(),
-                creator_domain: creator_domain.to_owned(),
-            },
-        );
-    }
-
-    Ok(())
 }
 
 #[derive(Debug, Error)]
@@ -930,15 +484,6 @@ trait RoomVersionRulesContract {
     fn rules() -> RoomVersionRules;
 }
 
-impl InviteThirdPartyIdentifierInfo {
-    fn has_empty_required_field(&self) -> bool {
-        self.id_server.trim().is_empty()
-            || self.id_access_token.trim().is_empty()
-            || self.medium.trim().is_empty()
-            || self.address.trim().is_empty()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -948,10 +493,11 @@ mod tests {
         services::{
             authorization::entities::AuthorizedUserIdentifier,
             rooms::{
-                entities::{Room, RoomCreateContractError},
+                entities::{Room, RoomCreateContractError, RoomStateEventInfo},
                 handlers::create_room::{
-                    CreateRoomInfo, RoomPreset, RoomStateEventInfo, RoomVisibility,
+                    RoomPowerLevelsContentOverride, RoomPreset, RoomVisibility,
                 },
+                service::create_room::{CreationContent, ValidatedCreateRoomRequest},
             },
         },
     };
@@ -966,18 +512,18 @@ mod tests {
         ServerName::try_new("example.org").expect("valid homeserver name")
     }
 
-    fn base_create_room_info() -> CreateRoomInfo {
-        CreateRoomInfo {
-            creation_content: None,
-            initial_state: None,
-            invite: None,
-            invite_3pid: None,
-            is_direct: None,
+    fn base_create_room_info() -> ValidatedCreateRoomRequest {
+        ValidatedCreateRoomRequest {
+            creation_content: CreationContent::default(),
+            initial_state: Vec::new(),
+            invite: Vec::new(),
+            invite_3pid: Vec::new(),
+            is_direct: false,
             name: None,
-            power_level_content_override: None,
+            power_level_content_override: RoomPowerLevelsContentOverride::default(),
             preset: RoomPreset::PrivateChat,
             room_alias_name: None,
-            room_version: Some("1".to_owned()),
+            room_version: RoomVersion::V1,
             topic: None,
             visibility: RoomVisibility::Private,
         }
@@ -995,7 +541,7 @@ mod tests {
     #[test]
     fn create_room_contract_rejects_non_v1_room_version() {
         let mut create_room_info = base_create_room_info();
-        create_room_info.room_version = Some("12".to_owned());
+        create_room_info.room_version = RoomVersion::V12;
 
         let error =
             Room::try_create_contract(&creator_user_id(), create_room_info, &home_server_name())
@@ -1009,11 +555,11 @@ mod tests {
     #[test]
     fn create_room_contract_allows_custom_initial_state_event_type() {
         let mut create_room_info = base_create_room_info();
-        create_room_info.initial_state = Some(vec![RoomStateEventInfo {
+        create_room_info.initial_state = vec![RoomStateEventInfo {
             content: json!({ "enabled": true }),
             state_key: None,
             event_type: "com.example.custom".to_owned(),
-        }]);
+        }];
 
         let contract =
             Room::try_create_contract(&creator_user_id(), create_room_info, &home_server_name())
@@ -1030,11 +576,11 @@ mod tests {
     #[test]
     fn create_room_contract_rejects_non_object_initial_state_content() {
         let mut create_room_info = base_create_room_info();
-        create_room_info.initial_state = Some(vec![RoomStateEventInfo {
+        create_room_info.initial_state = vec![RoomStateEventInfo {
             content: json!("invalid"),
             state_key: None,
             event_type: "m.room.topic".to_owned(),
-        }]);
+        }];
 
         let error =
             Room::try_create_contract(&creator_user_id(), create_room_info, &home_server_name())
@@ -1048,11 +594,11 @@ mod tests {
     #[test]
     fn create_room_contract_rejects_m_room_create_in_initial_state() {
         let mut create_room_info = base_create_room_info();
-        create_room_info.initial_state = Some(vec![RoomStateEventInfo {
+        create_room_info.initial_state = vec![RoomStateEventInfo {
             content: json!({}),
             state_key: Some(String::new()),
             event_type: "m.room.create".to_owned(),
-        }]);
+        }];
 
         let error =
             Room::try_create_contract(&creator_user_id(), create_room_info, &home_server_name())
@@ -1064,46 +610,33 @@ mod tests {
     }
 
     #[test]
-    fn create_room_contract_rejects_non_object_creation_content() {
-        let mut create_room_info = base_create_room_info();
-        create_room_info.creation_content = Some(json!("invalid"));
-
-        let error =
-            Room::try_create_contract(&creator_user_id(), create_room_info, &home_server_name())
-                .expect_err("creation_content must be an object");
-        assert!(matches!(
-            error,
-            RoomCreateContractError::InvalidCreationContent
-        ));
-    }
-
-    #[test]
     fn create_room_contract_overrides_client_creator_and_room_version() {
         let mut create_room_info = base_create_room_info();
-        create_room_info.creation_content = Some(json!({
+        create_room_info.creation_content.extra_content = json!({
             "creator": "not-a-valid-user-id",
             "room_version": "12"
-        }));
+        })
+        .as_object()
+        .cloned()
+        .expect("object");
 
         Room::try_create_contract(&creator_user_id(), create_room_info, &home_server_name())
             .expect("server-owned creator and room_version keys must be overridden");
     }
 
     #[test]
-    fn create_room_contract_does_not_validate_additional_creators_in_v1() {
+    fn create_room_contract_allows_additional_creators_in_v1_when_prevalidated() {
         let mut create_room_info = base_create_room_info();
-        create_room_info.creation_content = Some(json!({
-            "additional_creators": ["not-a-valid-user-id"]
-        }));
+        create_room_info.creation_content.additional_creators = vec!["@bob:example.org".to_owned()];
 
         Room::try_create_contract(&creator_user_id(), create_room_info, &home_server_name())
-            .expect("additional_creators must not be validated for v1 rooms");
+            .expect("prevalidated additional_creators should pass for v1 contract build");
     }
 
     #[test]
     fn create_room_contract_collapses_duplicate_state_keys_with_last_write_wins() {
         let mut create_room_info = base_create_room_info();
-        create_room_info.initial_state = Some(vec![
+        create_room_info.initial_state = vec![
             RoomStateEventInfo {
                 content: json!({ "guest_access": "can_join" }),
                 state_key: Some(String::new()),
@@ -1114,7 +647,7 @@ mod tests {
                 state_key: Some(String::new()),
                 event_type: "m.room.history_visibility".to_owned(),
             },
-        ]);
+        ];
 
         let contract =
             Room::try_create_contract(&creator_user_id(), create_room_info, &home_server_name())
