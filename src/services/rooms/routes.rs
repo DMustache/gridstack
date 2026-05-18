@@ -16,6 +16,14 @@ pub fn routes(state: &ApplicationState) -> Router<ApplicationState> {
 
     Router::new()
         .route("/_matrix/client/v3/createRoom", post(handlers::create_room))
+        .route(
+            "/_matrix/client/v3/rooms/{roomId}/join",
+            post(handlers::join_room_by_id),
+        )
+        .route(
+            "/_matrix/client/v3/rooms/{roomId}/leave",
+            post(handlers::leave_room_by_id),
+        )
         .route_layer(authorization_layer)
         .route_layer(rate_limit_layer)
 }
