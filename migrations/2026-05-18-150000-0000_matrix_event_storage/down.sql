@@ -1,0 +1,11 @@
+DROP TABLE IF EXISTS public.room_idempotency_records;
+DROP TABLE IF EXISTS public.room_outbox_tasks;
+DROP TABLE IF EXISTS public.room_sync_stream;
+DROP TABLE IF EXISTS public.room_summary_projection;
+DROP TABLE IF EXISTS public.room_timeline_projection;
+DROP TABLE IF EXISTS public.room_membership_projection;
+DROP TABLE IF EXISTS public.room_current_state;
+DROP TABLE IF EXISTS public.room_forward_extremities;
+DROP TABLE IF EXISTS public.room_event_auth_edges;
+DROP TABLE IF EXISTS public.room_event_prev_edges;
+DROP TABLE IF EXISTS public.room_events;

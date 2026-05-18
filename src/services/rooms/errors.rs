@@ -1,6 +1,8 @@
 use thiserror::Error;
 
-use crate::services::rooms::entities::RoomCreateContractError;
+use crate::services::{
+    events::service::EventCompilationError, rooms::entities::RoomValidationError,
+};
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum RoomsApplicationError {
@@ -14,31 +16,48 @@ pub enum RoomsApplicationError {
     InvalidRoomState,
     #[error("invalid request parameter")]
     InvalidParameter,
+    #[error("invite blocked")]
+    InviteBlocked,
     #[error("forbidden")]
     Forbidden,
     #[error("internal error")]
     Internal,
 }
 
-impl From<RoomCreateContractError> for RoomsApplicationError {
-    fn from(error: RoomCreateContractError) -> Self {
-        match error {
-            RoomCreateContractError::UnsupportedRoomVersion { .. } => Self::UnsupportedRoomVersion,
-            RoomCreateContractError::InvalidRoomStateEventType
-            | RoomCreateContractError::InvalidRoomStateEventContentType { .. }
-            | RoomCreateContractError::InitialStateContainsRoomCreateEvent
-            | RoomCreateContractError::EmptyRoomCreationEventPlan
-            | RoomCreateContractError::InvalidRoomCreationEventOrder { .. }
-            | RoomCreateContractError::InvalidRoomCreateContent { .. } => Self::InvalidRoomState,
-            RoomCreateContractError::InvalidHomeServerName { .. }
-            | RoomCreateContractError::InvalidGeneratedRoomIdentifier { .. }
-            | RoomCreateContractError::InvalidRoomIdentifier(_)
-            | RoomCreateContractError::InvalidRoomAlias
-            | RoomCreateContractError::InvalidInviteUserIdentifier
-            | RoomCreateContractError::InvalidInviteThirdPartyIdentifier
-            | RoomCreateContractError::RoomDomainAndCreatorDomainMismatch { .. }
-            | RoomCreateContractError::InvalidCreationContent
-            | RoomCreateContractError::InvalidPowerLevelContentOverride => Self::InvalidParameter,
+impl From<RoomValidationError> for RoomsApplicationError {
+    fn from(value: RoomValidationError) -> Self {
+        match value {
+            RoomValidationError::UnsupportedRoomVersion { .. } => Self::UnsupportedRoomVersion,
+            RoomValidationError::InvalidInitialStateEventType
+            | RoomValidationError::InvalidInitialStateEventContent { .. }
+            | RoomValidationError::InitialStateContainsRoomCreate => Self::InvalidRoomState,
+            RoomValidationError::InvalidInviteUserIdentifier { .. }
+            | RoomValidationError::InvalidRoomAlias
+            | RoomValidationError::InvalidRoomName
+            | RoomValidationError::InvalidRoomTopic
+            | RoomValidationError::InvalidThirdPartyInvite
+            | RoomValidationError::InvalidCreationContent
+            | RoomValidationError::InvalidPredecessor => Self::InvalidParameter,
+        }
+    }
+}
+
+impl From<EventCompilationError> for RoomsApplicationError {
+    fn from(value: EventCompilationError) -> Self {
+        match value {
+            EventCompilationError::UnsupportedRoomVersion { .. } => Self::UnsupportedRoomVersion,
+            EventCompilationError::EmptyIntentPlan { .. }
+            | EventCompilationError::InvalidEventType
+            | EventCompilationError::InvalidEventContentShape { .. }
+            | EventCompilationError::MissingStateKeyForStateEvent { .. }
+            | EventCompilationError::MessageEventCannotHaveStateKey { .. }
+            | EventCompilationError::StateKeyMustBeEmpty { .. }
+            | EventCompilationError::InvalidMembershipStateKey { .. }
+            | EventCompilationError::CreateEventMustBeFirst
+            | EventCompilationError::CreatorJoinMustBeSecond
+            | EventCompilationError::MissingSenderMembershipForAuth { .. } => {
+                Self::InvalidRoomState
+            }
         }
     }
 }

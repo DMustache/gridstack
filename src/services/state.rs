@@ -79,14 +79,14 @@ impl ApplicationState {
             user_repository,
             Arc::<dyn SessionRepository>::clone(&session_repository),
             json_web_token_adapter,
-            clock,
+            Arc::clone(&clock),
             &server_name,
             application_configuration.authenification.clone(),
         ));
         let room_repository: Arc<dyn RoomRepository> = Arc::new(RoomPersistence::new(
             &application_configuration.database.url,
         ));
-        let events_service = Arc::new(EventsService::new(&server_name));
+        let events_service = Arc::new(EventsService::new(&server_name, Arc::clone(&clock)));
         let rooms_service = Arc::new(RoomsService::new(
             room_repository,
             events_service,
