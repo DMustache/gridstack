@@ -16,10 +16,14 @@ pub enum RoomsApplicationError {
     InvalidRoomState,
     #[error("invalid request parameter")]
     InvalidParameter,
+    #[error("room alias does not point to target room")]
+    BadAlias,
     #[error("invite blocked")]
     InviteBlocked,
     #[error("forbidden")]
     Forbidden,
+    #[error("not found")]
+    NotFound,
     #[error("internal error")]
     Internal,
 }

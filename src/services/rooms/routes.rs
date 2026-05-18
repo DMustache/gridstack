@@ -1,4 +1,4 @@
-use axum::{Router, middleware, routing::post};
+use axum::{Router, middleware, routing::{get, post}};
 
 use crate::services::{
     layers::{AuthorizationLayer, RateLimitLayer},
@@ -23,6 +23,22 @@ pub fn routes(state: &ApplicationState) -> Router<ApplicationState> {
         .route(
             "/_matrix/client/v3/rooms/{roomId}/leave",
             post(handlers::leave_room_by_id),
+        )
+        .route(
+            "/_matrix/client/v3/rooms/{roomId}/state",
+            get(handlers::get_room_state),
+        )
+        .route(
+            "/_matrix/client/v3/rooms/{roomId}/state/{eventType}/{stateKey}",
+            get(handlers::get_room_state_with_key).put(handlers::set_room_state_with_key),
+        )
+        .route(
+            "/_matrix/client/v3/rooms/{roomId}/state/{eventType}",
+            get(handlers::get_room_state_with_empty_key),
+        )
+        .route(
+            "/_matrix/client/v3/rooms/{roomId}/messages",
+            get(handlers::get_room_messages),
         )
         .route_layer(authorization_layer)
         .route_layer(rate_limit_layer)
