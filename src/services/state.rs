@@ -18,6 +18,7 @@ use crate::{
             service::AuthorizationService,
         },
         errors::set_rate_limit_retry_after_ms,
+        events::service::EventsService,
         repositories::{SessionRepository, UserRepository},
         rooms::{
             persistence::{RoomPersistence, RoomRepository},
@@ -85,7 +86,13 @@ impl ApplicationState {
         let room_repository: Arc<dyn RoomRepository> = Arc::new(RoomPersistence::new(
             &application_configuration.database.url,
         ));
-        let rooms_service = Arc::new(RoomsService::new(room_repository, &server_name));
+        let events_service = Arc::new(EventsService::new(&server_name));
+        let rooms_service = Arc::new(RoomsService::new(
+            room_repository,
+            events_service,
+            Arc::clone(&authorization_service),
+            &server_name,
+        ));
         let rate_limiter = Arc::new(RateLimiterState::new(Duration::from_mins(1), 120));
         info!("application state initialized");
 

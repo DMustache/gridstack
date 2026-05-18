@@ -10,6 +10,7 @@ use crate::{
     infrastructure::schema,
     services::{
         errors::DomainError,
+        events::entities::EventBatchWriteContract,
         rooms::{
             entities::CreateRoomPersistencePayload,
             persistence::models::{
@@ -23,7 +24,11 @@ mod models;
 
 pub trait RoomRepository: Send + Sync {
     fn reserve_room_alias(&self, room_alias_name: &str) -> Result<bool, DomainError>;
-    fn save_room(&self, payload: &CreateRoomPersistencePayload) -> Result<(), DomainError>;
+    fn save_room(
+        &self,
+        payload: &CreateRoomPersistencePayload,
+        event_batch_write_contract: &EventBatchWriteContract,
+    ) -> Result<(), DomainError>;
 }
 
 #[derive(Clone)]
@@ -60,7 +65,11 @@ impl RoomRepository for RoomPersistence {
         Ok(existing.is_none())
     }
 
-    fn save_room(&self, payload: &CreateRoomPersistencePayload) -> Result<(), DomainError> {
+    fn save_room(
+        &self,
+        payload: &CreateRoomPersistencePayload,
+        event_batch_write_contract: &EventBatchWriteContract,
+    ) -> Result<(), DomainError> {
         use schema::{room_aliases, room_state_events, rooms};
 
         let mut connection = self
@@ -98,31 +107,46 @@ impl RoomRepository for RoomPersistence {
                         .execute(connection)?;
                 }
 
-                if !payload.initial_state.is_empty() {
-                    let events = payload
-                        .initial_state
-                        .iter()
-                        .map(|event| CreateRoomStateEventModel {
-                            id: Uuid::new_v4(),
-                            room_id: payload.room_id.clone(),
-                            event_type: event.event_type.clone(),
-                            state_key: event.state_key.clone(),
-                            content: event.content.clone(),
-                            ordering: event.ordering,
-                            created_at: now,
-                        })
-                        .collect::<Vec<_>>();
+                let state_events = event_batch_write_contract
+                    .event_write_contracts
+                    .iter()
+                    .flat_map(|contract| contract.events_to_insert.iter())
+                    .filter_map(|event| {
+                        event
+                            .state_key
+                            .as_ref()
+                            .map(|state_key| CreateRoomStateEventModel {
+                                id: Uuid::new_v4(),
+                                room_id: event.room_id.clone(),
+                                event_type: event.event_type.clone(),
+                                state_key: state_key.clone(),
+                                content: event.content.clone(),
+                                ordering: 0,
+                                created_at: now,
+                            })
+                    })
+                    .enumerate()
+                    .map(|(index, mut event)| {
+                        event.ordering = i32::try_from(index).unwrap_or(i32::MAX);
+                        event
+                    })
+                    .collect::<Vec<_>>();
 
-                    if !events.is_empty() {
-                        insert_into(room_state_events::table)
-                            .values(events)
-                            .execute(connection)?;
-                    }
+                if !state_events.is_empty() {
+                    insert_into(room_state_events::table)
+                        .values(state_events)
+                        .execute(connection)?;
                 }
 
                 Ok::<(), diesel::result::Error>(())
             })
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| match error {
+                diesel::result::Error::DatabaseError(
+                    diesel::result::DatabaseErrorKind::UniqueViolation,
+                    _,
+                ) => DomainError::AlreadyExists,
+                other => DomainError::InvalidRequest(other.to_string()),
+            })?;
 
         Ok(())
     }

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -203,4 +203,223 @@ pub enum RoomEventValidationError {
     MissingRoomV2ResolutionEvent { event_identifier: String },
     #[error(transparent)]
     InvalidRoomIdentifier(#[from] crate::services::rooms::entities::RoomIdentifierValidationError),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EventOriginKind {
+    CreateRoom,
+    CreatorJoin,
+    DefaultPowerLevels,
+    CanonicalAlias,
+    PresetState,
+    InitialState,
+    Name,
+    Topic,
+    Invite,
+    MessageSend,
+    StateSet,
+    MembershipChange,
+    FederationReceive,
+    Redaction,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EventIntent {
+    pub room_id: String,
+    pub sender: String,
+    pub event_type: String,
+    pub state_key: Option<String>,
+    pub content: Value,
+    pub unsigned: Option<Value>,
+    pub origin_kind: EventOriginKind,
+    pub transaction_id: Option<String>,
+    pub client_visible: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RoomEventIntentPlan {
+    pub room_id: String,
+    pub room_version: RoomVersion,
+    pub intents: Vec<EventIntent>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EventDraft {
+    pub room_id: String,
+    pub room_version: RoomVersion,
+    pub sender: String,
+    pub event_type: String,
+    pub state_key: Option<String>,
+    pub content: Value,
+    pub unsigned: Option<Value>,
+    pub prev_events: Vec<String>,
+    pub auth_events: Vec<String>,
+    pub depth: u64,
+    pub origin_server_ts: u64,
+    pub redacts: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PersistedEvent {
+    pub event_id: String,
+    pub room_id: String,
+    pub room_version: RoomVersion,
+    pub sender: String,
+    pub event_type: String,
+    pub state_key: Option<String>,
+    pub content: Value,
+    pub unsigned: Option<Value>,
+    pub prev_events: Vec<String>,
+    pub auth_events: Vec<String>,
+    pub depth: u64,
+    pub origin_server_ts: u64,
+    pub hashes: HashMap<String, String>,
+    pub signatures: HashMap<String, HashMap<String, String>>,
+    pub rejected: bool,
+    pub soft_failed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventGraphEdge {
+    pub room_id: String,
+    pub event_id: String,
+    pub linked_event_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CurrentStateUpdate {
+    pub room_id: String,
+    pub event_type: String,
+    pub state_key: String,
+    pub event_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MembershipState {
+    Join,
+    Invite,
+    Leave,
+    Ban,
+    Knock,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MembershipProjectionUpdate {
+    pub room_id: String,
+    pub user_id: String,
+    pub membership: MembershipState,
+    pub event_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineProjectionUpdate {
+    pub room_id: String,
+    pub event_id: String,
+    pub stream_position: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncStreamUpdate {
+    pub room_id: String,
+    pub event_id: String,
+    pub stream_position: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutboxTaskType {
+    NotifyLocalUsers,
+    WakeSyncWaiters,
+    IndexEventForSearch,
+    FederateEvent,
+    FederateInvite,
+    PushNotification,
+    AppserviceTransaction,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutboxTask {
+    pub room_id: String,
+    pub event_id: String,
+    pub task_type: OutboxTaskType,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdempotencyRecord {
+    pub room_id: String,
+    pub sender_user_id: String,
+    pub transaction_id: String,
+    pub event_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EventWriteContract {
+    pub events_to_insert: Vec<PersistedEvent>,
+    pub prev_edges_to_insert: Vec<EventGraphEdge>,
+    pub auth_edges_to_insert: Vec<EventGraphEdge>,
+    pub forward_extremity_updates: Vec<String>,
+    pub current_state_updates: Vec<CurrentStateUpdate>,
+    pub membership_projection_updates: Vec<MembershipProjectionUpdate>,
+    pub timeline_projection_updates: Vec<TimelineProjectionUpdate>,
+    pub sync_stream_updates: Vec<SyncStreamUpdate>,
+    pub outbox_tasks: Vec<OutboxTask>,
+    pub idempotency_records: Vec<IdempotencyRecord>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EventBatchWriteContract {
+    pub room_id: String,
+    pub room_version: RoomVersion,
+    pub event_write_contracts: Vec<EventWriteContract>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RoomVersionDefinition {
+    pub version_id: RoomVersion,
+    pub state_resolution_version: u8,
+    pub event_identifier_format: crate::services::rooms::entities::EventIdentifierFormat,
+    pub room_identifier_format: crate::services::rooms::entities::RoomIdentifierFormat,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RoomVersionRegistry;
+
+impl RoomVersionRegistry {
+    pub const fn default_room_version(self) -> RoomVersion {
+        RoomVersion::V1
+    }
+
+    pub fn resolve(self, version: RoomVersion) -> Option<RoomVersionDefinition> {
+        match version {
+            RoomVersion::V1 => Some(RoomVersionDefinition {
+                version_id: RoomVersion::V1,
+                state_resolution_version: 1,
+                event_identifier_format:
+                    crate::services::rooms::entities::EventIdentifierFormat::ServerAssignedWithDomain,
+                room_identifier_format:
+                    crate::services::rooms::entities::RoomIdentifierFormat::LocalPartWithDomain,
+            }),
+            RoomVersion::V2 => Some(RoomVersionDefinition {
+                version_id: RoomVersion::V2,
+                // v2 reuses v1 behavior and only overrides state resolution.
+                state_resolution_version: 2,
+                event_identifier_format:
+                    crate::services::rooms::entities::EventIdentifierFormat::ServerAssignedWithDomain,
+                room_identifier_format:
+                    crate::services::rooms::entities::RoomIdentifierFormat::LocalPartWithDomain,
+            }),
+            RoomVersion::V3
+            | RoomVersion::V4
+            | RoomVersion::V5
+            | RoomVersion::V6
+            | RoomVersion::V7
+            | RoomVersion::V8
+            | RoomVersion::V9
+            | RoomVersion::V10
+            | RoomVersion::V11
+            | RoomVersion::V12 => None,
+        }
+    }
 }

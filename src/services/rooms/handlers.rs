@@ -1,7 +1,6 @@
 use axum::{Extension, Json, extract::State};
 use response_derive::IntoResponseEnum;
 use tracing::{error, info};
-use utoipa::openapi::info;
 
 use crate::services::{
     authorization::persistence::access_session_storage_unit::AccessSessionStorageUnit,
