@@ -13,15 +13,16 @@ use crate::{
         events::{
             entities::{
                 EventBatchWriteContract, MembershipContent, RoomEventFlow, RoomMemberContent,
-                SupportedRoomVersion,
+                StateEventKind, SupportedRoomVersion,
             },
             service::EventsService,
         },
         rooms::{
             entities::{
-                CreateRoomCommand, CreatedRoom, JoinRoomCommand, JoinedRoom, LeaveRoomCommand,
-                LeftRoom, RoomCreationFlow, RoomFactoryEvent, RoomIdentifier, RoomValidationError,
-                ValidatedCreateRoomInput,
+                CreateRoomCommand, CreatedRoom, GetRoomMessagesCommand, JoinedRoom,
+                JoinRoomCommand, LeaveRoomCommand, LeftRoom, RoomCreationFlow, RoomFactoryEvent,
+                RoomIdentifier, RoomMessageDirection, RoomMessagesPage, RoomStateEvent,
+                RoomValidationError, ValidatedCreateRoomInput, parse_room_state_event_content,
             },
             errors::RoomsApplicationError,
             persistence::RoomRepository,
@@ -114,22 +115,14 @@ impl RoomsService {
         room_id: String,
         command: JoinRoomCommand,
     ) -> Result<JoinedRoom, RoomsApplicationError> {
-        if RoomIdentifier::parse(room_id.clone()).is_none() {
-            return Err(RoomsApplicationError::Forbidden);
-        }
+        self.require_room_identifier(&room_id)?;
 
         if command.third_party_signed.is_some() {
             return Err(RoomsApplicationError::Forbidden);
         }
 
-        let room_join_context = self
-            .room_repository
-            .fetch_join_context(
-                &room_id,
-                joined_user_id.as_existing_user_identifier().as_str(),
-            )
-            .map_err(|_| RoomsApplicationError::Internal)?
-            .ok_or(RoomsApplicationError::Forbidden)?;
+        let room_join_context =
+            self.require_room_membership_context(&room_id, joined_user_id.as_existing_user_identifier())?;
 
         if room_join_context.membership_state.as_deref() == Some("join") {
             return Ok(JoinedRoom { room_id });
@@ -165,18 +158,10 @@ impl RoomsService {
         room_id: String,
         command: LeaveRoomCommand,
     ) -> Result<LeftRoom, RoomsApplicationError> {
-        if RoomIdentifier::parse(room_id.clone()).is_none() {
-            return Err(RoomsApplicationError::Forbidden);
-        }
+        self.require_room_identifier(&room_id)?;
 
-        let room_join_context = self
-            .room_repository
-            .fetch_join_context(
-                &room_id,
-                left_user_id.as_existing_user_identifier().as_str(),
-            )
-            .map_err(|_| RoomsApplicationError::Internal)?
-            .ok_or(RoomsApplicationError::Forbidden)?;
+        let room_join_context =
+            self.require_room_membership_context(&room_id, left_user_id.as_existing_user_identifier())?;
 
         let Some(membership_state) = room_join_context.membership_state.as_deref() else {
             return Err(RoomsApplicationError::Forbidden);
@@ -205,9 +190,206 @@ impl RoomsService {
 
         Ok(LeftRoom)
     }
+
+    pub fn get_room_state(
+        &self,
+        user_id: &AuthorizedUserIdentifier,
+        room_id: String,
+    ) -> Result<Vec<RoomStateEvent>, RoomsApplicationError> {
+        self.require_room_state_read_access(&room_id, user_id.as_existing_user_identifier())?;
+
+        self.room_repository
+            .fetch_room_state_events(&room_id)
+            .map_err(|_| RoomsApplicationError::Internal)
+    }
+
+    pub fn get_room_state_with_key(
+        &self,
+        user_id: &AuthorizedUserIdentifier,
+        room_id: String,
+        event_type: String,
+        state_key: String,
+    ) -> Result<RoomStateEvent, RoomsApplicationError> {
+        self.require_room_state_read_access(&room_id, user_id.as_existing_user_identifier())?;
+
+        self.room_repository
+            .fetch_room_state_event_by_type_and_key(&room_id, &event_type, &state_key)
+            .map_err(|_| RoomsApplicationError::Internal)?
+            .ok_or(RoomsApplicationError::NotFound)
+    }
+
+    pub fn get_room_messages(
+        &self,
+        user_id: &AuthorizedUserIdentifier,
+        room_id: String,
+        command: GetRoomMessagesCommand,
+    ) -> Result<RoomMessagesPage, RoomsApplicationError> {
+        self.require_room_state_read_access(&room_id, user_id.as_existing_user_identifier())?;
+
+        let parse_stream_position = |token: &str| -> Result<i64, RoomsApplicationError> {
+            if let Ok(value) = token.parse::<i64>() {
+                return Ok(value);
+            }
+
+            let first_numeric_fragment = token
+                .trim_start_matches(|character: char| character.is_ascii_alphabetic())
+                .split(|character: char| !character.is_ascii_digit())
+                .find(|fragment| !fragment.is_empty())
+                .ok_or(RoomsApplicationError::InvalidParameter)?;
+
+            first_numeric_fragment
+                .parse::<i64>()
+                .map_err(|_| RoomsApplicationError::InvalidParameter)
+        };
+
+        let encode_stream_token = |stream_position: i64| -> String {
+            format!("s{stream_position}_0_0")
+        };
+
+        let from_stream_position = command
+            .from_token
+            .as_deref()
+            .map(parse_stream_position)
+            .transpose()?;
+        let to_stream_position = command
+            .to_token
+            .as_deref()
+            .map(parse_stream_position)
+            .transpose()?;
+
+        let filter = command.filter;
+
+        let page = self
+            .room_repository
+            .fetch_room_timeline_events(
+                &room_id,
+                from_stream_position,
+                to_stream_position,
+                command.limit,
+                matches!(command.direction, RoomMessageDirection::Backward),
+                filter,
+            )
+            .map_err(|_| RoomsApplicationError::Internal)?;
+
+        let start_stream_position = page
+            .start
+            .parse::<i64>()
+            .map_err(|_| RoomsApplicationError::Internal)?;
+        let end_token = page
+            .end
+            .map(|value| {
+                value
+                    .parse::<i64>()
+                    .map(encode_stream_token)
+                    .map_err(|_| RoomsApplicationError::Internal)
+            })
+            .transpose()?;
+
+        Ok(RoomMessagesPage {
+            start: encode_stream_token(start_stream_position),
+            end: end_token,
+            chunk: page.chunk,
+            state: page.state,
+        })
+    }
+
+    pub fn set_room_state_with_key(
+        &self,
+        user_id: &AuthorizedUserIdentifier,
+        room_id: String,
+        event_type: String,
+        state_key: String,
+        content: serde_json::Value,
+    ) -> Result<String, RoomsApplicationError> {
+        self.require_room_identifier(&room_id)?;
+        if !content.is_object() {
+            return Err(RoomsApplicationError::InvalidParameter);
+        }
+
+        let room_join_context =
+            self.require_room_membership_context(&room_id, user_id.as_existing_user_identifier())?;
+        if room_join_context.membership_state.as_deref() != Some("join") {
+            return Err(RoomsApplicationError::Forbidden);
+        }
+
+        let room_version = room_join_context
+            .room_version
+            .unwrap_or_else(|| self.events_service.default_room_version().to_string())
+            .parse::<SupportedRoomVersion>()
+            .map_err(|_| RoomsApplicationError::Internal)?;
+
+        let state_event_kind = event_type
+            .parse::<StateEventKind>()
+            .map_err(|_| RoomsApplicationError::InvalidParameter)?;
+        self.validate_canonical_alias_state_if_needed(&room_id, &state_event_kind, &content)?;
+        let event_content = parse_room_state_event_content(state_event_kind.clone(), content)
+            .map_err(|_| RoomsApplicationError::InvalidRoomState)?;
+
+        let event_write_contract = self
+            .events_service
+            .create_state_event(
+                room_id.clone(),
+                room_version,
+                user_id
+                    .as_existing_user_identifier()
+                    .as_str()
+                    .to_owned(),
+                state_event_kind,
+                state_key,
+                event_content,
+                None,
+            )
+            .map_err(RoomsApplicationError::from)?;
+
+        let event_id = event_write_contract
+            .event_rows
+            .first()
+            .map(|event| event.event_id.clone())
+            .ok_or(RoomsApplicationError::Internal)?;
+
+        self.room_repository
+            .append_room_event(&event_write_contract)
+            .map_err(|error| map_room_persistence_error(error, room_id))?;
+
+        Ok(event_id)
+    }
 }
 
 impl RoomsService {
+    fn require_room_identifier(&self, room_id: &str) -> Result<(), RoomsApplicationError> {
+        if RoomIdentifier::parse(room_id.to_owned()).is_none() {
+            return Err(RoomsApplicationError::Forbidden);
+        }
+        Ok(())
+    }
+
+    fn require_room_membership_context(
+        &self,
+        room_id: &str,
+        user_id: &ExistingUserIdentifier,
+    ) -> Result<crate::services::rooms::persistence::RoomJoinContext, RoomsApplicationError> {
+        self.room_repository
+            .fetch_join_context(room_id, user_id.as_str())
+            .map_err(|_| RoomsApplicationError::Internal)?
+            .ok_or(RoomsApplicationError::Forbidden)
+    }
+
+    fn require_room_state_read_access(
+        &self,
+        room_id: &str,
+        user_id: &ExistingUserIdentifier,
+    ) -> Result<(), RoomsApplicationError> {
+        self.require_room_identifier(room_id)?;
+        let room_join_context = self.require_room_membership_context(room_id, user_id)?;
+        let Some(membership_state) = room_join_context.membership_state.as_deref() else {
+            return Err(RoomsApplicationError::Forbidden);
+        };
+        if !matches!(membership_state, "join" | "leave") {
+            return Err(RoomsApplicationError::Forbidden);
+        }
+        Ok(())
+    }
+
     fn append_membership_change(
         &self,
         room_id: String,
@@ -236,7 +418,7 @@ impl RoomsService {
         let _ = reason;
 
         self.room_repository
-            .append_membership_event(&event_write_contract)
+            .append_room_event(&event_write_contract)
             .map_err(|error| map_room_persistence_error(error, room_id))?;
         Ok(())
     }
@@ -261,6 +443,54 @@ impl RoomsService {
 
         Ok(invite)
     }
+
+    fn validate_canonical_alias_state_if_needed(
+        &self,
+        room_id: &str,
+        state_event_kind: &StateEventKind,
+        content: &serde_json::Value,
+    ) -> Result<(), RoomsApplicationError> {
+        if !matches!(state_event_kind, StateEventKind::RoomCanonicalAlias) {
+            return Ok(());
+        }
+
+        let mut aliases = Vec::new();
+        if let Some(alias_value) = content.get("alias") {
+            let alias = alias_value
+                .as_str()
+                .ok_or(RoomsApplicationError::InvalidParameter)?;
+            aliases.push(alias.to_owned());
+        }
+        if let Some(alt_aliases_value) = content.get("alt_aliases") {
+            let alt_aliases = alt_aliases_value
+                .as_array()
+                .ok_or(RoomsApplicationError::InvalidParameter)?;
+            for alias_value in alt_aliases {
+                let alias = alias_value
+                    .as_str()
+                    .ok_or(RoomsApplicationError::InvalidParameter)?;
+                aliases.push(alias.to_owned());
+            }
+        }
+
+        for alias in aliases {
+            let alias_localpart = parse_room_alias_localpart_for_local_server(
+                alias.as_str(),
+                self.server_name.as_str(),
+            )
+            .ok_or(RoomsApplicationError::InvalidParameter)?;
+
+            let bound_room_id = self
+                .room_repository
+                .fetch_room_id_by_alias_localpart(alias_localpart)
+                .map_err(|_| RoomsApplicationError::Internal)?;
+            if bound_room_id.as_deref() != Some(room_id) {
+                return Err(RoomsApplicationError::BadAlias);
+            }
+        }
+
+        Ok(())
+    }
 }
 
 fn map_room_persistence_error(error: DomainError, room_id: String) -> RoomsApplicationError {
@@ -276,6 +506,21 @@ fn map_room_persistence_error(error: DomainError, room_id: String) -> RoomsAppli
         }
         DomainError::NotFound | DomainError::InvalidCredentials => RoomsApplicationError::Internal,
     }
+}
+
+fn parse_room_alias_localpart_for_local_server<'a>(
+    room_alias: &'a str,
+    server_name: &str,
+) -> Option<&'a str> {
+    let alias_without_prefix = room_alias.strip_prefix('#')?;
+    let (localpart, alias_server_name) = alias_without_prefix.split_once(':')?;
+    if localpart.trim().is_empty()
+        || alias_server_name.trim().is_empty()
+        || alias_server_name != server_name
+    {
+        return None;
+    }
+    Some(localpart)
 }
 
 #[allow(dead_code)]

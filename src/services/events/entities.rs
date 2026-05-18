@@ -89,28 +89,69 @@ pub enum EventOriginKind {
     Redaction,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, EnumString, Display, AsRefStr)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StateEventKind {
-    #[strum(serialize = "m.room.create")]
     RoomCreate,
-    #[strum(serialize = "m.room.member")]
     RoomMember,
-    #[strum(serialize = "m.room.power_levels")]
     RoomPowerLevels,
-    #[strum(serialize = "m.room.join_rules")]
     RoomJoinRules,
-    #[strum(serialize = "m.room.history_visibility")]
     RoomHistoryVisibility,
-    #[strum(serialize = "m.room.guest_access")]
     RoomGuestAccess,
-    #[strum(serialize = "m.room.canonical_alias")]
     RoomCanonicalAlias,
-    #[strum(serialize = "m.room.name")]
     RoomName,
-    #[strum(serialize = "m.room.topic")]
     RoomTopic,
-    #[strum(serialize = "m.room.third_party_invite")]
     ThirdPartyInvite,
+    Custom(String),
+}
+
+impl StateEventKind {
+    pub fn as_event_type(&self) -> &str {
+        match self {
+            Self::RoomCreate => "m.room.create",
+            Self::RoomMember => "m.room.member",
+            Self::RoomPowerLevels => "m.room.power_levels",
+            Self::RoomJoinRules => "m.room.join_rules",
+            Self::RoomHistoryVisibility => "m.room.history_visibility",
+            Self::RoomGuestAccess => "m.room.guest_access",
+            Self::RoomCanonicalAlias => "m.room.canonical_alias",
+            Self::RoomName => "m.room.name",
+            Self::RoomTopic => "m.room.topic",
+            Self::ThirdPartyInvite => "m.room.third_party_invite",
+            Self::Custom(event_type) => event_type.as_str(),
+        }
+    }
+}
+
+impl AsRef<str> for StateEventKind {
+    fn as_ref(&self) -> &str {
+        self.as_event_type()
+    }
+}
+
+impl std::fmt::Display for StateEventKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.as_event_type())
+    }
+}
+
+impl std::str::FromStr for StateEventKind {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Ok(match value {
+            "m.room.create" => Self::RoomCreate,
+            "m.room.member" => Self::RoomMember,
+            "m.room.power_levels" => Self::RoomPowerLevels,
+            "m.room.join_rules" => Self::RoomJoinRules,
+            "m.room.history_visibility" => Self::RoomHistoryVisibility,
+            "m.room.guest_access" => Self::RoomGuestAccess,
+            "m.room.canonical_alias" => Self::RoomCanonicalAlias,
+            "m.room.name" => Self::RoomName,
+            "m.room.topic" => Self::RoomTopic,
+            "m.room.third_party_invite" => Self::ThirdPartyInvite,
+            _ => Self::Custom(value.to_owned()),
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, EnumString, Display, AsRefStr)]
@@ -236,6 +277,7 @@ pub enum MatrixEventContent {
         redacts: String,
         reason: Option<String>,
     },
+    CustomJson(Value),
 }
 
 impl MatrixEventContent {
@@ -329,6 +371,7 @@ impl MatrixEventContent {
                 }
                 value
             }
+            Self::CustomJson(content) => content.clone(),
         }
     }
 }
@@ -607,6 +650,10 @@ impl EventDefinitionRegistry {
             },
             EventKind::State(StateEventKind::RoomMember)
             | EventKind::State(StateEventKind::ThirdPartyInvite) => EventDefinition {
+                event_class: EventClass::State,
+                state_key_policy: StateKeyPolicy::Required,
+            },
+            EventKind::State(StateEventKind::Custom(_)) => EventDefinition {
                 event_class: EventClass::State,
                 state_key_policy: StateKeyPolicy::Required,
             },

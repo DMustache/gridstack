@@ -203,10 +203,11 @@ fn validate_initial_state(
             });
         }
 
-        let parsed_content = parse_state_content(event_type.clone(), raw_state_event.content)
-            .map_err(|_| RoomValidationError::InvalidInitialStateEventContent {
-                event_type: event_type.as_ref().to_owned(),
-            })?;
+        let parsed_content =
+            parse_room_state_event_content(event_type.clone(), raw_state_event.content)
+                .map_err(|_| RoomValidationError::InvalidInitialStateEventContent {
+                    event_type: event_type.as_ref().to_owned(),
+                })?;
 
         validated_initial_state.push(ValidatedInitialStateEventInput {
             event_type,
@@ -236,7 +237,7 @@ fn validate_third_party_invite(
     })
 }
 
-fn parse_state_content(
+pub(crate) fn parse_room_state_event_content(
     state_event_kind: StateEventKind,
     content: Value,
 ) -> Result<MatrixEventContent, ()> {
@@ -308,6 +309,7 @@ fn parse_state_content(
                 id_server: parsed.id_server,
             }
         }
+        StateEventKind::Custom(_) => MatrixEventContent::CustomJson(content),
     })
 }
 
@@ -790,6 +792,122 @@ pub struct LeaveRoomView {}
 impl From<LeftRoom> for LeaveRoomView {
     fn from(_: LeftRoom) -> Self {
         Self::default()
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RoomStateEventView {
+    pub content: Value,
+    pub event_id: String,
+    pub origin_server_ts: i64,
+    pub room_id: String,
+    pub sender: String,
+    pub state_key: String,
+    #[serde(rename = "type")]
+    pub event_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unsigned: Option<Value>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RoomTimelineEventView {
+    pub content: Value,
+    pub event_id: String,
+    pub origin_server_ts: i64,
+    pub room_id: String,
+    pub sender: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_key: Option<String>,
+    #[serde(rename = "type")]
+    pub event_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unsigned: Option<Value>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RoomStateEvent {
+    pub content: Value,
+    pub event_id: String,
+    pub origin_server_ts: i64,
+    pub room_id: String,
+    pub sender: String,
+    pub state_key: String,
+    pub event_type: String,
+    pub unsigned: Option<Value>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RoomTimelineEvent {
+    pub content: Value,
+    pub event_id: String,
+    pub origin_server_ts: i64,
+    pub room_id: String,
+    pub sender: String,
+    pub state_key: Option<String>,
+    pub event_type: String,
+    pub unsigned: Option<Value>,
+    pub stream_position: i64,
+}
+
+#[derive(Clone, Debug)]
+pub enum RoomMessageDirection {
+    Backward,
+    Forward,
+}
+
+#[derive(Clone, Debug)]
+pub struct GetRoomMessagesCommand {
+    pub from_token: Option<String>,
+    pub to_token: Option<String>,
+    pub direction: RoomMessageDirection,
+    pub limit: usize,
+    pub filter: Option<RoomEventFilter>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RoomMessagesPage {
+    pub start: String,
+    pub end: Option<String>,
+    pub chunk: Vec<RoomTimelineEvent>,
+    pub state: Vec<RoomTimelineEvent>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RoomEventFilter {
+    pub types: Option<Vec<String>>,
+    pub not_types: Option<Vec<String>>,
+    pub senders: Option<Vec<String>>,
+    pub not_senders: Option<Vec<String>>,
+    pub contains_url: Option<bool>,
+}
+
+impl From<RoomStateEvent> for RoomStateEventView {
+    fn from(value: RoomStateEvent) -> Self {
+        Self {
+            content: value.content,
+            event_id: value.event_id,
+            origin_server_ts: value.origin_server_ts,
+            room_id: value.room_id,
+            sender: value.sender,
+            state_key: value.state_key,
+            event_type: value.event_type,
+            unsigned: value.unsigned,
+        }
+    }
+}
+
+impl From<RoomTimelineEvent> for RoomTimelineEventView {
+    fn from(value: RoomTimelineEvent) -> Self {
+        Self {
+            content: value.content,
+            event_id: value.event_id,
+            origin_server_ts: value.origin_server_ts,
+            room_id: value.room_id,
+            sender: value.sender,
+            state_key: value.state_key,
+            event_type: value.event_type,
+            unsigned: value.unsigned,
+        }
     }
 }
 

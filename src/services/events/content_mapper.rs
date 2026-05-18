@@ -156,6 +156,7 @@ enum MatrixPduContent {
     RoomThirdPartyInvite(MatrixPduRoomThirdPartyInviteContent),
     RoomMessage(MatrixPduRoomMessageContent),
     RoomRedaction(MatrixPduRoomRedactionContent),
+    Raw(Value),
 }
 
 impl From<RoomCreateContent> for MatrixPduRoomCreateContent {
@@ -250,6 +251,7 @@ impl From<MatrixEventContent> for MatrixPduContent {
             MatrixEventContent::RoomRedaction { redacts, reason } => {
                 Self::RoomRedaction(MatrixPduRoomRedactionContent { redacts, reason })
             }
+            MatrixEventContent::CustomJson(content) => Self::Raw(content),
         }
     }
 }

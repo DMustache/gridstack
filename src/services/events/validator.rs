@@ -156,6 +156,7 @@ fn validate_event_content(content: &MatrixEventContent) -> Result<(), EventInten
                 });
             }
         }
+        MatrixEventContent::CustomJson(_) => {}
     }
 
     Ok(())

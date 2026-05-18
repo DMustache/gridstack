@@ -17,7 +17,10 @@ use crate::{
         errors::DomainError,
         events::entities::MatrixEventContent,
         rooms::{
-            entities::RoomCreationFlow,
+            entities::{
+                RoomCreationFlow, RoomEventFilter, RoomMessagesPage, RoomStateEvent,
+                RoomTimelineEvent,
+            },
             persistence::models::{
                 CreateRoomAliasModel, CreateRoomCurrentStateModel, CreateRoomEventAuthEdgeModel,
                 CreateRoomEventModel, CreateRoomEventPrevEdgeModel,
@@ -52,10 +55,34 @@ pub trait RoomRepository: Send + Sync {
         user_id: &str,
     ) -> Result<Option<RoomJoinContext>, DomainError>;
 
-    fn append_membership_event(
+    fn append_room_event(
         &self,
         event_write_contract: &EventWriteContract,
     ) -> Result<(), DomainError>;
+
+    fn fetch_room_state_events(&self, room_id: &str) -> Result<Vec<RoomStateEvent>, DomainError>;
+
+    fn fetch_room_state_event_by_type_and_key(
+        &self,
+        room_id: &str,
+        event_type: &str,
+        state_key: &str,
+    ) -> Result<Option<RoomStateEvent>, DomainError>;
+
+    fn fetch_room_id_by_alias_localpart(
+        &self,
+        alias_localpart: &str,
+    ) -> Result<Option<String>, DomainError>;
+
+    fn fetch_room_timeline_events(
+        &self,
+        room_id: &str,
+        from_stream_position: Option<i64>,
+        to_stream_position: Option<i64>,
+        limit: usize,
+        backward: bool,
+        filter: Option<RoomEventFilter>,
+    ) -> Result<RoomMessagesPage, DomainError>;
 }
 
 #[derive(Clone)]
@@ -445,7 +472,7 @@ impl RoomRepository for RoomPersistence {
         ))
     }
 
-    fn append_membership_event(
+    fn append_room_event(
         &self,
         event_write_contract: &EventWriteContract,
     ) -> Result<(), DomainError> {
@@ -466,6 +493,292 @@ impl RoomRepository for RoomPersistence {
         };
 
         persist_event_batch(&self.connection_pool, &event_batch_write_contract)
+    }
+
+    fn fetch_room_state_events(&self, room_id: &str) -> Result<Vec<RoomStateEvent>, DomainError> {
+        use schema::{room_current_state, room_events};
+
+        let mut connection = self
+            .connection_pool
+            .get()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        let rows = room_current_state::table
+            .inner_join(room_events::table.on(room_events::event_id.eq(room_current_state::event_id)))
+            .filter(room_current_state::room_id.eq(room_id))
+            .order((
+                room_current_state::event_type.asc(),
+                room_current_state::state_key.asc(),
+            ))
+            .select((
+                room_events::content_json,
+                room_events::event_id,
+                room_events::origin_server_ts,
+                room_events::room_id,
+                room_events::sender_user_id,
+                room_events::state_key.nullable(),
+                room_events::event_type,
+                room_events::unsigned_json,
+            ))
+            .load::<(
+                serde_json::Value,
+                String,
+                i64,
+                String,
+                String,
+                Option<String>,
+                String,
+                Option<serde_json::Value>,
+            )>(&mut connection)
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(content, event_id, origin_server_ts, room_id, sender, state_key, event_type, unsigned)| {
+                    RoomStateEvent {
+                        content,
+                        event_id,
+                        origin_server_ts,
+                        room_id,
+                        sender,
+                        state_key: state_key.unwrap_or_default(),
+                        event_type,
+                        unsigned,
+                    }
+                },
+            )
+            .collect())
+    }
+
+    fn fetch_room_state_event_by_type_and_key(
+        &self,
+        room_id: &str,
+        event_type: &str,
+        state_key: &str,
+    ) -> Result<Option<RoomStateEvent>, DomainError> {
+        use schema::{room_current_state, room_events};
+
+        let mut connection = self
+            .connection_pool
+            .get()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        let row = room_current_state::table
+            .inner_join(room_events::table.on(room_events::event_id.eq(room_current_state::event_id)))
+            .filter(room_current_state::room_id.eq(room_id))
+            .filter(room_current_state::event_type.eq(event_type))
+            .filter(room_current_state::state_key.eq(state_key))
+            .select((
+                room_events::content_json,
+                room_events::event_id,
+                room_events::origin_server_ts,
+                room_events::room_id,
+                room_events::sender_user_id,
+                room_events::state_key.nullable(),
+                room_events::event_type,
+                room_events::unsigned_json,
+            ))
+            .first::<(
+                serde_json::Value,
+                String,
+                i64,
+                String,
+                String,
+                Option<String>,
+                String,
+                Option<serde_json::Value>,
+            )>(&mut connection)
+            .optional()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        Ok(row.map(
+            |(content, event_id, origin_server_ts, room_id, sender, state_key, event_type, unsigned)| {
+                RoomStateEvent {
+                    content,
+                    event_id,
+                    origin_server_ts,
+                    room_id,
+                    sender,
+                    state_key: state_key.unwrap_or_default(),
+                    event_type,
+                    unsigned,
+                }
+            },
+        ))
+    }
+
+    fn fetch_room_id_by_alias_localpart(
+        &self,
+        alias_localpart: &str,
+    ) -> Result<Option<String>, DomainError> {
+        use schema::room_aliases;
+
+        let mut connection = self
+            .connection_pool
+            .get()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        room_aliases::table
+            .filter(room_aliases::alias_localpart.eq(alias_localpart))
+            .select(room_aliases::room_id)
+            .first::<String>(&mut connection)
+            .optional()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))
+    }
+
+    fn fetch_room_timeline_events(
+        &self,
+        room_id: &str,
+        from_stream_position: Option<i64>,
+        to_stream_position: Option<i64>,
+        limit: usize,
+        backward: bool,
+        filter: Option<RoomEventFilter>,
+    ) -> Result<RoomMessagesPage, DomainError> {
+        use schema::{room_events, room_timeline_projection};
+
+        let mut connection = self
+            .connection_pool
+            .get()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        let room_max_stream_position = room_timeline_projection::table
+            .filter(room_timeline_projection::room_id.eq(room_id))
+            .select(diesel::dsl::max(room_timeline_projection::stream_position))
+            .first::<Option<i64>>(&mut connection)
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?
+            .unwrap_or(0);
+
+        let start_stream_position = from_stream_position.unwrap_or(if backward {
+            room_max_stream_position
+        } else {
+            0
+        });
+        let query_limit = i64::try_from(limit).unwrap_or(i64::MAX);
+
+        let mut query = room_timeline_projection::table
+            .inner_join(
+                room_events::table.on(room_events::event_id.eq(room_timeline_projection::event_id)),
+            )
+            .filter(room_timeline_projection::room_id.eq(room_id))
+            .into_boxed();
+
+        if backward {
+            query = query.filter(room_timeline_projection::stream_position.le(start_stream_position));
+            if let Some(to_stream_position) = to_stream_position {
+                query = query.filter(room_timeline_projection::stream_position.gt(to_stream_position));
+            }
+            query = query.order(room_timeline_projection::stream_position.desc());
+        } else {
+            query = query.filter(room_timeline_projection::stream_position.ge(start_stream_position));
+            if let Some(to_stream_position) = to_stream_position {
+                query = query.filter(room_timeline_projection::stream_position.lt(to_stream_position));
+            }
+            query = query.order(room_timeline_projection::stream_position.asc());
+        }
+
+        if let Some(filter) = filter {
+            if let Some(types) = filter.types
+                && !types.is_empty()
+            {
+                query = query.filter(room_events::event_type.eq_any(types));
+            }
+            if let Some(not_types) = filter.not_types
+                && !not_types.is_empty()
+            {
+                query = query.filter(room_events::event_type.ne_all(not_types));
+            }
+            if let Some(senders) = filter.senders
+                && !senders.is_empty()
+            {
+                query = query.filter(room_events::sender_user_id.eq_any(senders));
+            }
+            if let Some(not_senders) = filter.not_senders
+                && !not_senders.is_empty()
+            {
+                query = query.filter(room_events::sender_user_id.ne_all(not_senders));
+            }
+            if let Some(contains_url) = filter.contains_url {
+                query = if contains_url {
+                    query.filter(diesel::dsl::sql::<diesel::sql_types::Bool>(
+                        "room_events.content_json ? 'url'",
+                    ))
+                } else {
+                    query.filter(diesel::dsl::sql::<diesel::sql_types::Bool>(
+                        "NOT (room_events.content_json ? 'url')",
+                    ))
+                };
+            }
+        }
+
+        let rows = query
+            .limit(query_limit)
+            .select((
+                room_events::content_json,
+                room_events::event_id,
+                room_events::origin_server_ts,
+                room_events::room_id,
+                room_events::sender_user_id,
+                room_events::state_key,
+                room_events::event_type,
+                room_events::unsigned_json,
+                room_timeline_projection::stream_position,
+            ))
+            .load::<(
+                serde_json::Value,
+                String,
+                i64,
+                String,
+                String,
+                Option<String>,
+                String,
+                Option<serde_json::Value>,
+                i64,
+            )>(&mut connection)
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        let chunk = rows
+            .into_iter()
+            .map(
+                |(
+                    content,
+                    event_id,
+                    origin_server_ts,
+                    room_id,
+                    sender,
+                    state_key,
+                    event_type,
+                    unsigned,
+                    stream_position,
+                )| RoomTimelineEvent {
+                    content,
+                    event_id,
+                    origin_server_ts,
+                    room_id,
+                    sender,
+                    state_key,
+                    event_type,
+                    unsigned,
+                    stream_position,
+                },
+            )
+            .collect::<Vec<_>>();
+
+        let end = chunk.last().map(|value| {
+            if backward {
+                value.stream_position.saturating_sub(1).to_string()
+            } else {
+                value.stream_position.saturating_add(1).to_string()
+            }
+        });
+
+        Ok(RoomMessagesPage {
+            start: start_stream_position.to_string(),
+            end,
+            chunk,
+            state: Vec::new(),
+        })
     }
 }
 
