@@ -24,6 +24,10 @@ use crate::{
             persistence::{RoomPersistence, RoomRepository},
             service::RoomsService,
         },
+        syncronization::{
+            persistence::{FilterRepository, SyncronizationPersistence},
+            service::SyncronizationService,
+        },
         traits::{Clock, JsonWebTokenAdapter},
     },
 };
@@ -33,6 +37,7 @@ use crate::{
 pub struct ApplicationState {
     pub authorization_service: Arc<AuthorizationService>,
     pub rooms_service: Arc<RoomsService>,
+    pub syncronization_service: Arc<SyncronizationService>,
     pub session_repository: Arc<dyn SessionRepository>,
     pub server_name: ServerName,
     pub allow_registration: bool,
@@ -93,12 +98,20 @@ impl ApplicationState {
             Arc::clone(&authorization_service),
             &server_name,
         ));
+        let filter_repository: Arc<dyn FilterRepository> = Arc::new(SyncronizationPersistence::new(
+            &application_configuration.database.url,
+        ));
+        let syncronization_service = Arc::new(SyncronizationService::new(
+            filter_repository,
+            Arc::clone(&authorization_service),
+        ));
         let rate_limiter = Arc::new(RateLimiterState::new(Duration::from_mins(1), 120));
         info!("application state initialized");
 
         Self {
             authorization_service,
             rooms_service,
+            syncronization_service,
             session_repository,
             server_name,
             allow_registration: application_configuration.authenification.allow_registration,

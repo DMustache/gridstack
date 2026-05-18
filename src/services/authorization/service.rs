@@ -394,6 +394,18 @@ impl AuthorizationService {
         Ok(ExistingUserIdentifier::new(user_identifier))
     }
 
+    pub fn require_authorized_user(
+        &self,
+        access_session: &AccessSessionStorageUnit,
+        requested_user_identifier: &UserIdentifier,
+    ) -> Result<super::entities::AuthorizedUserIdentifier, AuthorizationApplicationError> {
+        if access_session.user_identifier().as_user_identifier() != requested_user_identifier {
+            return Err(AuthorizationApplicationError::Forbidden);
+        }
+
+        Ok(access_session.user_identifier().clone())
+    }
+
     fn try_parse_user_id(
         &self,
         username_or_identifier: &str,

@@ -172,6 +172,15 @@ diesel::table! {
 }
 
 diesel::table! {
+    user_filters (id) {
+        id -> Int8,
+        user_id -> Varchar,
+        filter_json -> Jsonb,
+        created_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     users (user_id) {
         user_id -> Varchar,
         account_id -> Uuid,
@@ -205,6 +214,7 @@ diesel::joinable!(room_sync_stream -> rooms (room_id));
 diesel::joinable!(room_timeline_projection -> room_events (event_id));
 diesel::joinable!(room_timeline_projection -> rooms (room_id));
 diesel::joinable!(rooms -> users (creator_user_id));
+diesel::joinable!(user_filters -> users (user_id));
 diesel::joinable!(users -> accounts (account_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
@@ -223,5 +233,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     room_sync_stream,
     room_timeline_projection,
     rooms,
+    user_filters,
     users,
 );

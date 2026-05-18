@@ -1,6 +1,7 @@
 pub mod authorization;
 pub mod events;
 pub mod rooms;
+pub mod syncronization;
 
 pub mod entities;
 pub mod errors;
