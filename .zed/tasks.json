@@ -138,5 +138,35 @@
     "reveal": "no_focus",
     "hide": "on_success",
     "show_command": false
+  },
+  {
+    "label": "Client: Cargo Check",
+    "command": "./scripts/tasks/client_cargo_check.sh",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "save": "all",
+    "reveal": "no_focus",
+    "hide": "on_success",
+    "show_command": false
+  },
+  {
+    "label": "Client: Run",
+    "command": "./scripts/tasks/client_run.sh",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "save": "all",
+    "reveal": "always",
+    "hide": "never",
+    "show_command": false
+  },
+  {
+    "label": "Client: Build (Windows Release)",
+    "command": "./scripts/tasks/client_build_windows_release.sh",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "save": "all",
+    "reveal": "always",
+    "hide": "never",
+    "show_command": false
   }
 ]
