@@ -67,6 +67,10 @@ async fn initialize_schema_with_retry(pool: &SqlitePool) -> Result<(), ClientErr
         topic TEXT,
         PRIMARY KEY (server_url, user_id, room_id)
     )";
+    let create_preferences_table = "CREATE TABLE IF NOT EXISTS client_preference (
+        preference_key TEXT PRIMARY KEY,
+        preference_value TEXT NOT NULL
+    )";
 
     let retry_delays = [100_u64, 300, 700, 1500];
     let mut last_error: Option<String> = None;
@@ -75,14 +79,16 @@ async fn initialize_schema_with_retry(pool: &SqlitePool) -> Result<(), ClientErr
         let session_result = sqlx::query(create_session_table).execute(pool).await;
         let profile_result = sqlx::query(create_server_profile_table).execute(pool).await;
         let room_result = sqlx::query(create_room_table).execute(pool).await;
-        match (session_result, profile_result, room_result) {
-            (Ok(_), Ok(_), Ok(_)) => return Ok(()),
-            (session_error, profile_error, room_error) => {
+        let preferences_result = sqlx::query(create_preferences_table).execute(pool).await;
+        match (session_result, profile_result, room_result, preferences_result) {
+            (Ok(_), Ok(_), Ok(_), Ok(_)) => return Ok(()),
+            (session_error, profile_error, room_error, preferences_error) => {
                 last_error = Some(format!(
-                    "session_table={:?}, server_profile_table={:?}, room_table={:?}",
+                    "session_table={:?}, server_profile_table={:?}, room_table={:?}, preferences_table={:?}",
                     session_error.err(),
                     profile_error.err(),
-                    room_error.err()
+                    room_error.err(),
+                    preferences_error.err()
                 ));
                 sleep(Duration::from_millis(delay_ms)).await;
             }
@@ -142,6 +148,25 @@ impl RoomRepository for SqliteSessionRepository {
                 topic: row.get::<Option<String>, _>("topic"),
             })
             .collect())
+    }
+
+    async fn remove_room(
+        &self,
+        server_url: &str,
+        user_id: &str,
+        room_id: &str,
+    ) -> Result<(), ClientError> {
+        sqlx::query(
+            "DELETE FROM client_room
+             WHERE server_url = ?1 AND user_id = ?2 AND room_id = ?3",
+        )
+        .bind(server_url)
+        .bind(user_id)
+        .bind(room_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| ClientError::Database(error.to_string()))?;
+        Ok(())
     }
 }
 
@@ -292,5 +317,34 @@ impl ServerProfileRepository for SqliteSessionRepository {
                 password: row.get::<String, _>("password"),
             })
             .collect())
+    }
+
+    async fn set_preference(&self, key: &str, value: &str) -> Result<(), ClientError> {
+        sqlx::query(
+            "INSERT INTO client_preference (preference_key, preference_value)
+             VALUES (?1, ?2)
+             ON CONFLICT(preference_key) DO UPDATE SET
+                preference_value = excluded.preference_value",
+        )
+        .bind(key)
+        .bind(value)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| ClientError::Database(error.to_string()))?;
+        Ok(())
+    }
+
+    async fn get_preference(&self, key: &str) -> Result<Option<String>, ClientError> {
+        let row = sqlx::query(
+            "SELECT preference_value
+             FROM client_preference
+             WHERE preference_key = ?1",
+        )
+        .bind(key)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| ClientError::Database(error.to_string()))?;
+
+        Ok(row.map(|row| row.get::<String, _>("preference_value")))
     }
 }

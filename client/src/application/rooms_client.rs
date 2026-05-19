@@ -4,7 +4,11 @@ use crate::{
     application::ports::{RoomRepository, RoomsApi, SessionRepository},
     domain::{
         error::ClientError,
-        rooms::{CreateRoomInfo, CreateRoomView, RoomListItem},
+        rooms::{
+            CreateRoomInfo, CreateRoomView, GetRoomMessagesQuery, GetRoomMessagesView,
+            JoinRoomInfo, JoinRoomView, LeaveRoomInfo, LeaveRoomView, RoomListItem,
+            RoomStateEventView,
+        },
     },
 };
 
@@ -55,6 +59,102 @@ impl RoomsClientService {
         Ok(view)
     }
 
+    pub async fn join_room_by_id(
+        &self,
+        room_id: &str,
+        request: &JoinRoomInfo,
+    ) -> Result<JoinRoomView, ClientError> {
+        let session = self
+            .session_repository
+            .get_session_by_server(&self.server_url)
+            .await?
+            .ok_or_else(|| ClientError::Matrix {
+                status: 401,
+                errcode: "M_MISSING_TOKEN".to_owned(),
+                message: "No saved session token".to_owned(),
+            })?;
+
+        let view = self
+            .rooms_api
+            .join_room_by_id(&session.access_token, room_id, request)
+            .await?;
+
+        let room_item = RoomListItem {
+            server_url: self.server_url.clone(),
+            user_id: session.user_id,
+            room_id: view.room_id.clone(),
+            name: None,
+            topic: None,
+        };
+        self.room_repository.add_room(&room_item).await?;
+        Ok(view)
+    }
+
+    pub async fn leave_room_by_id(
+        &self,
+        room_id: &str,
+        request: &LeaveRoomInfo,
+    ) -> Result<LeaveRoomView, ClientError> {
+        let session = self
+            .session_repository
+            .get_session_by_server(&self.server_url)
+            .await?
+            .ok_or_else(|| ClientError::Matrix {
+                status: 401,
+                errcode: "M_MISSING_TOKEN".to_owned(),
+                message: "No saved session token".to_owned(),
+            })?;
+
+        let view = self
+            .rooms_api
+            .leave_room_by_id(&session.access_token, room_id, request)
+            .await?;
+
+        self.room_repository
+            .remove_room(&self.server_url, &session.user_id, room_id)
+            .await?;
+        Ok(view)
+    }
+
+    pub async fn get_room_state(
+        &self,
+        room_id: &str,
+    ) -> Result<Vec<RoomStateEventView>, ClientError> {
+        let session = self
+            .session_repository
+            .get_session_by_server(&self.server_url)
+            .await?
+            .ok_or_else(|| ClientError::Matrix {
+                status: 401,
+                errcode: "M_MISSING_TOKEN".to_owned(),
+                message: "No saved session token".to_owned(),
+            })?;
+
+        self.rooms_api
+            .get_room_state(&session.access_token, room_id)
+            .await
+    }
+
+    pub async fn get_room_messages(
+        &self,
+        room_id: &str,
+        query: &GetRoomMessagesQuery,
+    ) -> Result<GetRoomMessagesView, ClientError> {
+        let session = self
+            .session_repository
+            .get_session_by_server(&self.server_url)
+            .await?
+            .ok_or_else(|| ClientError::Matrix {
+                status: 401,
+                errcode: "M_MISSING_TOKEN".to_owned(),
+                message: "No saved session token".to_owned(),
+            })?;
+
+        self.rooms_api
+            .get_room_messages(&session.access_token, room_id, query)
+            .await
+    }
+
     pub async fn list_cached_rooms(&self) -> Result<Vec<RoomListItem>, ClientError> {
         let session = self
             .session_repository
@@ -68,6 +168,33 @@ impl RoomsClientService {
 
         self.room_repository
             .list_rooms_by_server_user(&self.server_url, &session.user_id)
+            .await
+    }
+
+    pub async fn upsert_cached_room(
+        &self,
+        room_id: &str,
+        name: Option<String>,
+        topic: Option<String>,
+    ) -> Result<(), ClientError> {
+        let session = self
+            .session_repository
+            .get_session_by_server(&self.server_url)
+            .await?
+            .ok_or_else(|| ClientError::Matrix {
+                status: 401,
+                errcode: "M_MISSING_TOKEN".to_owned(),
+                message: "No saved session token".to_owned(),
+            })?;
+
+        self.room_repository
+            .add_room(&RoomListItem {
+                server_url: self.server_url.clone(),
+                user_id: session.user_id,
+                room_id: room_id.to_owned(),
+                name,
+                topic,
+            })
             .await
     }
 }

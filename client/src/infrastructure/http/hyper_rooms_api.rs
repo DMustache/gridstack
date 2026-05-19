@@ -1,30 +1,26 @@
 use async_trait::async_trait;
-use bytes::Bytes;
-use http::{Method, Request, header};
-use http_body_util::{BodyExt, Full};
-use hyper_util::client::legacy::{Client, connect::HttpConnector};
-use hyper_util::rt::TokioExecutor;
+use http::Method;
 
 use crate::{
     application::ports::RoomsApi,
     domain::{
-        error::{ClientError, MatrixErrorResponse},
-        rooms::{CreateRoomInfo, CreateRoomView},
+        error::ClientError,
+        rooms::{
+            CreateRoomInfo, CreateRoomView, GetRoomMessagesQuery, GetRoomMessagesView,
+            JoinRoomInfo, JoinRoomView, LeaveRoomInfo, LeaveRoomView, RoomStateEventView,
+        },
     },
+    infrastructure::http::matrix_http_client::MatrixHttpClient,
 };
 
 pub struct HyperRoomsApi {
-    base_url: String,
-    http_client: Client<HttpConnector, Full<Bytes>>,
+    matrix_http_client: MatrixHttpClient,
 }
 
 impl HyperRoomsApi {
     pub fn new(base_url: impl Into<String>) -> Self {
-        let connector = HttpConnector::new();
-        let http_client = Client::builder(TokioExecutor::new()).build(connector);
         Self {
-            base_url: base_url.into(),
-            http_client,
+            matrix_http_client: MatrixHttpClient::new(base_url),
         }
     }
 }
@@ -36,47 +32,102 @@ impl RoomsApi for HyperRoomsApi {
         access_token: &str,
         request: &CreateRoomInfo,
     ) -> Result<CreateRoomView, ClientError> {
-        let uri = format!("{}/_matrix/client/v3/createRoom", self.base_url);
-        let body_bytes = serde_json::to_vec(request)
-            .map_err(|error| ClientError::Serialization(error.to_string()))?;
-        let request = Request::builder()
-            .method(Method::POST)
-            .uri(uri)
-            .header(header::ACCEPT, "application/json")
-            .header(header::CONTENT_TYPE, "application/json")
-            .header(header::AUTHORIZATION, format!("Bearer {access_token}"))
-            .body(Full::new(Bytes::from(body_bytes)))
-            .map_err(|error| ClientError::Transport(error.to_string()))?;
-
-        let response = self
-            .http_client
-            .request(request)
+        self.matrix_http_client
+            .send_json(
+                Method::POST,
+                "/_matrix/client/v3/createRoom",
+                Some(access_token),
+                Some(request),
+            )
             .await
-            .map_err(|error| ClientError::Transport(error.to_string()))?;
-        let status = response.status();
-        let response_bytes = response
-            .into_body()
-            .collect()
-            .await
-            .map_err(|error| ClientError::Transport(error.to_string()))?
-            .to_bytes();
-
-        if status.is_success() {
-            return serde_json::from_slice::<CreateRoomView>(&response_bytes)
-                .map_err(|error| ClientError::Serialization(error.to_string()));
-        }
-
-        if let Ok(matrix_error) = serde_json::from_slice::<MatrixErrorResponse>(&response_bytes) {
-            return Err(ClientError::Matrix {
-                status: status.as_u16(),
-                errcode: matrix_error.errcode,
-                message: matrix_error.error,
-            });
-        }
-
-        Err(ClientError::UnexpectedStatus {
-            status: status.as_u16(),
-            body: String::from_utf8_lossy(&response_bytes).to_string(),
-        })
     }
+
+    async fn join_room_by_id(
+        &self,
+        access_token: &str,
+        room_id: &str,
+        request: &JoinRoomInfo,
+    ) -> Result<JoinRoomView, ClientError> {
+        let path = format!("/_matrix/client/v3/rooms/{room_id}/join");
+        self.matrix_http_client
+            .send_json(Method::POST, &path, Some(access_token), Some(request))
+            .await
+    }
+
+    async fn leave_room_by_id(
+        &self,
+        access_token: &str,
+        room_id: &str,
+        request: &LeaveRoomInfo,
+    ) -> Result<LeaveRoomView, ClientError> {
+        let path = format!("/_matrix/client/v3/rooms/{room_id}/leave");
+        self.matrix_http_client
+            .send_json(Method::POST, &path, Some(access_token), Some(request))
+            .await
+    }
+
+    async fn get_room_state(
+        &self,
+        access_token: &str,
+        room_id: &str,
+    ) -> Result<Vec<RoomStateEventView>, ClientError> {
+        let path = format!("/_matrix/client/v3/rooms/{room_id}/state");
+        self.matrix_http_client
+            .send_json::<(), Vec<RoomStateEventView>>(Method::GET, &path, Some(access_token), None)
+            .await
+    }
+
+    async fn get_room_messages(
+        &self,
+        access_token: &str,
+        room_id: &str,
+        query: &GetRoomMessagesQuery,
+    ) -> Result<GetRoomMessagesView, ClientError> {
+        let mut query_fields = vec![
+            format!("dir={}", query.direction.as_query_value()),
+            format!("limit={}", query.limit),
+        ];
+
+        if let Some(from_token) = query.from_token.as_deref() {
+            query_fields.push(format!("from={}", percent_encode_query_value(from_token)));
+        }
+        if let Some(to_token) = query.to_token.as_deref() {
+            query_fields.push(format!("to={}", percent_encode_query_value(to_token)));
+        }
+        if let Some(filter) = query.filter.as_ref() {
+            let serialized_filter = serde_json::to_string(filter)
+                .map_err(|error| ClientError::Serialization(error.to_string()))?;
+            query_fields.push(format!(
+                "filter={}",
+                percent_encode_query_value(&serialized_filter)
+            ));
+        }
+
+        let path = format!(
+            "/_matrix/client/v3/rooms/{room_id}/messages?{}",
+            query_fields.join("&")
+        );
+
+        self.matrix_http_client
+            .send_json_with_query::<(), GetRoomMessagesView>(
+                Method::GET,
+                &path,
+                Some(access_token),
+                None,
+            )
+            .await
+    }
+}
+
+fn percent_encode_query_value(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push_str(&format!("{byte:02X}"));
+        }
+    }
+    encoded
 }

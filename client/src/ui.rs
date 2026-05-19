@@ -7,25 +7,44 @@ use tokio::runtime::Runtime;
 use crate::{
     application::{
         authorization_client::AuthorizationClientService,
+        ports::{
+            RegisterUserResult, RoomRepository, ServerProfileRepository, SessionRepository,
+        },
         rooms_client::RoomsClientService,
-        ports::{RegisterUserResult, ServerProfileRepository, SessionRepository},
     },
-    domain::authorization::{
-        AccountKind, AuthenticationDataInfo, LoginType, LoginUserInfo, RegisterUserInfo,
-        ServerCredentials, WhoAmIView,
+    domain::{
+        authorization::{
+            AccountKind, AuthenticationDataInfo, LoginType, LoginUserInfo, RegisterUserInfo,
+            ServerCredentials, WhoAmIView,
+        },
+        rooms::{
+            CreateRoomInfo, GetRoomMessagesQuery, JoinRoomInfo, LeaveRoomInfo, RoomListItem,
+            RoomMessageDirection, RoomStateEventView, RoomTimelineEventView,
+        },
     },
-    domain::rooms::CreateRoomInfo,
-    infrastructure::http::hyper_authorization_api::HyperAuthorizationApi,
-    infrastructure::http::hyper_rooms_api::HyperRoomsApi,
-    infrastructure::persistence::sqlite_session_repository::SqliteSessionRepository,
+    infrastructure::{
+        http::{hyper_authorization_api::HyperAuthorizationApi, hyper_rooms_api::HyperRoomsApi},
+        persistence::sqlite_session_repository::SqliteSessionRepository,
+    },
 };
+
+const PREFERENCE_SELECTED_SERVER_URL: &str = "selected_server_url";
+const MESSAGE_PAGE_SIZE: usize = 30;
+const BACKGROUND: egui::Color32 = egui::Color32::from_rgb(11, 16, 24);
+const PANEL: egui::Color32 = egui::Color32::from_rgb(18, 25, 36);
+const PANEL_SOFT: egui::Color32 = egui::Color32::from_rgb(25, 34, 48);
+const PANEL_HOVER: egui::Color32 = egui::Color32::from_rgb(35, 47, 66);
+const ACCENT: egui::Color32 = egui::Color32::from_rgb(89, 214, 190);
+const ACCENT_STRONG: egui::Color32 = egui::Color32::from_rgb(247, 198, 103);
+const TEXT_MUTED: egui::Color32 = egui::Color32::from_rgb(151, 164, 184);
+const DANGER: egui::Color32 = egui::Color32::from_rgb(255, 103, 124);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Screen {
     Welcome,
     ChooseFlow,
     RegisterForm,
-    WhoAmI,
+    Workspace,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,11 +54,20 @@ enum UsernameState {
     Unavailable(String),
 }
 
+#[derive(Clone, Debug, Default)]
+enum LoadState {
+    #[default]
+    Idle,
+    Loading,
+    Loaded,
+    Error(String),
+}
+
 pub struct ClientDesktopApplication {
     runtime: Runtime,
-    sqlite_repository: Arc<SqliteSessionRepository>,
     session_repository: Arc<dyn SessionRepository>,
     server_profile_repository: Arc<dyn ServerProfileRepository>,
+    room_repository: Arc<dyn RoomRepository>,
     screen: Screen,
     servers: Vec<String>,
     selected_server_index: usize,
@@ -55,13 +83,22 @@ pub struct ClientDesktopApplication {
     username_state: UsernameState,
     status_message: String,
     whoami: Option<WhoAmIView>,
-    rooms: Vec<(String, String)>,
+    rooms: Vec<RoomListItem>,
+    selected_room_index: Option<usize>,
     show_create_room_form: bool,
+    join_room_id_input: String,
+    join_reason_input: String,
     new_room_name: String,
     new_room_topic: String,
     new_room_visibility_index: usize,
     new_room_preset_index: usize,
     new_room_is_direct: bool,
+    room_state_events: Vec<RoomStateEventView>,
+    room_messages: Vec<RoomTimelineEventView>,
+    room_state_status: LoadState,
+    room_messages_status: LoadState,
+    next_messages_from_token: Option<String>,
+    composer_input: String,
 }
 
 impl ClientDesktopApplication {
@@ -69,12 +106,13 @@ impl ClientDesktopApplication {
         let runtime = Runtime::new().map_err(|error| error.to_string())?;
         let session_repository: Arc<dyn SessionRepository> = repository.clone();
         let server_profile_repository: Arc<dyn ServerProfileRepository> = repository.clone();
+        let room_repository: Arc<dyn RoomRepository> = repository.clone();
 
-        let mut app = Self {
+        let mut application = Self {
             runtime,
-            sqlite_repository: repository.clone(),
             session_repository,
             server_profile_repository,
+            room_repository,
             screen: Screen::Welcome,
             servers: Vec::new(),
             selected_server_index: 0,
@@ -91,16 +129,25 @@ impl ClientDesktopApplication {
             status_message: "Select server and account, then login".to_owned(),
             whoami: None,
             rooms: Vec::new(),
+            selected_room_index: None,
             show_create_room_form: false,
+            join_room_id_input: String::new(),
+            join_reason_input: String::new(),
             new_room_name: String::new(),
             new_room_topic: String::new(),
             new_room_visibility_index: 0,
             new_room_preset_index: 0,
             new_room_is_direct: false,
+            room_state_events: Vec::new(),
+            room_messages: Vec::new(),
+            room_state_status: LoadState::Idle,
+            room_messages_status: LoadState::Idle,
+            next_messages_from_token: None,
+            composer_input: String::new(),
         };
 
-        app.reload_servers();
-        Ok(app)
+        application.reload_servers();
+        Ok(application)
     }
 
     fn normalized_server_url(&self) -> String {
@@ -115,6 +162,10 @@ impl ClientDesktopApplication {
 
     fn selected_account(&self) -> Option<&ServerCredentials> {
         self.accounts_for_server.get(self.selected_account_index)
+    }
+
+    fn selected_room(&self) -> Option<&RoomListItem> {
+        self.selected_room_index.and_then(|index| self.rooms.get(index))
     }
 
     fn build_authorization_service(&self) -> AuthorizationClientService {
@@ -136,11 +187,43 @@ impl ClientDesktopApplication {
             server_url,
             rooms_api,
             Arc::clone(&self.session_repository),
-            self.sqlite_repository.clone(),
+            Arc::clone(&self.room_repository),
         )
     }
 
+    fn preference_selected_username_key(server_url: &str) -> String {
+        format!("selected_account_username:{server_url}")
+    }
+
+    fn persist_selected_server(&mut self) {
+        if let Some(server_url) = self.selected_server().map(str::to_owned) {
+            let _ = self.runtime.block_on(
+                self.server_profile_repository
+                    .set_preference(PREFERENCE_SELECTED_SERVER_URL, &server_url),
+            );
+        }
+    }
+
+    fn persist_selected_account(&mut self) {
+        let Some(server_url) = self.selected_server().map(str::to_owned) else {
+            return;
+        };
+        let Some(username) = self.selected_account().map(|account| account.username.clone()) else {
+            return;
+        };
+
+        let key = Self::preference_selected_username_key(&server_url);
+        let _ = self
+            .runtime
+            .block_on(self.server_profile_repository.set_preference(&key, &username));
+    }
+
     fn reload_servers(&mut self) {
+        let selected_server_preference = self.runtime.block_on(
+            self.server_profile_repository
+                .get_preference(PREFERENCE_SELECTED_SERVER_URL),
+        );
+
         match self
             .runtime
             .block_on(self.server_profile_repository.list_server_credentials())
@@ -151,10 +234,23 @@ impl ClientDesktopApplication {
                 servers.dedup();
                 self.servers = servers;
 
-                if self.selected_server_index >= self.servers.len() {
+                if let Ok(Some(preferred_server)) = selected_server_preference {
+                    if let Some(index) = self
+                        .servers
+                        .iter()
+                        .position(|server| server == &preferred_server)
+                    {
+                        self.selected_server_index = index;
+                    } else if self.selected_server_index >= self.servers.len() {
+                        self.selected_server_index = 0;
+                    }
+                } else if self.selected_server_index >= self.servers.len() {
                     self.selected_server_index = 0;
                 }
 
+                if let Some(server) = self.selected_server().map(str::to_owned) {
+                    self.server_url_input = server;
+                }
                 self.reload_accounts_for_selected_server();
             }
             Err(error) => {
@@ -170,15 +266,32 @@ impl ClientDesktopApplication {
             return;
         };
 
+        let key = Self::preference_selected_username_key(&server);
+        let selected_account_preference = self
+            .runtime
+            .block_on(self.server_profile_repository.get_preference(&key));
+
         match self
             .runtime
             .block_on(self.server_profile_repository.list_server_accounts(&server))
         {
             Ok(accounts) => {
                 self.accounts_for_server = accounts;
-                if self.selected_account_index >= self.accounts_for_server.len() {
+
+                if let Ok(Some(preferred_username)) = selected_account_preference {
+                    if let Some(index) = self
+                        .accounts_for_server
+                        .iter()
+                        .position(|account| account.username == preferred_username)
+                    {
+                        self.selected_account_index = index;
+                    } else if self.selected_account_index >= self.accounts_for_server.len() {
+                        self.selected_account_index = 0;
+                    }
+                } else if self.selected_account_index >= self.accounts_for_server.len() {
                     self.selected_account_index = 0;
                 }
+
                 if let Some(account) = self.accounts_for_server.get(self.selected_account_index) {
                     self.username_input = account.username.clone();
                     self.password_input = account.password.clone();
@@ -196,6 +309,7 @@ impl ClientDesktopApplication {
             self.status_message = "Server URL required".to_owned();
             return;
         }
+
         if !self.servers.iter().any(|known_server| known_server == &server_url) {
             self.servers.push(server_url.clone());
             self.servers.sort();
@@ -203,8 +317,10 @@ impl ClientDesktopApplication {
         if let Some(index) = self.servers.iter().position(|known_server| known_server == &server_url) {
             self.selected_server_index = index;
             self.server_url_input = server_url;
+            self.persist_selected_server();
             self.reload_accounts_for_selected_server();
         }
+
         self.new_server_url_input.clear();
         self.show_add_server_form = false;
         self.status_message = "Server added".to_owned();
@@ -215,22 +331,32 @@ impl ClientDesktopApplication {
             self.status_message = "Select server first".to_owned();
             return;
         };
+
         if self.username_input.trim().is_empty() {
             self.status_message = "Username required".to_owned();
             return;
         }
+
         let credentials = ServerCredentials {
             server_url: server_url.clone(),
             username: self.username_input.trim().to_owned(),
             password: self.password_input.clone(),
         };
-        match self.runtime.block_on(self.server_profile_repository.upsert_server_credentials(&credentials)) {
+        match self.runtime.block_on(
+            self.server_profile_repository
+                .upsert_server_credentials(&credentials),
+        ) {
             Ok(_) => {
                 self.status_message = "Account saved".to_owned();
                 self.reload_accounts_for_selected_server();
-                if let Some(index) = self.accounts_for_server.iter().position(|account| account.username == credentials.username) {
+                if let Some(index) = self
+                    .accounts_for_server
+                    .iter()
+                    .position(|account| account.username == credentials.username)
+                {
                     self.selected_account_index = index;
                 }
+                self.persist_selected_account();
             }
             Err(error) => self.status_message = format!("Failed to save account: {error}"),
         }
@@ -260,7 +386,11 @@ impl ClientDesktopApplication {
         };
 
         match self.runtime.block_on(service.login_user(&request)) {
-            Ok(_) => self.load_whoami(),
+            Ok(_) => {
+                self.persist_selected_server();
+                self.persist_selected_account();
+                self.load_whoami();
+            }
             Err(error) => self.status_message = format!("Login failed: {error}"),
         }
     }
@@ -269,8 +399,8 @@ impl ClientDesktopApplication {
         let service = self.build_authorization_service();
         match self.runtime.block_on(service.who_am_i_from_saved_session()) {
             Ok(view) => {
-                self.whoami = Some(view.clone());
-                self.screen = Screen::WhoAmI;
+                self.whoami = Some(view);
+                self.screen = Screen::Workspace;
                 self.status_message = "Login successful".to_owned();
                 self.load_rooms();
             }
@@ -284,13 +414,22 @@ impl ClientDesktopApplication {
         let rooms_service = self.build_rooms_service();
         match self.runtime.block_on(rooms_service.list_cached_rooms()) {
             Ok(items) => {
-                self.rooms = items
-                    .into_iter()
-                    .map(|item| (item.room_id, item.name.unwrap_or_else(|| "Unnamed room".to_owned())))
-                    .collect();
+                let previously_selected_room_id =
+                    self.selected_room().map(|room| room.room_id.clone());
+                self.rooms = items;
+
+                self.selected_room_index = previously_selected_room_id
+                    .and_then(|room_id| self.rooms.iter().position(|room| room.room_id == room_id))
+                    .or_else(|| (!self.rooms.is_empty()).then_some(0));
+
+                if self.selected_room_index.is_none() {
+                    self.room_state_events.clear();
+                    self.room_messages.clear();
+                    self.next_messages_from_token = None;
+                }
             }
             Err(error) => {
-                self.status_message = format!("Failed to load rooms: {error}");
+                self.status_message = format!("Failed to load cached rooms: {error}");
             }
         }
     }
@@ -322,7 +461,7 @@ impl ClientDesktopApplication {
                     UsernameState::Available
                 } else {
                     UsernameState::Unavailable("Username is not available".to_owned())
-                }
+                };
             }
             Err(error) => self.username_state = UsernameState::Unavailable(error.to_string()),
         }
@@ -342,6 +481,8 @@ impl ClientDesktopApplication {
         {
             Ok(RegisterUserResult::Registered(_)) => {
                 self.save_selected_account_credentials();
+                self.persist_selected_server();
+                self.persist_selected_account();
                 self.load_whoami();
             }
             Ok(RegisterUserResult::AuthenticationRequired(uiaa)) => {
@@ -362,6 +503,8 @@ impl ClientDesktopApplication {
                 {
                     Ok(RegisterUserResult::Registered(_)) => {
                         self.save_selected_account_credentials();
+                        self.persist_selected_server();
+                        self.persist_selected_account();
                         self.load_whoami();
                     }
                     Ok(RegisterUserResult::AuthenticationRequired(_)) => {
@@ -396,6 +539,14 @@ impl ClientDesktopApplication {
                 self.screen = Screen::Welcome;
                 self.status_message = "Logged out".to_owned();
                 self.rooms.clear();
+                self.selected_room_index = None;
+                self.room_state_events.clear();
+                self.room_messages.clear();
+                self.room_state_status = LoadState::Idle;
+                self.room_messages_status = LoadState::Idle;
+                self.next_messages_from_token = None;
+                self.whoami = None;
+                self.composer_input.clear();
             }
             Err(error) => self.status_message = format!("Logout failed: {error}"),
         }
@@ -434,6 +585,7 @@ impl ClientDesktopApplication {
             invite_3pid: None,
             power_level_content_override: None,
         };
+
         match self.runtime.block_on(rooms_service.create_room(&request)) {
             Ok(view) => {
                 self.status_message = format!("Room created: {}", view.room_id);
@@ -441,6 +593,7 @@ impl ClientDesktopApplication {
                 self.new_room_topic.clear();
                 self.show_create_room_form = false;
                 self.load_rooms();
+                self.select_room_by_id(&view.room_id);
             }
             Err(error) => {
                 self.status_message = format!("Create room failed: {error}");
@@ -448,117 +601,313 @@ impl ClientDesktopApplication {
         }
     }
 
-    fn render_welcome(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Welcome");
-        ui.label("Servers");
-        ui.separator();
-
-        ui.horizontal(|ui| {
-            if !self.servers.is_empty() {
-                let mut changed_to_index: Option<usize> = None;
-                egui::ComboBox::from_label("Server")
-                    .selected_text(
-                        self.servers
-                            .get(self.selected_server_index)
-                            .cloned()
-                            .unwrap_or_else(|| "Choose server".to_owned()),
-                    )
-                    .show_ui(ui, |ui| {
-                        for (index, server) in self.servers.iter().enumerate() {
-                            if ui
-                                .selectable_label(self.selected_server_index == index, server)
-                                .clicked()
-                            {
-                                changed_to_index = Some(index);
-                            }
-                        }
-                    });
-                if let Some(index) = changed_to_index {
-                    self.selected_server_index = index;
-                    if let Some(server) = self.servers.get(index) {
-                        self.server_url_input = server.clone();
-                    }
-                    self.reload_accounts_for_selected_server();
-                }
-            }
-
-            if ui.button("+").clicked() {
-                self.show_add_server_form = true;
-            }
-        });
-
-        if self.show_add_server_form {
-            ui.group(|ui| {
-                ui.label("Add server");
-                ui.horizontal(|ui| {
-                    ui.label("Server URL");
-                    ui.text_edit_singleline(&mut self.new_server_url_input);
-                });
-                ui.horizontal(|ui| {
-                    if ui.button("Save").clicked() {
-                        self.add_server();
-                    }
-                    if ui.button("Cancel").clicked() {
-                        self.show_add_server_form = false;
-                    }
-                });
-            });
+    fn join_room_by_id(&mut self) {
+        let room_id = self.join_room_id_input.trim().to_owned();
+        if room_id.is_empty() {
+            self.status_message = "Room ID is required for join".to_owned();
+            return;
         }
 
-        ui.separator();
-        ui.label("My accounts on this server");
-        if !self.accounts_for_server.is_empty() {
-            egui::ComboBox::from_label("Account")
-                .selected_text(
-                    self.accounts_for_server
-                        .get(self.selected_account_index)
-                        .map(|account| account.username.clone())
-                        .unwrap_or_else(|| "Choose account".to_owned()),
-                )
-                .show_ui(ui, |ui| {
-                    for (index, account) in self.accounts_for_server.iter().enumerate() {
-                        if ui
-                            .selectable_label(self.selected_account_index == index, &account.username)
-                            .clicked()
-                        {
-                            self.selected_account_index = index;
+        let request = JoinRoomInfo {
+            reason: (!self.join_reason_input.trim().is_empty())
+                .then(|| self.join_reason_input.trim().to_owned()),
+        };
+
+        let rooms_service = self.build_rooms_service();
+        match self
+            .runtime
+            .block_on(rooms_service.join_room_by_id(&room_id, &request))
+        {
+            Ok(view) => {
+                self.status_message = format!("Joined room: {}", view.room_id);
+                self.join_room_id_input.clear();
+                self.join_reason_input.clear();
+                self.load_rooms();
+                self.select_room_by_id(&view.room_id);
+            }
+            Err(error) => {
+                self.status_message = format!("Join room failed: {error}");
+            }
+        }
+    }
+
+    fn leave_selected_room(&mut self) {
+        let Some(room_id) = self.selected_room().map(|room| room.room_id.clone()) else {
+            self.status_message = "Select a room first".to_owned();
+            return;
+        };
+
+        let request = LeaveRoomInfo {
+            reason: (!self.join_reason_input.trim().is_empty())
+                .then(|| self.join_reason_input.trim().to_owned()),
+        };
+        let rooms_service = self.build_rooms_service();
+        match self
+            .runtime
+            .block_on(rooms_service.leave_room_by_id(&room_id, &request))
+        {
+            Ok(_) => {
+                self.status_message = format!("Left room: {room_id}");
+                self.load_rooms();
+                self.room_state_events.clear();
+                self.room_messages.clear();
+                self.room_state_status = LoadState::Idle;
+                self.room_messages_status = LoadState::Idle;
+                self.next_messages_from_token = None;
+            }
+            Err(error) => self.status_message = format!("Leave room failed: {error}"),
+        }
+    }
+
+    fn select_room_by_id(&mut self, room_id: &str) {
+        if self.set_selected_room_index_by_id(room_id) {
+            self.load_selected_room_details();
+        }
+    }
+
+    fn set_selected_room_index_by_id(&mut self, room_id: &str) -> bool {
+        if let Some(index) = self.rooms.iter().position(|room| room.room_id == room_id) {
+            self.selected_room_index = Some(index);
+            return true;
+        }
+        false
+    }
+
+    fn load_selected_room_details(&mut self) {
+        self.load_selected_room_state();
+        self.load_selected_room_messages(None, true);
+    }
+
+    fn load_selected_room_state(&mut self) {
+        let Some(room_id) = self.selected_room().map(|room| room.room_id.clone()) else {
+            self.room_state_status = LoadState::Idle;
+            return;
+        };
+
+        self.room_state_status = LoadState::Loading;
+        let rooms_service = self.build_rooms_service();
+        match self.runtime.block_on(rooms_service.get_room_state(&room_id)) {
+            Ok(events) => {
+                self.room_state_events = events;
+                self.room_state_status = LoadState::Loaded;
+
+                let (name, topic) = extract_room_name_and_topic(&self.room_state_events);
+                if name.is_some() || topic.is_some() {
+                    let _ = self.runtime.block_on(rooms_service.upsert_cached_room(
+                        &room_id,
+                        name,
+                        topic,
+                    ));
+                    self.load_rooms();
+                    let _ = self.set_selected_room_index_by_id(&room_id);
+                }
+            }
+            Err(error) => {
+                self.room_state_events.clear();
+                self.room_state_status = LoadState::Error(error.to_string());
+            }
+        }
+    }
+
+    fn load_selected_room_messages(&mut self, from_token: Option<String>, replace: bool) {
+        let Some(room_id) = self.selected_room().map(|room| room.room_id.clone()) else {
+            self.room_messages_status = LoadState::Idle;
+            return;
+        };
+
+        self.room_messages_status = LoadState::Loading;
+        let query = GetRoomMessagesQuery {
+            from_token,
+            to_token: None,
+            direction: RoomMessageDirection::Backward,
+            limit: MESSAGE_PAGE_SIZE,
+            filter: None,
+        };
+        let rooms_service = self.build_rooms_service();
+        match self
+            .runtime
+            .block_on(rooms_service.get_room_messages(&room_id, &query))
+        {
+            Ok(page) => {
+                self.next_messages_from_token = page.end;
+                if replace {
+                    self.room_messages = page.chunk;
+                } else {
+                    self.room_messages.extend(page.chunk);
+                }
+                self.room_messages_status = LoadState::Loaded;
+            }
+            Err(error) => {
+                self.room_messages_status = LoadState::Error(error.to_string());
+            }
+        }
+    }
+
+    fn load_older_messages(&mut self) {
+        let Some(token) = self.next_messages_from_token.clone() else {
+            self.status_message = "No older messages token available for this room".to_owned();
+            return;
+        };
+        self.load_selected_room_messages(Some(token), false);
+    }
+
+    fn render_welcome(&mut self, ui: &mut egui::Ui) {
+        ui.vertical_centered(|ui| {
+            ui.add_space(36.0);
+            ui.label(
+                egui::RichText::new("GRIDSTACK")
+                    .size(12.0)
+                    .color(ACCENT)
+                    .strong(),
+            );
+            ui.heading(egui::RichText::new("Secure rooms, local first").size(34.0));
+            ui.label(
+                egui::RichText::new("Choose a homeserver and continue with a saved account.")
+                    .color(TEXT_MUTED),
+            );
+            ui.add_space(22.0);
+        });
+
+        egui::Frame::default()
+            .fill(PANEL)
+            .stroke(egui::Stroke::new(1.0, PANEL_HOVER))
+            .corner_radius(egui::CornerRadius::same(18))
+            .inner_margin(egui::Margin::symmetric(22, 20))
+            .show(ui, |ui| {
+                ui.set_max_width(620.0);
+                ui.label(
+                    egui::RichText::new("Server")
+                        .size(13.0)
+                        .color(TEXT_MUTED)
+                        .strong(),
+                );
+                ui.horizontal(|ui| {
+                    if !self.servers.is_empty() {
+                        let mut changed_to_index: Option<usize> = None;
+                        egui::ComboBox::from_id_salt("welcome_server")
+                            .width(440.0)
+                            .selected_text(
+                                self.servers
+                                    .get(self.selected_server_index)
+                                    .cloned()
+                                    .unwrap_or_else(|| "Choose server".to_owned()),
+                            )
+                            .show_ui(ui, |ui| {
+                                for (index, server) in self.servers.iter().enumerate() {
+                                    if ui
+                                        .selectable_label(self.selected_server_index == index, server)
+                                        .clicked()
+                                    {
+                                        changed_to_index = Some(index);
+                                    }
+                                }
+                            });
+                        if let Some(index) = changed_to_index {
+                            self.selected_server_index = index;
+                            if let Some(server) = self.servers.get(index) {
+                                self.server_url_input = server.clone();
+                            }
+                            self.persist_selected_server();
+                            self.reload_accounts_for_selected_server();
+                        }
+                    } else {
+                        ui.label(egui::RichText::new("No saved servers").color(TEXT_MUTED));
+                    }
+
+                    if ui.button("+ Server").clicked() {
+                        self.show_add_server_form = true;
+                    }
+                });
+
+                if self.show_add_server_form {
+                    ui.add_space(10.0);
+                    egui::Frame::default()
+                        .fill(PANEL_SOFT)
+                        .corner_radius(egui::CornerRadius::same(14))
+                        .inner_margin(egui::Margin::same(12))
+                        .show(ui, |ui| {
+                            ui.label("Add server");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.new_server_url_input)
+                                    .hint_text("http://127.0.0.1:8080"),
+                            );
+                            ui.horizontal(|ui| {
+                                if ui.button("Save").clicked() {
+                                    self.add_server();
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    self.show_add_server_form = false;
+                                }
+                            });
+                        });
+                }
+
+                ui.add_space(20.0);
+                ui.label(
+                    egui::RichText::new("Account")
+                        .size(13.0)
+                        .color(TEXT_MUTED)
+                        .strong(),
+                );
+                if !self.accounts_for_server.is_empty() {
+                    let mut changed_account_index: Option<usize> = None;
+                    egui::ComboBox::from_id_salt("welcome_account")
+                        .width(440.0)
+                        .selected_text(
+                            self.accounts_for_server
+                                .get(self.selected_account_index)
+                                .map(|account| account.username.clone())
+                                .unwrap_or_else(|| "Choose account".to_owned()),
+                        )
+                        .show_ui(ui, |ui| {
+                            for (index, account) in self.accounts_for_server.iter().enumerate() {
+                                if ui
+                                    .selectable_label(
+                                        self.selected_account_index == index,
+                                        &account.username,
+                                    )
+                                    .clicked()
+                                {
+                                    changed_account_index = Some(index);
+                                }
+                            }
+                        });
+                    if let Some(index) = changed_account_index {
+                        self.selected_account_index = index;
+                        if let Some(account) = self.accounts_for_server.get(index) {
                             self.username_input = account.username.clone();
                             self.password_input = account.password.clone();
                         }
+                        self.persist_selected_account();
                     }
-                });
-            ui.horizontal(|ui| {
-                if ui.button("Login").clicked() {
-                    self.run_login_selected_account();
-                }
-                if ui.button("Register").clicked() {
-                    self.start_registration();
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Login").clicked() {
+                            self.run_login_selected_account();
+                        }
+                        if ui.button("Register new account").clicked() {
+                            self.start_registration();
+                        }
+                    });
+                } else {
+                    ui.label(egui::RichText::new("No saved accounts for this server.").color(TEXT_MUTED));
+                    ui.add_space(8.0);
+                    ui.add(egui::TextEdit::singleline(&mut self.username_input).hint_text("Username"));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.password_input)
+                            .password(true)
+                            .hint_text("Password"),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui.button("Save account").clicked() {
+                            self.save_selected_account_credentials();
+                        }
+                        if ui.button("Register").clicked() {
+                            self.start_registration();
+                        }
+                    });
                 }
             });
-        } else {
-            ui.label("No saved accounts");
-            ui.horizontal(|ui| {
-                if ui.button("Login").clicked() {
-                    self.status_message = "No account selected. Add or fill account first.".to_owned();
-                }
-                if ui.button("Register").clicked() {
-                    self.start_registration();
-                }
-            });
-            ui.separator();
-            ui.label("Account credentials");
-            ui.horizontal(|ui| {
-                ui.label("Username");
-                ui.text_edit_singleline(&mut self.username_input);
-            });
-            ui.horizontal(|ui| {
-                ui.label("Password");
-                ui.add(egui::TextEdit::singleline(&mut self.password_input).password(true));
-            });
-            if ui.button("Save Account").clicked() {
-                self.save_selected_account_credentials();
-            }
-        }
     }
 
     fn render_choose_flow(&mut self, ui: &mut egui::Ui) {
@@ -633,104 +982,382 @@ impl ClientDesktopApplication {
         }
     }
 
-    fn render_whoami(&mut self, ui: &mut egui::Ui) {
-        ui.columns(2, |columns| {
-            columns[0].heading("Rooms");
-            columns[0].horizontal(|ui| {
-                if ui.button("+").clicked() {
+    fn render_workspace(&mut self, context: &egui::Context) {
+        egui::SidePanel::left("room_sidebar")
+            .resizable(true)
+            .default_width(330.0)
+            .frame(
+                egui::Frame::default()
+                    .fill(PANEL)
+                    .inner_margin(egui::Margin::symmetric(14, 16)),
+            )
+            .show(context, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Gridstack")
+                            .size(24.0)
+                            .color(egui::Color32::WHITE)
+                            .strong(),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Logout").clicked() {
+                            self.run_logout();
+                        }
+                    });
+                });
+                if let Some(whoami) = self.whoami.as_ref() {
+                    ui.label(egui::RichText::new(&whoami.user_id).color(TEXT_MUTED));
+                }
+                ui.add_space(16.0);
+
+                egui::Frame::default()
+                    .fill(PANEL_SOFT)
+                    .corner_radius(egui::CornerRadius::same(16))
+                    .inner_margin(egui::Margin::same(12))
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("Session").color(TEXT_MUTED).strong());
+                        let mut changed_server_index: Option<usize> = None;
+                        egui::ComboBox::from_id_salt("workspace_server")
+                            .width(ui.available_width())
+                            .selected_text(
+                                self.servers
+                                    .get(self.selected_server_index)
+                                    .cloned()
+                                    .unwrap_or_else(|| "Choose server".to_owned()),
+                            )
+                            .show_ui(ui, |ui| {
+                                for (index, server) in self.servers.iter().enumerate() {
+                                    if ui
+                                        .selectable_label(self.selected_server_index == index, server)
+                                        .clicked()
+                                    {
+                                        changed_server_index = Some(index);
+                                    }
+                                }
+                            });
+                        if let Some(index) = changed_server_index {
+                            self.selected_server_index = index;
+                            self.persist_selected_server();
+                            self.reload_accounts_for_selected_server();
+                            self.load_rooms();
+                        }
+
+                        let mut changed_account_index: Option<usize> = None;
+                        egui::ComboBox::from_id_salt("workspace_account")
+                            .width(ui.available_width())
+                            .selected_text(
+                                self.accounts_for_server
+                                    .get(self.selected_account_index)
+                                    .map(|account| account.username.clone())
+                                    .unwrap_or_else(|| "Choose account".to_owned()),
+                            )
+                            .show_ui(ui, |ui| {
+                                for (index, account) in self.accounts_for_server.iter().enumerate() {
+                                    if ui
+                                        .selectable_label(
+                                            self.selected_account_index == index,
+                                            &account.username,
+                                        )
+                                        .clicked()
+                                    {
+                                        changed_account_index = Some(index);
+                                    }
+                                }
+                            });
+                        if let Some(index) = changed_account_index {
+                            self.selected_account_index = index;
+                            if let Some(account) = self.accounts_for_server.get(index) {
+                                self.username_input = account.username.clone();
+                                self.password_input = account.password.clone();
+                            }
+                            self.persist_selected_account();
+                        }
+
+                        if ui.button("Refresh cached rooms").clicked() {
+                            self.load_rooms();
+                        }
+                    });
+
+                ui.add_space(12.0);
+                ui.collapsing("Join by room id", |ui| {
+                    ui.text_edit_singleline(&mut self.join_room_id_input);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.join_reason_input)
+                            .hint_text("Reason, optional"),
+                    );
+                    if ui.button("Join").clicked() {
+                        self.join_room_by_id();
+                    }
+                });
+
+                if ui
+                    .button(if self.show_create_room_form {
+                        "Hide create room"
+                    } else {
+                        "Create room"
+                    })
+                    .clicked()
+                {
                     self.show_create_room_form = !self.show_create_room_form;
                 }
-            });
-            if self.show_create_room_form {
-                egui::ScrollArea::vertical().max_height(420.0).show(&mut columns[0], |ui| {
-                ui.group(|ui| {
-                    ui.label("Create room");
-                    ui.horizontal(|ui| {
-                        ui.label("Name").on_hover_text("Human-friendly room title.");
-                        ui.text_edit_singleline(&mut self.new_room_name);
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Topic").on_hover_text("Optional short room description.");
-                        ui.text_edit_singleline(&mut self.new_room_topic);
-                    });
-                    let visibility_options = Self::visibility_options();
-                    egui::ComboBox::from_label("Visibility")
-                        .selected_text(
-                            visibility_options
-                                .get(self.new_room_visibility_index)
-                                .copied()
-                                .unwrap_or("private"),
-                        )
-                        .show_ui(ui, |ui| {
-                            for (index, value) in visibility_options.iter().enumerate() {
-                                if ui
-                                    .selectable_value(&mut self.new_room_visibility_index, index, *value)
-                                    .clicked()
-                                {
-                                    self.enforce_preset_for_visibility();
-                                }
-                            }
-                        });
-                    ui.label("Visibility").on_hover_text("`private` limits discoverability, `public` is discoverable.");
+                if self.show_create_room_form {
+                    egui::Frame::default()
+                        .fill(PANEL_SOFT)
+                        .corner_radius(egui::CornerRadius::same(14))
+                        .inner_margin(egui::Margin::same(12))
+                        .show(ui, |ui| {
+                        ui.add(egui::TextEdit::singleline(&mut self.new_room_name).hint_text("Room name"));
+                        ui.add(egui::TextEdit::singleline(&mut self.new_room_topic).hint_text("Topic"));
 
-                    let active_visibility = visibility_options
-                        .get(self.new_room_visibility_index)
-                        .copied()
-                        .unwrap_or("private");
-                    let preset_options = Self::available_presets_for_visibility(active_visibility);
-                    if self.new_room_preset_index >= preset_options.len() {
-                        self.new_room_preset_index = 0;
-                    }
-                    egui::ComboBox::from_label("Preset")
-                        .selected_text(
-                            preset_options
-                                .get(self.new_room_preset_index)
-                                .copied()
-                                .unwrap_or("private_chat"),
-                        )
-                        .show_ui(ui, |ui| {
-                            for (index, value) in preset_options.iter().enumerate() {
-                                if ui
-                                    .selectable_value(&mut self.new_room_preset_index, index, *value)
-                                    .clicked()
-                                {
-                                    self.enforce_visibility_for_preset();
+                        let visibility_options = Self::visibility_options();
+                        egui::ComboBox::from_label("Visibility")
+                            .selected_text(
+                                visibility_options
+                                    .get(self.new_room_visibility_index)
+                                    .copied()
+                                    .unwrap_or("private"),
+                            )
+                            .show_ui(ui, |ui| {
+                                for (index, value) in visibility_options.iter().enumerate() {
+                                    if ui
+                                        .selectable_value(&mut self.new_room_visibility_index, index, *value)
+                                        .clicked()
+                                    {
+                                        self.enforce_preset_for_visibility();
+                                    }
                                 }
-                            }
-                        });
-                    ui.label("Preset").on_hover_text("Preset applies sensible defaults for member permissions and invite rules.");
+                            });
 
-                    ui.checkbox(&mut self.new_room_is_direct, "Direct room")
-                        .on_hover_text("Enable when this is a direct/private conversation.");
-                    if ui.button("Create").clicked() {
-                        self.create_room();
+                        let active_visibility = visibility_options
+                            .get(self.new_room_visibility_index)
+                            .copied()
+                            .unwrap_or("private");
+                        let preset_options =
+                            Self::available_presets_for_visibility(active_visibility);
+                        if self.new_room_preset_index >= preset_options.len() {
+                            self.new_room_preset_index = 0;
+                        }
+                        egui::ComboBox::from_label("Preset")
+                            .selected_text(
+                                preset_options
+                                    .get(self.new_room_preset_index)
+                                    .copied()
+                                    .unwrap_or("private_chat"),
+                            )
+                            .show_ui(ui, |ui| {
+                                for (index, value) in preset_options.iter().enumerate() {
+                                    if ui
+                                        .selectable_value(&mut self.new_room_preset_index, index, *value)
+                                        .clicked()
+                                    {
+                                        self.enforce_visibility_for_preset();
+                                    }
+                                }
+                            });
+                        ui.checkbox(&mut self.new_room_is_direct, "Direct room");
+                        if ui.button("Create").clicked() {
+                            self.create_room();
+                        }
+                    });
+                }
+
+                ui.add_space(18.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Rooms")
+                            .size(13.0)
+                            .color(TEXT_MUTED)
+                            .strong(),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(egui::RichText::new(self.rooms.len().to_string()).color(ACCENT));
+                    });
+                });
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for index in 0..self.rooms.len() {
+                        let room = &self.rooms[index];
+                        let room_title = room.name.clone().unwrap_or_else(|| room.room_id.clone());
+                        let topic = room.topic.clone().unwrap_or_else(|| room.room_id.clone());
+                        let selected = self.selected_room_index == Some(index);
+                        let fill = if selected { PANEL_HOVER } else { PANEL };
+                        let response = egui::Frame::default()
+                            .fill(fill)
+                            .stroke(egui::Stroke::new(
+                                1.0,
+                                if selected { ACCENT } else { PANEL_SOFT },
+                            ))
+                            .corner_radius(egui::CornerRadius::same(14))
+                            .inner_margin(egui::Margin::symmetric(12, 10))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    avatar(ui, room_title.chars().next().unwrap_or('#'), selected);
+                                    ui.vertical(|ui| {
+                                        ui.label(egui::RichText::new(room_title).strong());
+                                        ui.label(
+                                            egui::RichText::new(compact_text(&topic, 38))
+                                                .size(11.0)
+                                                .color(TEXT_MUTED),
+                                        );
+                                    });
+                                });
+                            })
+                            .response;
+                        if response.interact(egui::Sense::click()).clicked() {
+                            self.selected_room_index = Some(index);
+                            self.load_selected_room_details();
+                        }
+                        ui.add_space(6.0);
                     }
                 });
-                });
-            }
-            for (room_id, room_name) in &self.rooms {
-                columns[0]
-                    .label(room_name)
-                    .on_hover_text(format!("Room ID: {room_id}"));
-            }
 
-            columns[1].heading("WhoAmI");
-            if let Some(view) = &self.whoami {
-                columns[1].label(format!("User: {}", view.user_id));
-                columns[1].label(format!("Guest: {}", view.is_guest));
-                if let Some(device_id) = &view.device_id {
-                    columns[1].label(format!("Device: {device_id}"));
-                }
-            }
-
-            columns[1].horizontal(|ui| {
-                if ui.button("Back").clicked() {
-                    self.screen = Screen::Welcome;
-                }
-                if ui.button("Logout").clicked() {
-                    self.run_logout();
+                if ui.button("Leave selected room").clicked() {
+                    self.leave_selected_room();
                 }
             });
+
+        egui::CentralPanel::default()
+            .frame(egui::Frame::default().fill(BACKGROUND))
+            .show(context, |ui| {
+            let selected_room_id = self.selected_room().map(|room| room.room_id.clone());
+            let selected_room_name = self
+                .selected_room()
+                .and_then(|room| room.name.clone())
+                .unwrap_or_else(|| selected_room_id.clone().unwrap_or_else(|| "-".to_owned()));
+
+            egui::Frame::default()
+                .fill(PANEL)
+                .inner_margin(egui::Margin::symmetric(20, 14))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        avatar(ui, selected_room_name.chars().next().unwrap_or('#'), true);
+                        ui.vertical(|ui| {
+                            ui.label(
+                                egui::RichText::new(selected_room_name)
+                                    .size(20.0)
+                                    .strong(),
+                            );
+                            if let Some(room_id) = selected_room_id.as_ref() {
+                                ui.label(
+                                    egui::RichText::new(compact_text(room_id, 84))
+                                        .size(11.0)
+                                        .color(TEXT_MUTED),
+                                );
+                            } else {
+                                ui.label(egui::RichText::new("Select a room").color(TEXT_MUTED));
+                            }
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .add_enabled(
+                                    self.next_messages_from_token.is_some(),
+                                    egui::Button::new("Older"),
+                                )
+                                .clicked()
+                            {
+                                self.load_older_messages();
+                            }
+                            if ui.button("Messages").clicked() {
+                                self.load_selected_room_messages(None, true);
+                            }
+                            if ui.button("State").clicked() {
+                                self.load_selected_room_state();
+                            }
+                        });
+                    });
+                });
+
+            ui.add_space(12.0);
+            egui::Frame::default()
+                .fill(PANEL_SOFT)
+                .corner_radius(egui::CornerRadius::same(16))
+                .inner_margin(egui::Margin::symmetric(16, 12))
+                .show(ui, |ui| {
+            ui.collapsing("Room state", |ui| match &self.room_state_status {
+                LoadState::Idle => {
+                    ui.label(egui::RichText::new("No room selected.").color(TEXT_MUTED));
+                }
+                LoadState::Loading => {
+                    ui.label(egui::RichText::new("Loading room state...").color(TEXT_MUTED));
+                }
+                LoadState::Error(error) => {
+                    ui.colored_label(DANGER, format!("Failed to load state: {error}"));
+                }
+                LoadState::Loaded => {
+                    if self.room_state_events.is_empty() {
+                        ui.label(egui::RichText::new("This room has no state events.").color(TEXT_MUTED));
+                    } else {
+                        egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
+                            for event in &self.room_state_events {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{} [{}]",
+                                        event.event_type, event.state_key
+                                    ))
+                                    .color(ACCENT_STRONG)
+                                    .strong(),
+                                );
+                                ui.label(egui::RichText::new(&event.sender).color(TEXT_MUTED));
+                                ui.monospace(pretty_json(&event.content));
+                                ui.separator();
+                            }
+                        });
+                    }
+                }
+            });
+                });
+
+            ui.add_space(12.0);
+            ui.label(
+                egui::RichText::new("Messages")
+                    .size(14.0)
+                    .color(TEXT_MUTED)
+                    .strong(),
+            );
+            match &self.room_messages_status {
+                LoadState::Idle => {
+                    empty_chat(ui, "Select a room from the sidebar to inspect its timeline.");
+                }
+                LoadState::Loading => {
+                    empty_chat(ui, "Loading room messages...");
+                }
+                LoadState::Error(error) => {
+                    ui.colored_label(DANGER, format!("Failed to load messages: {error}"));
+                }
+                LoadState::Loaded => {
+                    if self.room_messages.is_empty() {
+                        empty_chat(ui, "No timeline messages returned for this room.");
+                    } else {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            for event in &self.room_messages {
+                                render_timeline_event(ui, event, self.whoami.as_ref());
+                                ui.add_space(10.0);
+                            }
+                        });
+                    }
+                }
+            }
+
+            ui.add_space(10.0);
+            egui::Frame::default()
+                .fill(PANEL)
+                .inner_margin(egui::Margin::symmetric(16, 12))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add_enabled(
+                            false,
+                            egui::TextEdit::singleline(&mut self.composer_input)
+                                .hint_text("Sending is disabled for this server"),
+                        );
+                        ui.add_enabled(false, egui::Button::new("Send"));
+                    });
+                    ui.label(
+                        egui::RichText::new(
+                            "Send message is unavailable: server has no implemented send-event endpoint.",
+                        )
+                        .size(11.0)
+                        .color(TEXT_MUTED),
+                    );
+                });
         });
     }
 
@@ -772,16 +1399,168 @@ impl ClientDesktopApplication {
 
 impl eframe::App for ClientDesktopApplication {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(context, |ui| {
-            match self.screen {
-                Screen::Welcome => self.render_welcome(ui),
-                Screen::ChooseFlow => self.render_choose_flow(ui),
-                Screen::RegisterForm => self.render_register_form(ui),
-                Screen::WhoAmI => self.render_whoami(ui),
-            }
+        apply_visual_theme(context);
 
-            ui.separator();
-            ui.label(&self.status_message);
+        match self.screen {
+            Screen::Workspace => self.render_workspace(context),
+            _ => {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::default().fill(BACKGROUND))
+                    .show(context, |ui| match self.screen {
+                    Screen::Welcome => self.render_welcome(ui),
+                    Screen::ChooseFlow => self.render_choose_flow(ui),
+                    Screen::RegisterForm => self.render_register_form(ui),
+                    Screen::Workspace => {}
+                });
+            }
+        }
+
+        egui::TopBottomPanel::bottom("status_bar").show(context, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new(&self.status_message).color(TEXT_MUTED));
+            });
         });
     }
+}
+
+fn apply_visual_theme(context: &egui::Context) {
+    let mut style = (*context.style()).clone();
+    style.visuals = egui::Visuals::dark();
+    style.visuals.panel_fill = BACKGROUND;
+    style.visuals.window_fill = PANEL;
+    style.visuals.extreme_bg_color = BACKGROUND;
+    style.visuals.widgets.noninteractive.bg_fill = PANEL;
+    style.visuals.widgets.inactive.bg_fill = PANEL_SOFT;
+    style.visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
+    style.visuals.widgets.hovered.bg_fill = PANEL_HOVER;
+    style.visuals.widgets.active.bg_fill = ACCENT;
+    style.visuals.selection.bg_fill = ACCENT;
+    style.spacing.item_spacing = egui::vec2(8.0, 8.0);
+    context.set_style(style);
+}
+
+fn avatar(ui: &mut egui::Ui, initial: char, highlighted: bool) {
+    let color = if highlighted { ACCENT } else { PANEL_HOVER };
+    let text_color = if highlighted {
+        BACKGROUND
+    } else {
+        egui::Color32::WHITE
+    };
+    egui::Frame::default()
+        .fill(color)
+        .corner_radius(egui::CornerRadius::same(40))
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(initial.to_uppercase().to_string())
+                    .color(text_color)
+                    .strong(),
+            );
+        });
+}
+
+fn empty_chat(ui: &mut egui::Ui, message: &str) {
+    ui.vertical_centered(|ui| {
+        ui.add_space(48.0);
+        ui.label(egui::RichText::new("No active timeline").size(22.0).strong());
+        ui.label(egui::RichText::new(message).color(TEXT_MUTED));
+    });
+}
+
+fn render_timeline_event(
+    ui: &mut egui::Ui,
+    event: &RoomTimelineEventView,
+    whoami: Option<&WhoAmIView>,
+) {
+    let sent_by_me = whoami
+        .map(|view| view.user_id == event.sender)
+        .unwrap_or(false);
+    let fill = if sent_by_me { ACCENT } else { PANEL_SOFT };
+    let text_color = if sent_by_me {
+        BACKGROUND
+    } else {
+        egui::Color32::WHITE
+    };
+    let body = message_body(event);
+
+    ui.with_layout(
+        if sent_by_me {
+            egui::Layout::right_to_left(egui::Align::Min)
+        } else {
+            egui::Layout::left_to_right(egui::Align::Min)
+        },
+        |ui| {
+            egui::Frame::default()
+                .fill(fill)
+                .stroke(egui::Stroke::new(
+                    1.0,
+                    if sent_by_me { ACCENT } else { PANEL_HOVER },
+                ))
+                .corner_radius(egui::CornerRadius::same(18))
+                .inner_margin(egui::Margin::symmetric(14, 10))
+                .show(ui, |ui| {
+                    ui.set_max_width(560.0);
+                    ui.label(egui::RichText::new(body).color(text_color));
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            egui::RichText::new(compact_text(&event.sender, 42))
+                                .size(10.0)
+                                .color(if sent_by_me { BACKGROUND } else { TEXT_MUTED }),
+                        );
+                        ui.label(
+                            egui::RichText::new(&event.event_type)
+                                .size(10.0)
+                                .color(if sent_by_me { BACKGROUND } else { ACCENT_STRONG }),
+                        );
+                    });
+                });
+        },
+    );
+}
+
+fn extract_room_name_and_topic(events: &[RoomStateEventView]) -> (Option<String>, Option<String>) {
+    let mut room_name: Option<String> = None;
+    let mut room_topic: Option<String> = None;
+
+    for event in events {
+        if event.state_key.is_empty() && event.event_type == "m.room.name" {
+            if let Some(name) = event.content.get("name").and_then(serde_json::Value::as_str) {
+                room_name = Some(name.to_owned());
+            }
+        }
+        if event.state_key.is_empty() && event.event_type == "m.room.topic" {
+            if let Some(topic) = event.content.get("topic").and_then(serde_json::Value::as_str) {
+                room_topic = Some(topic.to_owned());
+            }
+        }
+    }
+
+    (room_name, room_topic)
+}
+
+fn pretty_json(value: &serde_json::Value) -> String {
+    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+}
+
+fn message_body(event: &RoomTimelineEventView) -> String {
+    event
+        .content
+        .get("body")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| pretty_json(&event.content))
+}
+
+fn compact_text(value: &str, maximum_characters: usize) -> String {
+    if value.chars().count() <= maximum_characters {
+        return value.to_owned();
+    }
+
+    let mut shortened = value
+        .chars()
+        .take(maximum_characters.saturating_sub(3))
+        .collect::<String>();
+    shortened.push_str("...");
+    shortened
 }
