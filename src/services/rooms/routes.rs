@@ -40,6 +40,10 @@ pub fn routes(state: &ApplicationState) -> Router<ApplicationState> {
             get(handlers::get_room_state),
         )
         .route(
+            "/_matrix/client/v3/rooms/{roomId}/members",
+            get(handlers::get_room_members),
+        )
+        .route(
             "/_matrix/client/v3/rooms/{roomId}/state/{eventType}/{stateKey}",
             get(handlers::get_room_state_with_key).put(handlers::set_room_state_with_key),
         )
