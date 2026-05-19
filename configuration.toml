@@ -14,5 +14,14 @@ json_web_token_secret = "f4351c639741bdfc82fa19560c3c4c8866828384b7448dff20b797d
 # openssl rand -hex 16
 password_pepper = "45590a614fff689504f123c3add6ad36"
 
+# Optional appservice authentication/namespace ownership.
+# `controlled_user_id_patterns` are Rust regex strings evaluated against full MXID.
+# Example:
+# [[authenification.appservices]]
+# id = "com.example.bridge"
+# as_token = "bridge-shared-secret"
+# sender_localpart = "bridgebot"
+# controlled_user_id_patterns = ["^@_bridge_.*:127\\.0\\.0\\.1:3000$"]
+
 [rate_limit]
 retry_after_ms = 2000

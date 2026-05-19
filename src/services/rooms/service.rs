@@ -7,6 +7,7 @@ use crate::{
     services::{
         authorization::{
             entities::{AuthorizedUserIdentifier, ExistingUserIdentifier},
+            persistence::access_session_storage_unit::AccessSessionStorageUnit,
             service::AuthorizationService,
         },
         errors::DomainError,
@@ -19,21 +20,25 @@ use crate::{
         },
         rooms::{
             entities::{
-                CreateRoomCommand, CreatedRoom, GetRoomMessagesCommand, JoinRoomCommand,
-                JoinedMembers, JoinedRoom, JoinedRoomMember, JoinedRooms, LeaveRoomCommand,
-                LeftRoom, RoomCreationFlow, RoomFactoryEvent, RoomIdentifier,
-                RoomMessageDirection, RoomMessagesPage, RoomStateEvent, RoomTimelineEvent,
-                RoomValidationError, ValidatedCreateRoomInput, parse_room_message_event_content,
-                parse_room_state_event_content,
+                CreateRoomCommand, CreatedRoom, GetRoomMembersCommand, GetRoomMessagesCommand,
+                JoinRoomCommand, JoinedMembers, JoinedRoom, JoinedRoomMember, JoinedRooms,
+                LeaveRoomCommand, LeftRoom, RoomCreationFlow, RoomFactoryEvent, RoomIdentifier,
+                RoomMembersChunk, RoomMembershipFilter, RoomMessageDirection, RoomMessagesPage,
+                RoomStateEvent, RoomTimelineEvent, RoomValidationError, ValidatedCreateRoomInput,
+                parse_room_message_event_content, parse_room_state_event_content,
             },
             errors::RoomsApplicationError,
             persistence::RoomRepository,
-            service::create_room::{CreateRoomValidationInput, RoomCreationFactory},
+            service::{
+                create_room::{CreateRoomValidationInput, RoomCreationFactory},
+                history_visibility::{EventVisibilityEvaluationInput, evaluate_event_visibility},
+            },
         },
     },
 };
 
 pub mod create_room;
+mod history_visibility;
 
 pub struct RoomsService {
     room_repository: Arc<dyn RoomRepository>,
@@ -170,10 +175,10 @@ impl RoomsService {
 
     pub fn get_joined_members(
         &self,
-        user_id: &AuthorizedUserIdentifier,
+        access_session: &AccessSessionStorageUnit,
         room_id: String,
     ) -> Result<JoinedMembers, RoomsApplicationError> {
-        self.require_joined_membership(&room_id, user_id.as_existing_user_identifier())?;
+        self.require_joined_members_access(&room_id, access_session)?;
 
         let members = self
             .room_repository
@@ -249,6 +254,49 @@ impl RoomsService {
             .map_err(|_| RoomsApplicationError::Internal)
     }
 
+    pub fn get_room_members(
+        &self,
+        user_id: &AuthorizedUserIdentifier,
+        room_id: String,
+        command: GetRoomMembersCommand,
+    ) -> Result<RoomMembersChunk, RoomsApplicationError> {
+        self.require_room_state_read_access(&room_id, user_id.as_existing_user_identifier())?;
+
+        let events = match command.at_token.as_deref() {
+            Some(token) => {
+                let stream_position = parse_room_stream_position_token(token)?;
+                self.room_repository
+                    .fetch_room_member_state_events_at_stream_position(&room_id, stream_position)
+                    .map_err(|_| RoomsApplicationError::Internal)?
+            }
+            None => self
+                .room_repository
+                .fetch_room_state_events(&room_id)
+                .map_err(|_| RoomsApplicationError::Internal)?,
+        };
+
+        let chunk = events
+            .into_iter()
+            .filter(|event| event.event_type == "m.room.member")
+            .filter(|event| {
+                let Some(event_membership) = room_membership_from_event(event) else {
+                    return false;
+                };
+
+                match (command.membership, command.not_membership) {
+                    (None, None) => true,
+                    (Some(membership), None) => event_membership == membership,
+                    (None, Some(not_membership)) => event_membership != not_membership,
+                    (Some(membership), Some(not_membership)) => {
+                        event_membership == membership && event_membership != not_membership
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
+
+        Ok(RoomMembersChunk { chunk })
+    }
+
     pub fn get_room_state_with_key(
         &self,
         user_id: &AuthorizedUserIdentifier,
@@ -270,12 +318,90 @@ impl RoomsService {
         room_id: String,
         event_id: String,
     ) -> Result<RoomTimelineEvent, RoomsApplicationError> {
-        self.require_room_state_read_access(&room_id, user_id.as_existing_user_identifier())?;
+        self.require_room_identifier(&room_id)?;
 
-        self.room_repository
+        let room_event = self
+            .room_repository
             .fetch_room_timeline_event_by_id(&room_id, &event_id)
             .map_err(|_| RoomsApplicationError::Internal)?
-            .ok_or(RoomsApplicationError::NotFound)
+            .ok_or(RoomsApplicationError::NotFound)?;
+
+        let user_id = user_id.as_existing_user_identifier();
+        let membership_at_event = self
+            .room_repository
+            .fetch_user_membership_at_stream_position(
+                &room_id,
+                user_id.as_str(),
+                room_event.stream_position,
+            )
+            .map_err(|_| RoomsApplicationError::Internal)?;
+        let user_joined_since_event = self
+            .room_repository
+            .user_joined_since_stream_position(
+                &room_id,
+                user_id.as_str(),
+                room_event.stream_position,
+            )
+            .map_err(|_| RoomsApplicationError::Internal)?;
+
+        let history_visibility_at_event = self
+            .room_repository
+            .fetch_room_history_visibility_at_stream_position(&room_id, room_event.stream_position)
+            .map_err(|_| RoomsApplicationError::Internal)?;
+        let mut history_visibility_before_event = None;
+        let mut history_visibility_after_event = None;
+
+        if room_event.event_type == "m.room.history_visibility"
+            && room_event.state_key.as_deref() == Some("")
+        {
+            history_visibility_before_event = self
+                .room_repository
+                .fetch_room_history_visibility_before_stream_position(
+                    &room_id,
+                    room_event.stream_position,
+                )
+                .map_err(|_| RoomsApplicationError::Internal)?;
+
+            history_visibility_after_event = history_visibility_from_timeline_event(&room_event)
+                .or(history_visibility_at_event.clone());
+        }
+
+        let mut membership_before_event = None;
+        let mut membership_after_event = None;
+        if room_event.event_type == "m.room.member"
+            && room_event.state_key.as_deref() == Some(user_id.as_str())
+        {
+            membership_before_event = self
+                .room_repository
+                .fetch_user_membership_before_stream_position(
+                    &room_id,
+                    user_id.as_str(),
+                    room_event.stream_position,
+                )
+                .map_err(|_| RoomsApplicationError::Internal)?;
+            membership_after_event = room_membership_from_timeline_event(&room_event)
+                .map(str::to_owned)
+                .or(membership_at_event.clone());
+        }
+
+        let event_visible = evaluate_event_visibility(&EventVisibilityEvaluationInput {
+            event_type: room_event.event_type.as_str(),
+            event_state_key: room_event.state_key.as_deref(),
+            requesting_user_id: user_id.as_str(),
+            history_visibility_at_event: history_visibility_at_event.as_deref(),
+            history_visibility_before_event: history_visibility_before_event.as_deref(),
+            history_visibility_after_event: history_visibility_after_event.as_deref(),
+            membership_at_event: membership_at_event.as_deref(),
+            membership_before_event: membership_before_event.as_deref(),
+            membership_after_event: membership_after_event.as_deref(),
+            user_joined_since_event,
+        });
+
+        if !event_visible {
+            return Err(RoomsApplicationError::Forbidden);
+        }
+
+        Ok(room_event)
     }
 
     pub fn get_room_messages(
@@ -286,34 +412,18 @@ impl RoomsService {
     ) -> Result<RoomMessagesPage, RoomsApplicationError> {
         self.require_room_state_read_access(&room_id, user_id.as_existing_user_identifier())?;
 
-        let parse_stream_position = |token: &str| -> Result<i64, RoomsApplicationError> {
-            if let Ok(value) = token.parse::<i64>() {
-                return Ok(value);
-            }
-
-            let first_numeric_fragment = token
-                .trim_start_matches(|character: char| character.is_ascii_alphabetic())
-                .split(|character: char| !character.is_ascii_digit())
-                .find(|fragment| !fragment.is_empty())
-                .ok_or(RoomsApplicationError::InvalidParameter)?;
-
-            first_numeric_fragment
-                .parse::<i64>()
-                .map_err(|_| RoomsApplicationError::InvalidParameter)
-        };
-
         let encode_stream_token =
             |stream_position: i64| -> String { format!("s{stream_position}_0_0") };
 
         let from_stream_position = command
             .from_token
             .as_deref()
-            .map(parse_stream_position)
+            .map(parse_room_stream_position_token)
             .transpose()?;
         let to_stream_position = command
             .to_token
             .as_deref()
-            .map(parse_stream_position)
+            .map(parse_room_stream_position_token)
             .transpose()?;
 
         let filter = command.filter;
@@ -530,6 +640,43 @@ impl RoomsService {
         Ok(room_join_context)
     }
 
+    fn require_joined_members_access(
+        &self,
+        room_id: &str,
+        access_session: &AccessSessionStorageUnit,
+    ) -> Result<(), RoomsApplicationError> {
+        self.require_room_identifier(room_id)?;
+
+        if self
+            .room_repository
+            .fetch_join_context(room_id, access_session.user_identifier().as_str())
+            .map_err(|_| RoomsApplicationError::Internal)?
+            .and_then(|value| value.membership_state)
+            .as_deref()
+            == Some("join")
+        {
+            return Ok(());
+        }
+
+        let joined_member_profiles = self
+            .room_repository
+            .fetch_joined_members_profiles(room_id)
+            .map_err(|_| RoomsApplicationError::Internal)?;
+        for member_profile in joined_member_profiles {
+            let user_identifier = UserIdentifier::try_from(member_profile.user_id)
+                .map_err(|_| RoomsApplicationError::Internal)?;
+            let controlled = self
+                .authorization_service
+                .session_controls_user_identifier(access_session, &user_identifier)
+                .map_err(|_| RoomsApplicationError::Internal)?;
+            if controlled {
+                return Ok(());
+            }
+        }
+
+        Err(RoomsApplicationError::Forbidden)
+    }
+
     fn append_membership_change(
         &self,
         room_id: String,
@@ -633,6 +780,21 @@ impl RoomsService {
     }
 }
 
+fn history_visibility_from_timeline_event(event: &RoomTimelineEvent) -> Option<String> {
+    event
+        .content
+        .get("history_visibility")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
+
+fn room_membership_from_timeline_event(event: &RoomTimelineEvent) -> Option<&str> {
+    event
+        .content
+        .get("membership")
+        .and_then(serde_json::Value::as_str)
+}
+
 fn map_room_persistence_error(error: DomainError, room_id: String) -> RoomsApplicationError {
     match error {
         DomainError::AlreadyExists => RoomsApplicationError::RoomInUse,
@@ -661,6 +823,27 @@ fn parse_room_alias_localpart_for_local_server<'a>(
         return None;
     }
     Some(localpart)
+}
+
+fn room_membership_from_event(event: &RoomStateEvent) -> Option<RoomMembershipFilter> {
+    let membership = event.content.get("membership")?.as_str()?;
+    RoomMembershipFilter::parse(membership)
+}
+
+fn parse_room_stream_position_token(token: &str) -> Result<i64, RoomsApplicationError> {
+    if let Ok(value) = token.parse::<i64>() {
+        return Ok(value);
+    }
+
+    let first_numeric_fragment = token
+        .trim_start_matches(|character: char| character.is_ascii_alphabetic())
+        .split(|character: char| !character.is_ascii_digit())
+        .find(|fragment| !fragment.is_empty())
+        .ok_or(RoomsApplicationError::InvalidParameter)?;
+
+    first_numeric_fragment
+        .parse::<i64>()
+        .map_err(|_| RoomsApplicationError::InvalidParameter)
 }
 
 #[allow(dead_code)]

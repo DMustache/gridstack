@@ -81,6 +81,39 @@ pub trait RoomRepository: Send + Sync {
     ) -> Result<Option<String>, DomainError>;
 
     fn fetch_room_state_events(&self, room_id: &str) -> Result<Vec<RoomStateEvent>, DomainError>;
+    fn fetch_room_member_state_events_at_stream_position(
+        &self,
+        room_id: &str,
+        stream_position: i64,
+    ) -> Result<Vec<RoomStateEvent>, DomainError>;
+    fn fetch_room_history_visibility_at_stream_position(
+        &self,
+        room_id: &str,
+        stream_position: i64,
+    ) -> Result<Option<String>, DomainError>;
+    fn fetch_room_history_visibility_before_stream_position(
+        &self,
+        room_id: &str,
+        stream_position: i64,
+    ) -> Result<Option<String>, DomainError>;
+    fn fetch_user_membership_at_stream_position(
+        &self,
+        room_id: &str,
+        user_id: &str,
+        stream_position: i64,
+    ) -> Result<Option<String>, DomainError>;
+    fn fetch_user_membership_before_stream_position(
+        &self,
+        room_id: &str,
+        user_id: &str,
+        stream_position: i64,
+    ) -> Result<Option<String>, DomainError>;
+    fn user_joined_since_stream_position(
+        &self,
+        room_id: &str,
+        user_id: &str,
+        stream_position: i64,
+    ) -> Result<bool, DomainError>;
 
     fn fetch_room_timeline_event_by_id(
         &self,
@@ -528,12 +561,16 @@ impl RoomRepository for RoomPersistence {
 
         let rows = room_membership_projection::table
             .inner_join(
-                room_events::table.on(room_events::event_id.eq(room_membership_projection::event_id)),
+                room_events::table
+                    .on(room_events::event_id.eq(room_membership_projection::event_id)),
             )
             .filter(room_membership_projection::room_id.eq(room_id))
             .filter(room_membership_projection::membership.eq("join"))
             .order(room_membership_projection::user_id.asc())
-            .select((room_membership_projection::user_id, room_events::content_json))
+            .select((
+                room_membership_projection::user_id,
+                room_events::content_json,
+            ))
             .load::<(String, serde_json::Value)>(&mut connection)
             .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
 
@@ -677,12 +714,221 @@ impl RoomRepository for RoomPersistence {
             .collect())
     }
 
+    fn fetch_room_member_state_events_at_stream_position(
+        &self,
+        room_id: &str,
+        stream_position: i64,
+    ) -> Result<Vec<RoomStateEvent>, DomainError> {
+        use schema::{room_events, room_sync_stream};
+
+        let mut connection = self
+            .connection_pool
+            .get()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        let rows = room_sync_stream::table
+            .inner_join(room_events::table.on(room_events::event_id.eq(room_sync_stream::event_id)))
+            .filter(room_sync_stream::room_id.eq(room_id))
+            .filter(room_sync_stream::stream_position.le(stream_position))
+            .filter(room_events::event_type.eq("m.room.member"))
+            .filter(room_events::state_key.is_not_null())
+            .distinct_on(room_events::state_key)
+            .order((
+                room_events::state_key.asc(),
+                room_sync_stream::stream_position.desc(),
+            ))
+            .select((
+                room_events::content_json,
+                room_events::event_id,
+                room_events::origin_server_ts,
+                room_events::room_id,
+                room_events::sender_user_id,
+                room_events::state_key,
+                room_events::event_type,
+                room_events::unsigned_json,
+            ))
+            .load::<(
+                serde_json::Value,
+                String,
+                i64,
+                String,
+                String,
+                Option<String>,
+                String,
+                Option<serde_json::Value>,
+            )>(&mut connection)
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(
+                    content,
+                    event_id,
+                    origin_server_ts,
+                    room_id,
+                    sender,
+                    state_key,
+                    event_type,
+                    unsigned,
+                )| RoomStateEvent {
+                    content,
+                    event_id,
+                    origin_server_ts,
+                    room_id,
+                    sender,
+                    state_key: state_key.unwrap_or_default(),
+                    event_type,
+                    unsigned,
+                },
+            )
+            .collect())
+    }
+
+    fn fetch_room_history_visibility_at_stream_position(
+        &self,
+        room_id: &str,
+        stream_position: i64,
+    ) -> Result<Option<String>, DomainError> {
+        use schema::{room_events, room_sync_stream};
+
+        let mut connection = self
+            .connection_pool
+            .get()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        let row = room_sync_stream::table
+            .inner_join(room_events::table.on(room_events::event_id.eq(room_sync_stream::event_id)))
+            .filter(room_sync_stream::room_id.eq(room_id))
+            .filter(room_sync_stream::stream_position.le(stream_position))
+            .filter(room_events::event_type.eq("m.room.history_visibility"))
+            .filter(room_events::state_key.eq(""))
+            .order(room_sync_stream::stream_position.desc())
+            .select(room_events::history_visibility)
+            .first::<Option<String>>(&mut connection)
+            .optional()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        Ok(row.flatten())
+    }
+
+    fn fetch_room_history_visibility_before_stream_position(
+        &self,
+        room_id: &str,
+        stream_position: i64,
+    ) -> Result<Option<String>, DomainError> {
+        use schema::{room_events, room_sync_stream};
+
+        let mut connection = self
+            .connection_pool
+            .get()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        let row = room_sync_stream::table
+            .inner_join(room_events::table.on(room_events::event_id.eq(room_sync_stream::event_id)))
+            .filter(room_sync_stream::room_id.eq(room_id))
+            .filter(room_sync_stream::stream_position.lt(stream_position))
+            .filter(room_events::event_type.eq("m.room.history_visibility"))
+            .filter(room_events::state_key.eq(""))
+            .order(room_sync_stream::stream_position.desc())
+            .select(room_events::history_visibility)
+            .first::<Option<String>>(&mut connection)
+            .optional()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        Ok(row.flatten())
+    }
+
+    fn fetch_user_membership_at_stream_position(
+        &self,
+        room_id: &str,
+        user_id: &str,
+        stream_position: i64,
+    ) -> Result<Option<String>, DomainError> {
+        use schema::{room_events, room_sync_stream};
+
+        let mut connection = self
+            .connection_pool
+            .get()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        let row = room_sync_stream::table
+            .inner_join(room_events::table.on(room_events::event_id.eq(room_sync_stream::event_id)))
+            .filter(room_sync_stream::room_id.eq(room_id))
+            .filter(room_sync_stream::stream_position.le(stream_position))
+            .filter(room_events::event_type.eq("m.room.member"))
+            .filter(room_events::state_key.eq(user_id))
+            .order(room_sync_stream::stream_position.desc())
+            .select(room_events::membership)
+            .first::<Option<String>>(&mut connection)
+            .optional()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        Ok(row.flatten())
+    }
+
+    fn fetch_user_membership_before_stream_position(
+        &self,
+        room_id: &str,
+        user_id: &str,
+        stream_position: i64,
+    ) -> Result<Option<String>, DomainError> {
+        use schema::{room_events, room_sync_stream};
+
+        let mut connection = self
+            .connection_pool
+            .get()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        let row = room_sync_stream::table
+            .inner_join(room_events::table.on(room_events::event_id.eq(room_sync_stream::event_id)))
+            .filter(room_sync_stream::room_id.eq(room_id))
+            .filter(room_sync_stream::stream_position.lt(stream_position))
+            .filter(room_events::event_type.eq("m.room.member"))
+            .filter(room_events::state_key.eq(user_id))
+            .order(room_sync_stream::stream_position.desc())
+            .select(room_events::membership)
+            .first::<Option<String>>(&mut connection)
+            .optional()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        Ok(row.flatten())
+    }
+
+    fn user_joined_since_stream_position(
+        &self,
+        room_id: &str,
+        user_id: &str,
+        stream_position: i64,
+    ) -> Result<bool, DomainError> {
+        use schema::{room_events, room_sync_stream};
+
+        let mut connection = self
+            .connection_pool
+            .get()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        let found = room_sync_stream::table
+            .inner_join(room_events::table.on(room_events::event_id.eq(room_sync_stream::event_id)))
+            .filter(room_sync_stream::room_id.eq(room_id))
+            .filter(room_sync_stream::stream_position.gt(stream_position))
+            .filter(room_events::event_type.eq("m.room.member"))
+            .filter(room_events::state_key.eq(user_id))
+            .filter(room_events::membership.eq("join"))
+            .select(room_sync_stream::stream_position)
+            .first::<i64>(&mut connection)
+            .optional()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        Ok(found.is_some())
+    }
+
     fn fetch_room_timeline_event_by_id(
         &self,
         room_id: &str,
         event_id: &str,
     ) -> Result<Option<RoomTimelineEvent>, DomainError> {
-        use schema::{room_events, room_timeline_projection};
+        use schema::{room_events, room_sync_stream};
 
         let mut connection = self
             .connection_pool
@@ -690,12 +936,10 @@ impl RoomRepository for RoomPersistence {
             .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
 
         let row = room_events::table
-            .left_outer_join(
-                room_timeline_projection::table.on(
-                    room_timeline_projection::event_id
-                        .eq(room_events::event_id)
-                        .and(room_timeline_projection::room_id.eq(room_events::room_id)),
-                ),
+            .inner_join(
+                room_sync_stream::table.on(room_sync_stream::event_id
+                    .eq(room_events::event_id)
+                    .and(room_sync_stream::room_id.eq(room_events::room_id))),
             )
             .filter(room_events::room_id.eq(room_id))
             .filter(room_events::event_id.eq(event_id))
@@ -708,7 +952,7 @@ impl RoomRepository for RoomPersistence {
                 room_events::state_key,
                 room_events::event_type,
                 room_events::unsigned_json,
-                room_timeline_projection::stream_position.nullable(),
+                room_sync_stream::stream_position,
             ))
             .first::<(
                 serde_json::Value,
@@ -719,7 +963,7 @@ impl RoomRepository for RoomPersistence {
                 Option<String>,
                 String,
                 Option<serde_json::Value>,
-                Option<i64>,
+                i64,
             )>(&mut connection)
             .optional()
             .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
@@ -744,7 +988,7 @@ impl RoomRepository for RoomPersistence {
                 state_key,
                 event_type,
                 unsigned,
-                stream_position: stream_position.unwrap_or_default(),
+                stream_position,
             },
         ))
     }

@@ -33,6 +33,8 @@ pub struct AuthenticationConfiguration {
     pub refresh_token_expiry_seconds: u64,
     pub json_web_token_secret: String,
     pub password_pepper: String,
+    #[serde(default)]
+    pub appservices: Vec<AppserviceConfiguration>,
 }
 
 impl AuthenticationConfiguration {
@@ -43,6 +45,15 @@ impl AuthenticationConfiguration {
     pub const fn access_token_expiry_as_milliseconds(&self) -> u64 {
         self.access_token_expiry_seconds * 1000
     }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct AppserviceConfiguration {
+    pub id: String,
+    pub as_token: String,
+    pub sender_localpart: String,
+    #[serde(default)]
+    pub controlled_user_id_patterns: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

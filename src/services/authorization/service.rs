@@ -1,3 +1,4 @@
+use regex::Regex;
 use serde_json::json;
 use std::{
     collections::HashSet,
@@ -24,7 +25,7 @@ use crate::{
 };
 
 use super::{
-    entities::{AccessToken, ExistingUserIdentifier, LoginType, UserAccount},
+    entities::{AccessToken, ExistingUserIdentifier, LoginType, SessionPrincipal, UserAccount},
     errors::AuthorizationApplicationError,
     handlers::{
         check_username_available::CheckUsernameAvailableView,
@@ -114,6 +115,9 @@ impl AuthorizationService {
         username: String,
     ) -> Result<CheckUsernameAvailableView, AuthorizationApplicationError> {
         let user_identifier = self.try_parse_user_id(&username)?;
+        if self.is_user_identifier_exclusive_to_appservice(&user_identifier)? {
+            return Err(AuthorizationApplicationError::Exclusive);
+        }
         Ok(CheckUsernameAvailableView {
             available: !self.user_repository.user_exists(&user_identifier),
         })
@@ -171,6 +175,9 @@ impl AuthorizationService {
             .ok_or(AuthorizationApplicationError::InvalidCredentials)?;
 
         let user_identifier = self.try_parse_user_id(&username)?;
+        if self.is_user_identifier_exclusive_to_appservice(&user_identifier)? {
+            return Err(AuthorizationApplicationError::Exclusive);
+        }
         if self.user_repository.user_exists(&user_identifier) {
             return Err(AuthorizationApplicationError::UserInUse);
         }
@@ -368,6 +375,10 @@ impl AuthorizationService {
         &self,
         access_token: &AccessToken,
     ) -> Result<AccessSessionStorageUnit, AuthorizationApplicationError> {
+        if let Some(appservice_session) = self.authenticate_appservice_token(access_token)? {
+            return Ok(appservice_session);
+        }
+
         if !self.json_web_token_adapter.is_token_valid(
             access_token.as_str(),
             &self.configuration.json_web_token_secret,
@@ -399,11 +410,45 @@ impl AuthorizationService {
         access_session: &AccessSessionStorageUnit,
         requested_user_identifier: &UserIdentifier,
     ) -> Result<super::entities::AuthorizedUserIdentifier, AuthorizationApplicationError> {
-        if access_session.user_identifier().as_user_identifier() != requested_user_identifier {
-            return Err(AuthorizationApplicationError::Forbidden);
+        match access_session.principal() {
+            SessionPrincipal::User => {
+                if access_session.user_identifier().as_user_identifier()
+                    != requested_user_identifier
+                {
+                    return Err(AuthorizationApplicationError::Forbidden);
+                }
+            }
+            SessionPrincipal::Appservice {
+                controlled_user_id_patterns,
+                ..
+            } => {
+                if !self.user_identifier_matches_any_pattern(
+                    requested_user_identifier,
+                    controlled_user_id_patterns,
+                )? {
+                    return Err(AuthorizationApplicationError::Forbidden);
+                }
+            }
         }
 
         Ok(access_session.user_identifier().clone())
+    }
+
+    pub fn session_controls_user_identifier(
+        &self,
+        access_session: &AccessSessionStorageUnit,
+        user_identifier: &UserIdentifier,
+    ) -> Result<bool, AuthorizationApplicationError> {
+        match access_session.principal() {
+            SessionPrincipal::User => {
+                Ok(access_session.user_identifier().as_user_identifier() == user_identifier)
+            }
+            SessionPrincipal::Appservice {
+                controlled_user_id_patterns,
+                ..
+            } => self
+                .user_identifier_matches_any_pattern(user_identifier, controlled_user_id_patterns),
+        }
     }
 
     fn try_parse_user_id(
@@ -490,5 +535,84 @@ impl AuthorizationService {
         if let Ok(mut sessions) = self.registration_sessions.write() {
             sessions.remove(session_identifier);
         }
+    }
+
+    fn authenticate_appservice_token(
+        &self,
+        access_token: &AccessToken,
+    ) -> Result<Option<AccessSessionStorageUnit>, AuthorizationApplicationError> {
+        let appservice = self
+            .configuration
+            .appservices
+            .iter()
+            .find(|candidate| candidate.as_token == access_token.as_str());
+
+        let Some(appservice) = appservice else {
+            return Ok(None);
+        };
+
+        if appservice.id.trim().is_empty() || appservice.sender_localpart.trim().is_empty() {
+            return Err(AuthorizationApplicationError::Unauthorized);
+        }
+
+        let sender_identifier = UserIdentifier::from_localpart_and_server(
+            appservice.sender_localpart.trim(),
+            self.server_name.as_str(),
+        )
+        .ok_or(AuthorizationApplicationError::Unauthorized)?;
+        if !self.user_repository.user_exists(&sender_identifier) {
+            return Err(AuthorizationApplicationError::Unauthorized);
+        }
+
+        let expires_at_seconds =
+            self.expiry_from_now(self.configuration.access_token_expiry_seconds)?;
+        let access_session = AccessSession::new_appservice(
+            access_token.clone(),
+            super::entities::AuthorizedUserIdentifier::new(ExistingUserIdentifier::new(
+                sender_identifier,
+            )),
+            DeviceId::default(),
+            expires_at_seconds,
+            super::entities::AppserviceIdentity {
+                appservice_id: appservice.id.clone(),
+                controlled_user_id_patterns: appservice.controlled_user_id_patterns.clone(),
+            },
+        );
+
+        Ok(Some(AccessSessionStorageUnit::from(access_session)))
+    }
+
+    fn is_user_identifier_exclusive_to_appservice(
+        &self,
+        user_identifier: &UserIdentifier,
+    ) -> Result<bool, AuthorizationApplicationError> {
+        for appservice in &self.configuration.appservices {
+            if self.user_identifier_matches_any_pattern(
+                user_identifier,
+                &appservice.controlled_user_id_patterns,
+            )? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn user_identifier_matches_any_pattern(
+        &self,
+        user_identifier: &UserIdentifier,
+        patterns: &[String],
+    ) -> Result<bool, AuthorizationApplicationError> {
+        for pattern in patterns {
+            let trimmed_pattern = pattern.trim();
+            if trimmed_pattern.is_empty() {
+                continue;
+            }
+            let regex =
+                Regex::new(trimmed_pattern).map_err(|_| AuthorizationApplicationError::Internal)?;
+            if regex.is_match(user_identifier.as_str()) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }

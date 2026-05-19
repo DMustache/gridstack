@@ -1,6 +1,8 @@
 use crate::{
     infrastructure::device_id::DeviceId,
-    services::authorization::entities::{AccessSession, AccessToken, AuthorizedUserIdentifier},
+    services::authorization::entities::{
+        AccessSession, AccessToken, AuthorizedUserIdentifier, SessionPrincipal,
+    },
 };
 
 #[derive(Clone)]
@@ -9,6 +11,7 @@ pub struct AccessSessionStorageUnit {
     user_identifier: AuthorizedUserIdentifier,
     device_id: DeviceId,
     expires_at_seconds: i64,
+    principal: SessionPrincipal,
 }
 
 impl AccessSessionStorageUnit {
@@ -28,17 +31,23 @@ impl AccessSessionStorageUnit {
         self.expires_at_seconds
     }
 
+    pub const fn principal(&self) -> &SessionPrincipal {
+        &self.principal
+    }
+
     pub(in crate::services::authorization) const fn new(
         access_token: AccessToken,
         user_identifier: AuthorizedUserIdentifier,
         device_id: DeviceId,
         expires_at_seconds: i64,
+        principal: SessionPrincipal,
     ) -> Self {
         Self {
             access_token,
             user_identifier,
             device_id,
             expires_at_seconds,
+            principal,
         }
     }
 }
@@ -50,6 +59,7 @@ impl From<AccessSession> for AccessSessionStorageUnit {
             user_identifier: value.user_identifier().clone(),
             device_id: value.device_id().clone(),
             expires_at_seconds: value.expires_at_seconds(),
+            principal: value.principal().clone(),
         }
     }
 }

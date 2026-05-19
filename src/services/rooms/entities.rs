@@ -991,6 +991,50 @@ pub struct RoomEventFilter {
     pub contains_url: Option<bool>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoomMembershipFilter {
+    Join,
+    Invite,
+    Knock,
+    Leave,
+    Ban,
+}
+
+impl RoomMembershipFilter {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "join" => Some(Self::Join),
+            "invite" => Some(Self::Invite),
+            "knock" => Some(Self::Knock),
+            "leave" => Some(Self::Leave),
+            "ban" => Some(Self::Ban),
+            _ => None,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Join => "join",
+            Self::Invite => "invite",
+            Self::Knock => "knock",
+            Self::Leave => "leave",
+            Self::Ban => "ban",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct GetRoomMembersCommand {
+    pub at_token: Option<String>,
+    pub membership: Option<RoomMembershipFilter>,
+    pub not_membership: Option<RoomMembershipFilter>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RoomMembersChunk {
+    pub chunk: Vec<RoomStateEvent>,
+}
+
 impl From<RoomStateEvent> for RoomStateEventView {
     fn from(value: RoomStateEvent) -> Self {
         Self {

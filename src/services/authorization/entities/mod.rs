@@ -85,6 +85,23 @@ impl AuthorizedUserIdentifier {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AppserviceIdentity {
+    pub appservice_id: String,
+    pub controlled_user_id_patterns: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionPrincipal {
+    #[default]
+    User,
+    Appservice {
+        appservice_id: String,
+        controlled_user_id_patterns: Vec<String>,
+    },
+}
+
 /// Available via `Extension(access_session)`: `Extension<AccessSession>` by layer
 /// ```rust
 /// .layer(middleware::from_extractor_with_state::<
@@ -98,6 +115,8 @@ pub struct AccessSession {
     user_identifier: AuthorizedUserIdentifier,
     device_id: DeviceId,
     expires_at_seconds: i64,
+    #[serde(default)]
+    principal: SessionPrincipal,
 }
 
 impl AccessSession {
@@ -112,6 +131,26 @@ impl AccessSession {
             user_identifier,
             device_id,
             expires_at_seconds,
+            principal: SessionPrincipal::User,
+        }
+    }
+
+    pub(in crate::services::authorization) fn new_appservice(
+        access_token: AccessToken,
+        user_identifier: AuthorizedUserIdentifier,
+        device_id: DeviceId,
+        expires_at_seconds: i64,
+        appservice_identity: AppserviceIdentity,
+    ) -> Self {
+        Self {
+            access_token,
+            user_identifier,
+            device_id,
+            expires_at_seconds,
+            principal: SessionPrincipal::Appservice {
+                appservice_id: appservice_identity.appservice_id,
+                controlled_user_id_patterns: appservice_identity.controlled_user_id_patterns,
+            },
         }
     }
 
@@ -129,6 +168,10 @@ impl AccessSession {
 
     pub const fn expires_at_seconds(&self) -> i64 {
         self.expires_at_seconds
+    }
+
+    pub const fn principal(&self) -> &SessionPrincipal {
+        &self.principal
     }
 }
 

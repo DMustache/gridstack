@@ -23,7 +23,8 @@ use crate::{
     services::{
         authorization::{
             entities::{
-                AccessToken, AuthorizedUserIdentifier, ExistingUserIdentifier, UserAccount,
+                AccessToken, AuthorizedUserIdentifier, ExistingUserIdentifier, SessionPrincipal,
+                UserAccount,
             },
             persistence::{
                 access_session_storage_unit::AccessSessionStorageUnit,
@@ -179,6 +180,7 @@ impl InMemorySessionRepository {
                         user_identifier,
                         device_id,
                         expires_at_seconds,
+                        SessionPrincipal::User,
                     );
                     sessions_by_token.insert(access_token.into_inner(), storage);
                 }
