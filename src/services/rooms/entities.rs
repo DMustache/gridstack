@@ -8,7 +8,7 @@ use thiserror::Error;
 use crate::infrastructure::{server_name::ServerName, user_identifier::UserIdentifier};
 use crate::services::authorization::entities::ExistingUserIdentifier;
 use crate::services::events::entities::{
-    EventIntent, MatrixEventContent, StateEventKind, SupportedRoomVersion,
+    EventIntent, MatrixEventContent, MessageEventKind, StateEventKind, SupportedRoomVersion,
 };
 
 #[derive(Clone, Debug, Deserialize)]
@@ -314,6 +314,39 @@ pub(crate) fn parse_room_state_event_content(
     })
 }
 
+pub(crate) fn parse_room_message_event_content(
+    event_type: &str,
+    content: Value,
+) -> Result<(MessageEventKind, MatrixEventContent), ()> {
+    let message_event_kind = event_type.parse::<MessageEventKind>()?;
+    let message_content = match &message_event_kind {
+        MessageEventKind::RoomMessage => {
+            let parsed: RoomMessageEventContent = serde_json::from_value(content).map_err(|_| ())?;
+            if parsed.body.trim().is_empty() || parsed.msgtype.trim().is_empty() {
+                return Err(());
+            }
+            MatrixEventContent::RoomMessage {
+                body: parsed.body,
+                msgtype: parsed.msgtype,
+            }
+        }
+        MessageEventKind::RoomRedaction => {
+            let parsed: RoomRedactionEventContent =
+                serde_json::from_value(content).map_err(|_| ())?;
+            if parsed.redacts.trim().is_empty() {
+                return Err(());
+            }
+            MatrixEventContent::RoomRedaction {
+                redacts: parsed.redacts,
+                reason: parsed.reason,
+            }
+        }
+        MessageEventKind::Custom(_) => MatrixEventContent::CustomJson(content),
+    };
+
+    Ok((message_event_kind, message_content))
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct RoomPredecessorStateContent {
     event_id: String,
@@ -443,6 +476,18 @@ struct RoomThirdPartyInviteStateContent {
     public_key: String,
     medium: String,
     id_server: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct RoomMessageEventContent {
+    body: String,
+    msgtype: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct RoomRedactionEventContent {
+    redacts: String,
+    reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]

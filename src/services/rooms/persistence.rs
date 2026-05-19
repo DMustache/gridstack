@@ -60,6 +60,13 @@ pub trait RoomRepository: Send + Sync {
         event_write_contract: &EventWriteContract,
     ) -> Result<(), DomainError>;
 
+    fn fetch_room_event_id_by_transaction_id(
+        &self,
+        room_id: &str,
+        sender_user_id: &str,
+        transaction_id: &str,
+    ) -> Result<Option<String>, DomainError>;
+
     fn fetch_room_state_events(&self, room_id: &str) -> Result<Vec<RoomStateEvent>, DomainError>;
 
     fn fetch_room_state_event_by_type_and_key(
@@ -493,6 +500,29 @@ impl RoomRepository for RoomPersistence {
         };
 
         persist_event_batch(&self.connection_pool, &event_batch_write_contract)
+    }
+
+    fn fetch_room_event_id_by_transaction_id(
+        &self,
+        room_id: &str,
+        sender_user_id: &str,
+        transaction_id: &str,
+    ) -> Result<Option<String>, DomainError> {
+        use schema::room_idempotency_records;
+
+        let mut connection = self
+            .connection_pool
+            .get()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        room_idempotency_records::table
+            .filter(room_idempotency_records::room_id.eq(room_id))
+            .filter(room_idempotency_records::sender_user_id.eq(sender_user_id))
+            .filter(room_idempotency_records::transaction_id.eq(transaction_id))
+            .select(room_idempotency_records::event_id)
+            .first::<String>(&mut connection)
+            .optional()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))
     }
 
     fn fetch_room_state_events(&self, room_id: &str) -> Result<Vec<RoomStateEvent>, DomainError> {

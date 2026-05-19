@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use strum::{AsRefStr, Display, EnumString};
+use strum::{Display, EnumString};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, EnumString, Display)]
 pub enum SupportedRoomVersion {
@@ -154,12 +154,45 @@ impl std::str::FromStr for StateEventKind {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, EnumString, Display, AsRefStr)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MessageEventKind {
-    #[strum(serialize = "m.room.message")]
     RoomMessage,
-    #[strum(serialize = "m.room.redaction")]
     RoomRedaction,
+    Custom(String),
+}
+
+impl MessageEventKind {
+    pub fn as_event_type(&self) -> &str {
+        match self {
+            Self::RoomMessage => "m.room.message",
+            Self::RoomRedaction => "m.room.redaction",
+            Self::Custom(event_type) => event_type.as_str(),
+        }
+    }
+}
+
+impl AsRef<str> for MessageEventKind {
+    fn as_ref(&self) -> &str {
+        self.as_event_type()
+    }
+}
+
+impl std::fmt::Display for MessageEventKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.as_event_type())
+    }
+}
+
+impl std::str::FromStr for MessageEventKind {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Ok(match value {
+            "m.room.message" => Self::RoomMessage,
+            "m.room.redaction" => Self::RoomRedaction,
+            _ => Self::Custom(value.to_owned()),
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
