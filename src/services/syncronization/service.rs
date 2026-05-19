@@ -152,6 +152,7 @@ impl SyncronizationService {
             }
             let room_entry = self.build_room_sync_entry(
                 &membership.room_id,
+                authorized_user_identifier.as_str(),
                 since_stream_position,
                 request.full_state,
                 request.timeline_limit,
@@ -216,6 +217,7 @@ impl SyncronizationService {
     fn build_room_sync_entry(
         &self,
         room_identifier: &str,
+        user_identifier: &str,
         since_stream_position: i64,
         full_state: bool,
         timeline_limit: usize,
@@ -252,6 +254,23 @@ impl SyncronizationService {
             .filter_repository
             .fetch_room_timeline_prev_batch(room_identifier, since_stream_position)
             .map_err(Self::map_domain_error)?;
+        let ephemeral_events = self
+            .filter_repository
+            .fetch_room_ephemeral_receipt_events_since(
+                room_identifier,
+                user_identifier,
+                since_stream_position,
+            )
+            .map_err(Self::map_domain_error)?;
+        let room_account_data_events = self
+            .filter_repository
+            .fetch_room_account_data_events(
+                room_identifier,
+                user_identifier,
+                since_stream_position,
+                full_state,
+            )
+            .map_err(Self::map_domain_error)?;
 
         Ok(json!({
             "timeline": {
@@ -268,8 +287,8 @@ impl SyncronizationService {
                     .map(state_event_to_json)
                     .collect::<Vec<_>>()
             },
-            "ephemeral": { "events": [] },
-            "account_data": { "events": [] },
+            "ephemeral": { "events": ephemeral_events },
+            "account_data": { "events": room_account_data_events },
             "unread_notifications": {
                 "highlight_count": 0,
                 "notification_count": 0

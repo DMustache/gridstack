@@ -305,6 +305,7 @@ pub enum MatrixEventContent {
     RoomMessage {
         body: String,
         msgtype: String,
+        thread_root_event_id: Option<String>,
     },
     RoomRedaction {
         redacts: String,
@@ -396,7 +397,20 @@ impl MatrixEventContent {
                 "medium": medium,
                 "id_server": id_server,
             }),
-            Self::RoomMessage { body, msgtype } => json!({ "body": body, "msgtype": msgtype }),
+            Self::RoomMessage {
+                body,
+                msgtype,
+                thread_root_event_id,
+            } => {
+                let mut value = json!({ "body": body, "msgtype": msgtype });
+                if let Some(thread_root_event_id) = thread_root_event_id.as_ref() {
+                    value["m.relates_to"] = json!({
+                        "rel_type": "m.thread",
+                        "event_id": thread_root_event_id,
+                    });
+                }
+                value
+            }
             Self::RoomRedaction { redacts, reason } => {
                 let mut value = json!({ "redacts": redacts });
                 if let Some(reason) = reason.as_ref() {

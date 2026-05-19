@@ -20,6 +20,7 @@ use crate::services::{
             joined_members::JoinedMembersView,
             joined_rooms::JoinedRoomsView,
             leave_room::{LeaveRoomCommand, LeaveRoomInfo, LeaveRoomView},
+            send_receipt::{SendReceiptInfo, SendReceiptView},
             send_room_event::SendRoomEventView,
             set_room_state_with_key::SetRoomStateWithKeyView,
         },
@@ -38,6 +39,7 @@ pub mod join_room;
 pub mod joined_members;
 pub mod joined_rooms;
 pub mod leave_room;
+pub mod send_receipt;
 pub mod send_room_event;
 pub mod set_room_state_with_key;
 
@@ -176,6 +178,18 @@ pub enum SendRoomEventResponse {
     #[matrix(status = 400, error = [(matrix_error = "M_INVALID_PARAM", from = RoomsApplicationError::InvalidParameter), (matrix_error = "M_BAD_JSON", from = RoomsApplicationError::InvalidRoomState), (matrix_error = "M_BAD_ALIAS", from = RoomsApplicationError::BadAlias)])]
     BadRequest(Json<MatrixErrorResponse>),
     #[matrix(status = 403, error = [(matrix_error = "M_FORBIDDEN", from = RoomsApplicationError::Forbidden), (matrix_error = "M_INVITE_BLOCKED", from = RoomsApplicationError::InviteBlocked)])]
+    Forbidden(Json<MatrixErrorResponse>),
+    #[matrix(status = 500, error = [(matrix_error = "M_UNKNOWN", from = RoomsApplicationError::Internal)])]
+    Internal(Json<MatrixErrorResponse>),
+}
+
+#[derive(IntoResponseEnum)]
+pub enum SendReceiptResponse {
+    #[matrix(status = 200)]
+    Ok(Json<SendReceiptView>),
+    #[matrix(status = 400, error = [(matrix_error = "M_INVALID_PARAM", from = RoomsApplicationError::InvalidParameter)])]
+    BadRequest(Json<MatrixErrorResponse>),
+    #[matrix(status = 403, error = [(matrix_error = "M_FORBIDDEN", from = RoomsApplicationError::Forbidden)])]
     Forbidden(Json<MatrixErrorResponse>),
     #[matrix(status = 500, error = [(matrix_error = "M_UNKNOWN", from = RoomsApplicationError::Internal)])]
     Internal(Json<MatrixErrorResponse>),
@@ -534,6 +548,34 @@ pub async fn send_room_message_event(
                 info!(error = %error_kind, "send room event rejected");
             }
             SendRoomEventResponse::from_mapped_error(error_kind)
+        }
+    }
+}
+
+pub async fn send_room_receipt(
+    Path((room_id, receipt_type, event_id)): Path<(String, String, String)>,
+    State(application_state): State<ApplicationState>,
+    Extension(access_session): Extension<AccessSessionStorageUnit>,
+    Json(request): Json<SendReceiptInfo>,
+) -> SendReceiptResponse {
+    let command = match (receipt_type.as_str(), event_id, request).try_into() {
+        Ok(command) => command,
+        Err(error_kind) => return SendReceiptResponse::from_mapped_error(error_kind),
+    };
+
+    match application_state
+        .rooms_service
+        .send_room_receipt(access_session.user_identifier(), room_id, command)
+        .map(|()| SendReceiptView::default())
+    {
+        Ok(view) => SendReceiptResponse::Ok(Json(view)),
+        Err(error_kind) => {
+            if matches!(error_kind, RoomsApplicationError::Internal) {
+                error!("send receipt failed with internal error");
+            } else {
+                info!(error = %error_kind, "send receipt rejected");
+            }
+            SendReceiptResponse::from_mapped_error(error_kind)
         }
     }
 }

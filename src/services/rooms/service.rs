@@ -24,8 +24,9 @@ use crate::{
                 JoinRoomCommand, JoinedMembers, JoinedRoom, JoinedRoomMember, JoinedRooms,
                 LeaveRoomCommand, LeftRoom, RoomCreationFlow, RoomFactoryEvent, RoomIdentifier,
                 RoomMembersChunk, RoomMembershipFilter, RoomMessageDirection, RoomMessagesPage,
-                RoomStateEvent, RoomTimelineEvent, RoomValidationError, ValidatedCreateRoomInput,
-                parse_room_message_event_content, parse_room_state_event_content,
+                RoomReceiptType, RoomStateEvent, RoomTimelineEvent, RoomValidationError,
+                SendReceiptCommand, ValidatedCreateRoomInput, parse_room_message_event_content,
+                parse_room_state_event_content,
             },
             errors::RoomsApplicationError,
             persistence::RoomRepository,
@@ -576,6 +577,61 @@ impl RoomsService {
 
         Ok(event_id)
     }
+
+    pub fn send_room_receipt(
+        &self,
+        user_id: &AuthorizedUserIdentifier,
+        room_id: String,
+        command: SendReceiptCommand,
+    ) -> Result<(), RoomsApplicationError> {
+        self.require_room_identifier(&room_id)?;
+
+        let event_id = command.event_id.trim();
+        if event_id.is_empty() || !event_id.starts_with('$') {
+            return Err(RoomsApplicationError::InvalidParameter);
+        }
+
+        let requesting_user_id = user_id.as_existing_user_identifier();
+        self.require_joined_membership(&room_id, requesting_user_id)?;
+
+        let thread_id =
+            validate_receipt_thread_id(command.receipt_type, command.thread_id.as_deref())?;
+
+        let event_exists_in_room = self
+            .room_repository
+            .fetch_room_timeline_event_by_id(&room_id, event_id)
+            .map_err(|_| RoomsApplicationError::Internal)?
+            .is_some();
+        if !event_exists_in_room {
+            return Err(RoomsApplicationError::InvalidParameter);
+        }
+        if let Some(thread_id) = thread_id.as_deref() {
+            let event_matches_thread = self
+                .room_repository
+                .room_event_matches_thread(&room_id, event_id, thread_id)
+                .map_err(|_| RoomsApplicationError::Internal)?;
+            if !event_matches_thread {
+                return Err(RoomsApplicationError::InvalidParameter);
+            }
+        }
+
+        match command.receipt_type {
+            RoomReceiptType::FullyRead => self
+                .room_repository
+                .append_room_fully_read_marker(&room_id, requesting_user_id.as_str(), event_id)
+                .map_err(map_receipt_persistence_error),
+            RoomReceiptType::Read | RoomReceiptType::ReadPrivate => self
+                .room_repository
+                .append_room_receipt(
+                    &room_id,
+                    requesting_user_id.as_str(),
+                    command.receipt_type.as_str(),
+                    event_id,
+                    thread_id.as_deref(),
+                )
+                .map_err(map_receipt_persistence_error),
+        }
+    }
 }
 
 impl RoomsService {
@@ -795,6 +851,28 @@ fn room_membership_from_timeline_event(event: &RoomTimelineEvent) -> Option<&str
         .and_then(serde_json::Value::as_str)
 }
 
+fn validate_receipt_thread_id(
+    receipt_type: RoomReceiptType,
+    thread_id: Option<&str>,
+) -> Result<Option<String>, RoomsApplicationError> {
+    let Some(thread_id) = thread_id else {
+        return Ok(None);
+    };
+
+    let trimmed_thread_id = thread_id.trim();
+    if trimmed_thread_id.is_empty() {
+        return Err(RoomsApplicationError::InvalidParameter);
+    }
+    if matches!(receipt_type, RoomReceiptType::FullyRead) {
+        return Err(RoomsApplicationError::InvalidParameter);
+    }
+    if trimmed_thread_id != "main" && !trimmed_thread_id.starts_with('$') {
+        return Err(RoomsApplicationError::InvalidParameter);
+    }
+
+    Ok(Some(trimmed_thread_id.to_owned()))
+}
+
 fn map_room_persistence_error(error: DomainError, room_id: String) -> RoomsApplicationError {
     match error {
         DomainError::AlreadyExists => RoomsApplicationError::RoomInUse,
@@ -807,6 +885,19 @@ fn map_room_persistence_error(error: DomainError, room_id: String) -> RoomsAppli
             }
         }
         DomainError::NotFound | DomainError::InvalidCredentials => RoomsApplicationError::Internal,
+    }
+}
+
+fn map_receipt_persistence_error(error: DomainError) -> RoomsApplicationError {
+    match error {
+        DomainError::NotFound => RoomsApplicationError::InvalidParameter,
+        DomainError::AlreadyExists | DomainError::InvalidCredentials => {
+            RoomsApplicationError::Internal
+        }
+        DomainError::InvalidRequest(reason) => {
+            error!(reason, "failed to persist receipt");
+            RoomsApplicationError::Internal
+        }
     }
 }
 

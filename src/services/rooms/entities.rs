@@ -90,6 +90,44 @@ impl From<LeaveRoomRequestDto> for LeaveRoomCommand {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Default)]
+pub struct SendReceiptRequestDto {
+    pub thread_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoomReceiptType {
+    Read,
+    ReadPrivate,
+    FullyRead,
+}
+
+impl RoomReceiptType {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "m.read" => Some(Self::Read),
+            "m.read.private" => Some(Self::ReadPrivate),
+            "m.fully_read" => Some(Self::FullyRead),
+            _ => None,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "m.read",
+            Self::ReadPrivate => "m.read.private",
+            Self::FullyRead => "m.fully_read",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SendReceiptCommand {
+    pub receipt_type: RoomReceiptType,
+    pub event_id: String,
+    pub thread_id: Option<String>,
+}
+
 impl TryFrom<CreateRoomRequestDto> for CreateRoomCommand {
     type Error = RoomValidationError;
 
@@ -326,9 +364,21 @@ pub(crate) fn parse_room_message_event_content(
             if parsed.body.trim().is_empty() || parsed.msgtype.trim().is_empty() {
                 return Err(());
             }
+            let thread_root_event_id = parsed.relates_to.as_ref().and_then(|relation| {
+                if relation.relation_type.as_deref() != Some("m.thread") {
+                    return None;
+                }
+                relation
+                    .event_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|event_id| !event_id.is_empty())
+                    .map(str::to_owned)
+            });
             MatrixEventContent::RoomMessage {
                 body: parsed.body,
                 msgtype: parsed.msgtype,
+                thread_root_event_id,
             }
         }
         MessageEventKind::RoomRedaction => {
@@ -483,6 +533,15 @@ struct RoomThirdPartyInviteStateContent {
 struct RoomMessageEventContent {
     body: String,
     msgtype: String,
+    #[serde(rename = "m.relates_to")]
+    relates_to: Option<RoomMessageRelationContent>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct RoomMessageRelationContent {
+    #[serde(rename = "rel_type")]
+    relation_type: Option<String>,
+    event_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
