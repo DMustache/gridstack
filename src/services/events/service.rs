@@ -175,7 +175,10 @@ impl EventsService {
                 auth_events: auth_events.clone(),
                 depth,
                 origin_server_ts: self.clock.now_unix_milliseconds() as u64,
-                redacts: None,
+                redacts: match &event_intent.content {
+                    MatrixEventContent::RoomRedaction { redacts, .. } => Some(redacts.clone()),
+                    _ => None,
+                },
             };
 
             self.authorize_event(event_index, &event_draft, &compilation_state)?;
@@ -289,6 +292,7 @@ impl EventsService {
         event_draft: EventDraft,
         room_version: SupportedRoomVersion,
     ) -> PersistedEvent {
+        let redacts = event_draft.redacts.clone();
         let event_id = format!("${}:{}", Uuid::new_v4().simple(), self.server_name.as_str());
         PersistedEvent {
             event_id,
@@ -303,6 +307,7 @@ impl EventsService {
             auth_events: event_draft.auth_events,
             depth: event_draft.depth,
             origin_server_ts: event_draft.origin_server_ts,
+            redacts,
             hashes: EventHashes {
                 sha256: Uuid::new_v4().simple().to_string(),
             },

@@ -136,7 +136,6 @@ struct MatrixPduRoomMessageContent {
 
 #[derive(Clone, Debug, Serialize)]
 struct MatrixPduRoomRedactionContent {
-    redacts: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
 }
@@ -248,8 +247,8 @@ impl From<MatrixEventContent> for MatrixPduContent {
             MatrixEventContent::RoomMessage { body, msgtype } => {
                 Self::RoomMessage(MatrixPduRoomMessageContent { body, msgtype })
             }
-            MatrixEventContent::RoomRedaction { redacts, reason } => {
-                Self::RoomRedaction(MatrixPduRoomRedactionContent { redacts, reason })
+            MatrixEventContent::RoomRedaction { reason, .. } => {
+                Self::RoomRedaction(MatrixPduRoomRedactionContent { reason })
             }
             MatrixEventContent::CustomJson(content) => Self::Raw(content),
         }

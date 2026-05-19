@@ -12,8 +12,8 @@ use crate::{
         errors::DomainError,
         events::{
             entities::{
-                EventBatchWriteContract, MembershipContent, RoomEventFlow, RoomMemberContent,
-                StateEventKind, SupportedRoomVersion,
+                EventBatchWriteContract, MembershipContent, MessageEventKind, RoomEventFlow,
+                RoomMemberContent, StateEventKind, SupportedRoomVersion,
             },
             service::EventsService,
         },
@@ -22,6 +22,7 @@ use crate::{
                 CreateRoomCommand, CreatedRoom, GetRoomMessagesCommand, JoinRoomCommand,
                 JoinedRoom, LeaveRoomCommand, LeftRoom, RoomCreationFlow, RoomFactoryEvent,
                 RoomIdentifier, RoomMessageDirection, RoomMessagesPage, RoomStateEvent,
+                RoomTimelineEvent,
                 RoomValidationError, ValidatedCreateRoomInput, parse_room_state_event_content,
             },
             errors::RoomsApplicationError,
@@ -296,6 +297,24 @@ impl RoomsService {
         })
     }
 
+    pub fn get_room_event(
+        &self,
+        user_id: &AuthorizedUserIdentifier,
+        room_id: String,
+        event_id: String,
+    ) -> Result<RoomTimelineEvent, RoomsApplicationError> {
+        if event_id.trim().is_empty() {
+            return Err(RoomsApplicationError::InvalidParameter);
+        }
+
+        self.require_room_state_read_access(&room_id, user_id.as_existing_user_identifier())?;
+
+        self.room_repository
+            .fetch_room_event_by_id(&room_id, &event_id)
+            .map_err(|_| RoomsApplicationError::Internal)?
+            .ok_or(RoomsApplicationError::NotFound)
+    }
+
     pub fn set_room_state_with_key(
         &self,
         user_id: &AuthorizedUserIdentifier,
@@ -309,17 +328,10 @@ impl RoomsService {
             return Err(RoomsApplicationError::InvalidParameter);
         }
 
-        let room_join_context =
-            self.require_room_membership_context(&room_id, user_id.as_existing_user_identifier())?;
-        if room_join_context.membership_state.as_deref() != Some("join") {
-            return Err(RoomsApplicationError::Forbidden);
-        }
-
-        let room_version = room_join_context
-            .room_version
-            .unwrap_or_else(|| self.events_service.default_room_version().to_string())
-            .parse::<SupportedRoomVersion>()
-            .map_err(|_| RoomsApplicationError::Internal)?;
+        let room_version = self.require_joined_room_version(
+            &room_id,
+            user_id.as_existing_user_identifier(),
+        )?;
 
         let state_event_kind = event_type
             .parse::<StateEventKind>()
@@ -338,6 +350,98 @@ impl RoomsService {
                 state_key,
                 event_content,
                 None,
+            )
+            .map_err(RoomsApplicationError::from)?;
+
+        let event_id = event_write_contract
+            .event_rows
+            .first()
+            .map(|event| event.event_id.clone())
+            .ok_or(RoomsApplicationError::Internal)?;
+
+        self.room_repository
+            .append_room_event(&event_write_contract)
+            .map_err(|error| map_room_persistence_error(error, room_id))?;
+
+        Ok(event_id)
+    }
+
+    pub fn send_message_event(
+        &self,
+        user_id: &AuthorizedUserIdentifier,
+        room_id: String,
+        event_type: String,
+        transaction_id: String,
+        content: serde_json::Value,
+    ) -> Result<String, RoomsApplicationError> {
+        self.require_room_identifier(&room_id)?;
+        if transaction_id.trim().is_empty() || !content.is_object() {
+            return Err(RoomsApplicationError::InvalidParameter);
+        }
+
+        let sender_user_id = user_id.as_existing_user_identifier().as_str().to_owned();
+        if let Some(existing_event_id) = self
+            .room_repository
+            .find_event_id_by_transaction_id(&room_id, &sender_user_id, &transaction_id)
+            .map_err(|_| RoomsApplicationError::Internal)?
+        {
+            return Ok(existing_event_id);
+        }
+
+        let room_version =
+            self.require_joined_room_version(&room_id, user_id.as_existing_user_identifier())?;
+        let message_event_kind = match event_type.as_str() {
+            "m.room.message" => MessageEventKind::RoomMessage,
+            "m.room.redaction" => MessageEventKind::RoomRedaction,
+            _ => MessageEventKind::Custom(event_type),
+        };
+
+        let event_content = match message_event_kind {
+            MessageEventKind::RoomMessage => {
+                let body = content
+                    .get("body")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or(RoomsApplicationError::InvalidParameter)?
+                    .to_owned();
+                let message_type = content
+                    .get("msgtype")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or(RoomsApplicationError::InvalidParameter)?
+                    .to_owned();
+                crate::services::events::entities::MatrixEventContent::RoomMessage {
+                    body,
+                    msgtype: message_type,
+                }
+            }
+            MessageEventKind::RoomRedaction => {
+                let redacts = content
+                    .get("redacts")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or(RoomsApplicationError::InvalidParameter)?
+                    .to_owned();
+                let reason = content
+                    .get("reason")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned);
+                crate::services::events::entities::MatrixEventContent::RoomRedaction {
+                    redacts,
+                    reason,
+                }
+            }
+            MessageEventKind::Custom(_) => {
+                crate::services::events::entities::MatrixEventContent::CustomJson(content)
+            }
+        };
+
+        let event_write_contract = self
+            .events_service
+            .create_message_event(
+                room_id.clone(),
+                room_version,
+                sender_user_id,
+                message_event_kind,
+                event_content,
+                Some(transaction_id),
             )
             .map_err(RoomsApplicationError::from)?;
 
@@ -421,6 +525,23 @@ impl RoomsService {
             .append_room_event(&event_write_contract)
             .map_err(|error| map_room_persistence_error(error, room_id))?;
         Ok(())
+    }
+
+    fn require_joined_room_version(
+        &self,
+        room_id: &str,
+        user_id: &ExistingUserIdentifier,
+    ) -> Result<SupportedRoomVersion, RoomsApplicationError> {
+        let room_join_context = self.require_room_membership_context(room_id, user_id)?;
+        if room_join_context.membership_state.as_deref() != Some("join") {
+            return Err(RoomsApplicationError::Forbidden);
+        }
+
+        room_join_context
+            .room_version
+            .unwrap_or_else(|| self.events_service.default_room_version().to_string())
+            .parse::<SupportedRoomVersion>()
+            .map_err(|_| RoomsApplicationError::Internal)
     }
 
     fn resolve_invited_users(

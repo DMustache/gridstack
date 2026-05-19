@@ -59,6 +59,12 @@ pub trait RoomRepository: Send + Sync {
         &self,
         event_write_contract: &EventWriteContract,
     ) -> Result<(), DomainError>;
+    fn find_event_id_by_transaction_id(
+        &self,
+        room_id: &str,
+        sender_user_id: &str,
+        transaction_id: &str,
+    ) -> Result<Option<String>, DomainError>;
 
     fn fetch_room_state_events(&self, room_id: &str) -> Result<Vec<RoomStateEvent>, DomainError>;
 
@@ -83,6 +89,12 @@ pub trait RoomRepository: Send + Sync {
         backward: bool,
         filter: Option<RoomEventFilter>,
     ) -> Result<RoomMessagesPage, DomainError>;
+
+    fn fetch_room_event_by_id(
+        &self,
+        room_id: &str,
+        event_id: &str,
+    ) -> Result<Option<RoomTimelineEvent>, DomainError>;
 }
 
 #[derive(Clone)]
@@ -172,7 +184,7 @@ impl RoomRepository for RoomPersistence {
                             depth: i64::try_from(event_row.depth).unwrap_or(i64::MAX),
                             origin_server_ts: i64::try_from(event_row.origin_server_ts)
                                 .unwrap_or(i64::MAX),
-                            redacts: None,
+                            redacts: event_row.redacts.clone(),
                             rejected: event_row.rejected,
                             soft_failed: event_row.soft_failed,
                             membership: extract_membership(&event_row.content),
@@ -495,6 +507,29 @@ impl RoomRepository for RoomPersistence {
         persist_event_batch(&self.connection_pool, &event_batch_write_contract)
     }
 
+    fn find_event_id_by_transaction_id(
+        &self,
+        room_id: &str,
+        sender_user_id: &str,
+        transaction_id: &str,
+    ) -> Result<Option<String>, DomainError> {
+        use schema::room_idempotency_records;
+
+        let mut connection = self
+            .connection_pool
+            .get()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        room_idempotency_records::table
+            .filter(room_idempotency_records::room_id.eq(room_id))
+            .filter(room_idempotency_records::sender_user_id.eq(sender_user_id))
+            .filter(room_idempotency_records::transaction_id.eq(transaction_id))
+            .select(room_idempotency_records::event_id)
+            .first::<String>(&mut connection)
+            .optional()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))
+    }
+
     fn fetch_room_state_events(&self, room_id: &str) -> Result<Vec<RoomStateEvent>, DomainError> {
         use schema::{room_current_state, room_events};
 
@@ -806,6 +841,61 @@ impl RoomRepository for RoomPersistence {
             state: Vec::new(),
         })
     }
+
+    fn fetch_room_event_by_id(
+        &self,
+        room_id: &str,
+        event_id: &str,
+    ) -> Result<Option<RoomTimelineEvent>, DomainError> {
+        use schema::room_events;
+
+        let mut connection = self
+            .connection_pool
+            .get()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        let row = room_events::table
+            .filter(room_events::room_id.eq(room_id))
+            .filter(room_events::event_id.eq(event_id))
+            .select((
+                room_events::content_json,
+                room_events::event_id,
+                room_events::origin_server_ts,
+                room_events::room_id,
+                room_events::sender_user_id,
+                room_events::state_key,
+                room_events::event_type,
+                room_events::unsigned_json,
+            ))
+            .first::<(
+                serde_json::Value,
+                String,
+                i64,
+                String,
+                String,
+                Option<String>,
+                String,
+                Option<serde_json::Value>,
+            )>(&mut connection)
+            .optional()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        Ok(row.map(
+            |(content, event_id, origin_server_ts, room_id, sender, state_key, event_type, unsigned)| {
+                RoomTimelineEvent {
+                    content,
+                    event_id,
+                    origin_server_ts,
+                    room_id,
+                    sender,
+                    state_key,
+                    event_type,
+                    unsigned,
+                    stream_position: 0,
+                }
+            },
+        ))
+    }
 }
 
 fn persist_event_batch(
@@ -848,7 +938,7 @@ fn persist_event_batch(
                         depth: i64::try_from(event_row.depth).unwrap_or(i64::MAX),
                         origin_server_ts: i64::try_from(event_row.origin_server_ts)
                             .unwrap_or(i64::MAX),
-                        redacts: None,
+                        redacts: event_row.redacts.clone(),
                         rejected: event_row.rejected,
                         soft_failed: event_row.soft_failed,
                         membership: extract_membership(&event_row.content),
