@@ -25,8 +25,8 @@ use crate::{
                 LeaveRoomCommand, LeftRoom, RoomCreationFlow, RoomFactoryEvent, RoomIdentifier,
                 RoomMembersChunk, RoomMembershipFilter, RoomMessageDirection, RoomMessagesPage,
                 RoomReceiptType, RoomStateEvent, RoomTimelineEvent, RoomValidationError,
-                SendReceiptCommand, ValidatedCreateRoomInput, parse_room_message_event_content,
-                parse_room_state_event_content,
+                SendReceiptCommand, SetReadMarkersCommand, ValidatedCreateRoomInput,
+                parse_room_message_event_content, parse_room_state_event_content,
             },
             errors::RoomsApplicationError,
             persistence::RoomRepository,
@@ -596,24 +596,7 @@ impl RoomsService {
 
         let thread_id =
             validate_receipt_thread_id(command.receipt_type, command.thread_id.as_deref())?;
-
-        let event_exists_in_room = self
-            .room_repository
-            .fetch_room_timeline_event_by_id(&room_id, event_id)
-            .map_err(|_| RoomsApplicationError::Internal)?
-            .is_some();
-        if !event_exists_in_room {
-            return Err(RoomsApplicationError::InvalidParameter);
-        }
-        if let Some(thread_id) = thread_id.as_deref() {
-            let event_matches_thread = self
-                .room_repository
-                .room_event_matches_thread(&room_id, event_id, thread_id)
-                .map_err(|_| RoomsApplicationError::Internal)?;
-            if !event_matches_thread {
-                return Err(RoomsApplicationError::InvalidParameter);
-            }
-        }
+        self.require_receipt_target_event(&room_id, event_id, thread_id.as_deref())?;
 
         match command.receipt_type {
             RoomReceiptType::FullyRead => self
@@ -631,6 +614,68 @@ impl RoomsService {
                 )
                 .map_err(map_receipt_persistence_error),
         }
+    }
+
+    pub fn set_read_markers(
+        &self,
+        user_id: &AuthorizedUserIdentifier,
+        room_id: String,
+        command: SetReadMarkersCommand,
+    ) -> Result<(), RoomsApplicationError> {
+        self.require_room_identifier(&room_id)?;
+
+        let requesting_user_id = user_id.as_existing_user_identifier();
+        self.require_joined_membership(&room_id, requesting_user_id)?;
+
+        let fully_read_event_id = command.fully_read_event_id.as_deref().map(str::trim);
+        let read_event_id = command.read_event_id.as_deref().map(str::trim);
+        let private_read_event_id = command.private_read_event_id.as_deref().map(str::trim);
+
+        if let Some(fully_read_event_id) = fully_read_event_id {
+            self.require_receipt_target_event(&room_id, fully_read_event_id, None)?;
+        }
+        if let Some(read_event_id) = read_event_id {
+            self.require_receipt_target_event(&room_id, read_event_id, None)?;
+        }
+        if let Some(private_read_event_id) = private_read_event_id {
+            self.require_receipt_target_event(&room_id, private_read_event_id, None)?;
+        }
+
+        if let Some(fully_read_event_id) = fully_read_event_id {
+            self.room_repository
+                .append_room_fully_read_marker(
+                    &room_id,
+                    requesting_user_id.as_str(),
+                    fully_read_event_id,
+                )
+                .map_err(map_receipt_persistence_error)?;
+        }
+
+        if let Some(read_event_id) = read_event_id {
+            self.room_repository
+                .append_room_receipt(
+                    &room_id,
+                    requesting_user_id.as_str(),
+                    RoomReceiptType::Read.as_str(),
+                    read_event_id,
+                    None,
+                )
+                .map_err(map_receipt_persistence_error)?;
+        }
+
+        if let Some(private_read_event_id) = private_read_event_id {
+            self.room_repository
+                .append_room_receipt(
+                    &room_id,
+                    requesting_user_id.as_str(),
+                    RoomReceiptType::ReadPrivate.as_str(),
+                    private_read_event_id,
+                    None,
+                )
+                .map_err(map_receipt_persistence_error)?;
+        }
+
+        Ok(())
     }
 }
 
@@ -694,6 +739,39 @@ impl RoomsService {
             return Err(RoomsApplicationError::Forbidden);
         }
         Ok(room_join_context)
+    }
+
+    fn require_receipt_target_event(
+        &self,
+        room_id: &str,
+        event_id: &str,
+        thread_id: Option<&str>,
+    ) -> Result<(), RoomsApplicationError> {
+        let trimmed_event_id = event_id.trim();
+        if trimmed_event_id.is_empty() || !trimmed_event_id.starts_with('$') {
+            return Err(RoomsApplicationError::InvalidParameter);
+        }
+
+        let event_exists_in_room = self
+            .room_repository
+            .fetch_room_timeline_event_by_id(room_id, trimmed_event_id)
+            .map_err(|_| RoomsApplicationError::Internal)?
+            .is_some();
+        if !event_exists_in_room {
+            return Err(RoomsApplicationError::InvalidParameter);
+        }
+
+        if let Some(thread_id) = thread_id {
+            let event_matches_thread = self
+                .room_repository
+                .room_event_matches_thread(room_id, trimmed_event_id, thread_id)
+                .map_err(|_| RoomsApplicationError::Internal)?;
+            if !event_matches_thread {
+                return Err(RoomsApplicationError::InvalidParameter);
+            }
+        }
+
+        Ok(())
     }
 
     fn require_joined_members_access(
