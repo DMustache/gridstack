@@ -64,10 +64,17 @@ pub trait RoomRepository: Send + Sync {
         &self,
         room_id: &str,
         sender_user_id: &str,
+        event_type: &str,
         transaction_id: &str,
     ) -> Result<Option<String>, DomainError>;
 
     fn fetch_room_state_events(&self, room_id: &str) -> Result<Vec<RoomStateEvent>, DomainError>;
+
+    fn fetch_room_timeline_event_by_id(
+        &self,
+        room_id: &str,
+        event_id: &str,
+    ) -> Result<Option<RoomTimelineEvent>, DomainError>;
 
     fn fetch_room_state_event_by_type_and_key(
         &self,
@@ -506,9 +513,10 @@ impl RoomRepository for RoomPersistence {
         &self,
         room_id: &str,
         sender_user_id: &str,
+        event_type: &str,
         transaction_id: &str,
     ) -> Result<Option<String>, DomainError> {
-        use schema::room_idempotency_records;
+        use schema::{room_events, room_idempotency_records};
 
         let mut connection = self
             .connection_pool
@@ -516,8 +524,12 @@ impl RoomRepository for RoomPersistence {
             .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
 
         room_idempotency_records::table
+            .inner_join(
+                room_events::table.on(room_events::event_id.eq(room_idempotency_records::event_id)),
+            )
             .filter(room_idempotency_records::room_id.eq(room_id))
             .filter(room_idempotency_records::sender_user_id.eq(sender_user_id))
+            .filter(room_events::event_type.eq(event_type))
             .filter(room_idempotency_records::transaction_id.eq(transaction_id))
             .select(room_idempotency_records::event_id)
             .first::<String>(&mut connection)
@@ -590,6 +602,78 @@ impl RoomRepository for RoomPersistence {
                 },
             )
             .collect())
+    }
+
+    fn fetch_room_timeline_event_by_id(
+        &self,
+        room_id: &str,
+        event_id: &str,
+    ) -> Result<Option<RoomTimelineEvent>, DomainError> {
+        use schema::{room_events, room_timeline_projection};
+
+        let mut connection = self
+            .connection_pool
+            .get()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        let row = room_events::table
+            .left_outer_join(
+                room_timeline_projection::table.on(
+                    room_timeline_projection::event_id
+                        .eq(room_events::event_id)
+                        .and(room_timeline_projection::room_id.eq(room_events::room_id)),
+                ),
+            )
+            .filter(room_events::room_id.eq(room_id))
+            .filter(room_events::event_id.eq(event_id))
+            .select((
+                room_events::content_json,
+                room_events::event_id,
+                room_events::origin_server_ts,
+                room_events::room_id,
+                room_events::sender_user_id,
+                room_events::state_key,
+                room_events::event_type,
+                room_events::unsigned_json,
+                room_timeline_projection::stream_position.nullable(),
+            ))
+            .first::<(
+                serde_json::Value,
+                String,
+                i64,
+                String,
+                String,
+                Option<String>,
+                String,
+                Option<serde_json::Value>,
+                Option<i64>,
+            )>(&mut connection)
+            .optional()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        Ok(row.map(
+            |(
+                content,
+                event_id,
+                origin_server_ts,
+                room_id,
+                sender,
+                state_key,
+                event_type,
+                unsigned,
+                stream_position,
+            )| RoomTimelineEvent {
+                content,
+                event_id,
+                origin_server_ts,
+                room_id,
+                sender,
+                state_key,
+                event_type,
+                unsigned,
+                stream_position: stream_position.unwrap_or_default(),
+            },
+        ))
     }
 
     fn fetch_room_state_event_by_type_and_key(

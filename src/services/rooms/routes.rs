@@ -44,6 +44,10 @@ pub fn routes(state: &ApplicationState) -> Router<ApplicationState> {
             get(handlers::get_room_messages),
         )
         .route(
+            "/_matrix/client/v3/rooms/{roomId}/event/{eventId}",
+            get(handlers::get_room_event),
+        )
+        .route(
             "/_matrix/client/v3/rooms/{roomId}/send/{eventType}/{txnId}",
             put(handlers::send_room_message_event),
         )

@@ -22,6 +22,7 @@ use crate::{
                 CreateRoomCommand, CreatedRoom, GetRoomMessagesCommand, JoinRoomCommand,
                 JoinedRoom, LeaveRoomCommand, LeftRoom, RoomCreationFlow, RoomFactoryEvent,
                 RoomIdentifier, RoomMessageDirection, RoomMessagesPage, RoomStateEvent,
+                RoomTimelineEvent,
                 RoomValidationError, ValidatedCreateRoomInput, parse_room_message_event_content,
                 parse_room_state_event_content,
             },
@@ -223,6 +224,20 @@ impl RoomsService {
             .ok_or(RoomsApplicationError::NotFound)
     }
 
+    pub fn get_room_event(
+        &self,
+        user_id: &AuthorizedUserIdentifier,
+        room_id: String,
+        event_id: String,
+    ) -> Result<RoomTimelineEvent, RoomsApplicationError> {
+        self.require_room_state_read_access(&room_id, user_id.as_existing_user_identifier())?;
+
+        self.room_repository
+            .fetch_room_timeline_event_by_id(&room_id, &event_id)
+            .map_err(|_| RoomsApplicationError::Internal)?
+            .ok_or(RoomsApplicationError::NotFound)
+    }
+
     pub fn get_room_messages(
         &self,
         user_id: &AuthorizedUserIdentifier,
@@ -360,11 +375,22 @@ impl RoomsService {
         {
             return Err(RoomsApplicationError::InvalidParameter);
         }
+        if !matches!(
+            event_type.parse::<StateEventKind>(),
+            Ok(StateEventKind::Custom(_))
+        ) {
+            return Err(RoomsApplicationError::InvalidParameter);
+        }
 
         let sender_user_id = user_id.as_existing_user_identifier().as_str().to_owned();
         if let Some(existing_event_id) = self
             .room_repository
-            .fetch_room_event_id_by_transaction_id(&room_id, &sender_user_id, &transaction_id)
+            .fetch_room_event_id_by_transaction_id(
+                &room_id,
+                &sender_user_id,
+                &event_type,
+                &transaction_id,
+            )
             .map_err(|_| RoomsApplicationError::Internal)?
         {
             return Ok(existing_event_id);

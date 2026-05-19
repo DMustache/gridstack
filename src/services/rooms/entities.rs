@@ -321,7 +321,8 @@ pub(crate) fn parse_room_message_event_content(
     let message_event_kind = event_type.parse::<MessageEventKind>()?;
     let message_content = match &message_event_kind {
         MessageEventKind::RoomMessage => {
-            let parsed: RoomMessageEventContent = serde_json::from_value(content).map_err(|_| ())?;
+            let parsed: RoomMessageEventContent =
+                serde_json::from_value(content).map_err(|_| ())?;
             if parsed.body.trim().is_empty() || parsed.msgtype.trim().is_empty() {
                 return Err(());
             }
