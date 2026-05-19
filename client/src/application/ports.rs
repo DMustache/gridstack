@@ -6,6 +6,7 @@ use crate::domain::{
         LoginUserInfo, LoginUserView, LogoutUserView, RegisterUserInfo, RegisterUserView,
         ServerCredentials, SessionRecord, UiaaResponseView, WhoAmIView,
     },
+    rooms::{CreateRoomInfo, CreateRoomView, RoomListItem},
     error::ClientError,
 };
 
@@ -40,6 +41,25 @@ pub trait SessionRepository: Send + Sync {
         server_url: &str,
     ) -> Result<Option<SessionRecord>, ClientError>;
     async fn clear_session_by_server(&self, server_url: &str) -> Result<(), ClientError>;
+}
+
+#[async_trait]
+pub trait RoomsApi: Send + Sync {
+    async fn create_room(
+        &self,
+        access_token: &str,
+        request: &CreateRoomInfo,
+    ) -> Result<CreateRoomView, ClientError>;
+}
+
+#[async_trait]
+pub trait RoomRepository: Send + Sync {
+    async fn add_room(&self, room: &RoomListItem) -> Result<(), ClientError>;
+    async fn list_rooms_by_server_user(
+        &self,
+        server_url: &str,
+        user_id: &str,
+    ) -> Result<Vec<RoomListItem>, ClientError>;
 }
 
 #[async_trait]

@@ -7,13 +7,16 @@ use tokio::runtime::Runtime;
 use crate::{
     application::{
         authorization_client::AuthorizationClientService,
+        rooms_client::RoomsClientService,
         ports::{RegisterUserResult, ServerProfileRepository, SessionRepository},
     },
     domain::authorization::{
         AccountKind, AuthenticationDataInfo, LoginType, LoginUserInfo, RegisterUserInfo,
         ServerCredentials, WhoAmIView,
     },
+    domain::rooms::CreateRoomInfo,
     infrastructure::http::hyper_authorization_api::HyperAuthorizationApi,
+    infrastructure::http::hyper_rooms_api::HyperRoomsApi,
     infrastructure::persistence::sqlite_session_repository::SqliteSessionRepository,
 };
 
@@ -34,6 +37,7 @@ enum UsernameState {
 
 pub struct ClientDesktopApplication {
     runtime: Runtime,
+    sqlite_repository: Arc<SqliteSessionRepository>,
     session_repository: Arc<dyn SessionRepository>,
     server_profile_repository: Arc<dyn ServerProfileRepository>,
     screen: Screen,
@@ -51,16 +55,24 @@ pub struct ClientDesktopApplication {
     username_state: UsernameState,
     status_message: String,
     whoami: Option<WhoAmIView>,
+    rooms: Vec<(String, String)>,
+    show_create_room_form: bool,
+    new_room_name: String,
+    new_room_topic: String,
+    new_room_visibility_index: usize,
+    new_room_preset_index: usize,
+    new_room_is_direct: bool,
 }
 
 impl ClientDesktopApplication {
     pub fn new(repository: Arc<SqliteSessionRepository>) -> Result<Self, String> {
         let runtime = Runtime::new().map_err(|error| error.to_string())?;
         let session_repository: Arc<dyn SessionRepository> = repository.clone();
-        let server_profile_repository: Arc<dyn ServerProfileRepository> = repository;
+        let server_profile_repository: Arc<dyn ServerProfileRepository> = repository.clone();
 
         let mut app = Self {
             runtime,
+            sqlite_repository: repository.clone(),
             session_repository,
             server_profile_repository,
             screen: Screen::Welcome,
@@ -78,6 +90,13 @@ impl ClientDesktopApplication {
             username_state: UsernameState::Unknown,
             status_message: "Select server and account, then login".to_owned(),
             whoami: None,
+            rooms: Vec::new(),
+            show_create_room_form: false,
+            new_room_name: String::new(),
+            new_room_topic: String::new(),
+            new_room_visibility_index: 0,
+            new_room_preset_index: 0,
+            new_room_is_direct: false,
         };
 
         app.reload_servers();
@@ -105,6 +124,20 @@ impl ClientDesktopApplication {
             .unwrap_or_else(|| self.normalized_server_url());
         let api = Arc::new(HyperAuthorizationApi::new(server_url.clone()));
         AuthorizationClientService::new(server_url, api, Arc::clone(&self.session_repository))
+    }
+
+    fn build_rooms_service(&self) -> RoomsClientService {
+        let server_url = self
+            .selected_server()
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.normalized_server_url());
+        let rooms_api = Arc::new(HyperRoomsApi::new(server_url.clone()));
+        RoomsClientService::new(
+            server_url,
+            rooms_api,
+            Arc::clone(&self.session_repository),
+            self.sqlite_repository.clone(),
+        )
     }
 
     fn reload_servers(&mut self) {
@@ -239,9 +272,25 @@ impl ClientDesktopApplication {
                 self.whoami = Some(view.clone());
                 self.screen = Screen::WhoAmI;
                 self.status_message = "Login successful".to_owned();
+                self.load_rooms();
             }
             Err(error) => {
                 self.status_message = format!("Failed to load whoami: {error}");
+            }
+        }
+    }
+
+    fn load_rooms(&mut self) {
+        let rooms_service = self.build_rooms_service();
+        match self.runtime.block_on(rooms_service.list_cached_rooms()) {
+            Ok(items) => {
+                self.rooms = items
+                    .into_iter()
+                    .map(|item| (item.room_id, item.name.unwrap_or_else(|| "Unnamed room".to_owned())))
+                    .collect();
+            }
+            Err(error) => {
+                self.status_message = format!("Failed to load rooms: {error}");
             }
         }
     }
@@ -346,8 +395,56 @@ impl ClientDesktopApplication {
             Ok(_) => {
                 self.screen = Screen::Welcome;
                 self.status_message = "Logged out".to_owned();
+                self.rooms.clear();
             }
             Err(error) => self.status_message = format!("Logout failed: {error}"),
+        }
+    }
+
+    fn create_room(&mut self) {
+        let rooms_service = self.build_rooms_service();
+        let visibility = Self::visibility_options()
+            .get(self.new_room_visibility_index)
+            .copied()
+            .unwrap_or("private")
+            .to_owned();
+        let preset = Self::available_presets_for_visibility(visibility.as_str())
+            .get(self.new_room_preset_index)
+            .copied()
+            .unwrap_or("private_chat")
+            .to_owned();
+        let request = CreateRoomInfo {
+            name: if self.new_room_name.trim().is_empty() {
+                None
+            } else {
+                Some(self.new_room_name.trim().to_owned())
+            },
+            topic: if self.new_room_topic.trim().is_empty() {
+                None
+            } else {
+                Some(self.new_room_topic.trim().to_owned())
+            },
+            visibility: Some(visibility),
+            preset: Some(preset),
+            room_alias_name: None,
+            room_version: None,
+            is_direct: Some(self.new_room_is_direct),
+            creation_content: None,
+            invite: None,
+            invite_3pid: None,
+            power_level_content_override: None,
+        };
+        match self.runtime.block_on(rooms_service.create_room(&request)) {
+            Ok(view) => {
+                self.status_message = format!("Room created: {}", view.room_id);
+                self.new_room_name.clear();
+                self.new_room_topic.clear();
+                self.show_create_room_form = false;
+                self.load_rooms();
+            }
+            Err(error) => {
+                self.status_message = format!("Create room failed: {error}");
+            }
         }
     }
 
@@ -537,23 +634,139 @@ impl ClientDesktopApplication {
     }
 
     fn render_whoami(&mut self, ui: &mut egui::Ui) {
-        ui.heading("WhoAmI");
-        if let Some(view) = &self.whoami {
-            ui.label(format!("User: {}", view.user_id));
-            ui.label(format!("Guest: {}", view.is_guest));
-            if let Some(device_id) = &view.device_id {
-                ui.label(format!("Device: {device_id}"));
-            }
-        }
+        ui.columns(2, |columns| {
+            columns[0].heading("Rooms");
+            columns[0].horizontal(|ui| {
+                if ui.button("+").clicked() {
+                    self.show_create_room_form = !self.show_create_room_form;
+                }
+            });
+            if self.show_create_room_form {
+                egui::ScrollArea::vertical().max_height(420.0).show(&mut columns[0], |ui| {
+                ui.group(|ui| {
+                    ui.label("Create room");
+                    ui.horizontal(|ui| {
+                        ui.label("Name").on_hover_text("Human-friendly room title.");
+                        ui.text_edit_singleline(&mut self.new_room_name);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Topic").on_hover_text("Optional short room description.");
+                        ui.text_edit_singleline(&mut self.new_room_topic);
+                    });
+                    let visibility_options = Self::visibility_options();
+                    egui::ComboBox::from_label("Visibility")
+                        .selected_text(
+                            visibility_options
+                                .get(self.new_room_visibility_index)
+                                .copied()
+                                .unwrap_or("private"),
+                        )
+                        .show_ui(ui, |ui| {
+                            for (index, value) in visibility_options.iter().enumerate() {
+                                if ui
+                                    .selectable_value(&mut self.new_room_visibility_index, index, *value)
+                                    .clicked()
+                                {
+                                    self.enforce_preset_for_visibility();
+                                }
+                            }
+                        });
+                    ui.label("Visibility").on_hover_text("`private` limits discoverability, `public` is discoverable.");
 
-        ui.horizontal(|ui| {
-            if ui.button("Back").clicked() {
-                self.screen = Screen::Welcome;
+                    let active_visibility = visibility_options
+                        .get(self.new_room_visibility_index)
+                        .copied()
+                        .unwrap_or("private");
+                    let preset_options = Self::available_presets_for_visibility(active_visibility);
+                    if self.new_room_preset_index >= preset_options.len() {
+                        self.new_room_preset_index = 0;
+                    }
+                    egui::ComboBox::from_label("Preset")
+                        .selected_text(
+                            preset_options
+                                .get(self.new_room_preset_index)
+                                .copied()
+                                .unwrap_or("private_chat"),
+                        )
+                        .show_ui(ui, |ui| {
+                            for (index, value) in preset_options.iter().enumerate() {
+                                if ui
+                                    .selectable_value(&mut self.new_room_preset_index, index, *value)
+                                    .clicked()
+                                {
+                                    self.enforce_visibility_for_preset();
+                                }
+                            }
+                        });
+                    ui.label("Preset").on_hover_text("Preset applies sensible defaults for member permissions and invite rules.");
+
+                    ui.checkbox(&mut self.new_room_is_direct, "Direct room")
+                        .on_hover_text("Enable when this is a direct/private conversation.");
+                    if ui.button("Create").clicked() {
+                        self.create_room();
+                    }
+                });
+                });
             }
-            if ui.button("Logout").clicked() {
-                self.run_logout();
+            for (room_id, room_name) in &self.rooms {
+                columns[0]
+                    .label(room_name)
+                    .on_hover_text(format!("Room ID: {room_id}"));
             }
+
+            columns[1].heading("WhoAmI");
+            if let Some(view) = &self.whoami {
+                columns[1].label(format!("User: {}", view.user_id));
+                columns[1].label(format!("Guest: {}", view.is_guest));
+                if let Some(device_id) = &view.device_id {
+                    columns[1].label(format!("Device: {device_id}"));
+                }
+            }
+
+            columns[1].horizontal(|ui| {
+                if ui.button("Back").clicked() {
+                    self.screen = Screen::Welcome;
+                }
+                if ui.button("Logout").clicked() {
+                    self.run_logout();
+                }
+            });
         });
+    }
+
+    fn visibility_options() -> &'static [&'static str] {
+        &["private", "public"]
+    }
+
+    fn available_presets_for_visibility(visibility: &str) -> &'static [&'static str] {
+        match visibility {
+            "public" => &["public_chat"],
+            _ => &["private_chat", "trusted_private_chat"],
+        }
+    }
+
+    fn enforce_preset_for_visibility(&mut self) {
+        let visibility = Self::visibility_options()
+            .get(self.new_room_visibility_index)
+            .copied()
+            .unwrap_or("private");
+        let presets = Self::available_presets_for_visibility(visibility);
+        if self.new_room_preset_index >= presets.len() {
+            self.new_room_preset_index = 0;
+        }
+    }
+
+    fn enforce_visibility_for_preset(&mut self) {
+        let private_presets = ["private_chat", "trusted_private_chat"];
+        let current_visibility = Self::visibility_options()
+            .get(self.new_room_visibility_index)
+            .copied()
+            .unwrap_or("private");
+        let preset = Self::available_presets_for_visibility(current_visibility)
+            .get(self.new_room_preset_index)
+            .copied()
+            .unwrap_or("private_chat");
+        self.new_room_visibility_index = if private_presets.contains(&preset) { 0 } else { 1 };
     }
 }
 

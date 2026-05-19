@@ -7,10 +7,11 @@ use std::{path::Path, time::Duration};
 use tokio::time::sleep;
 
 use crate::{
-    application::ports::{ServerProfileRepository, SessionRepository},
+    application::ports::{RoomRepository, ServerProfileRepository, SessionRepository},
     domain::{
         authorization::{ServerCredentials, SessionRecord},
         error::ClientError,
+        rooms::RoomListItem,
     },
 };
 
@@ -58,6 +59,14 @@ async fn initialize_schema_with_retry(pool: &SqlitePool) -> Result<(), ClientErr
         password TEXT NOT NULL,
         PRIMARY KEY (server_url, username)
     )";
+    let create_room_table = "CREATE TABLE IF NOT EXISTS client_room (
+        server_url TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        name TEXT,
+        topic TEXT,
+        PRIMARY KEY (server_url, user_id, room_id)
+    )";
 
     let retry_delays = [100_u64, 300, 700, 1500];
     let mut last_error: Option<String> = None;
@@ -65,13 +74,15 @@ async fn initialize_schema_with_retry(pool: &SqlitePool) -> Result<(), ClientErr
     for delay_ms in retry_delays {
         let session_result = sqlx::query(create_session_table).execute(pool).await;
         let profile_result = sqlx::query(create_server_profile_table).execute(pool).await;
-        match (session_result, profile_result) {
-            (Ok(_), Ok(_)) => return Ok(()),
-            (session_error, profile_error) => {
+        let room_result = sqlx::query(create_room_table).execute(pool).await;
+        match (session_result, profile_result, room_result) {
+            (Ok(_), Ok(_), Ok(_)) => return Ok(()),
+            (session_error, profile_error, room_error) => {
                 last_error = Some(format!(
-                    "session_table={:?}, server_profile_table={:?}",
+                    "session_table={:?}, server_profile_table={:?}, room_table={:?}",
                     session_error.err(),
-                    profile_error.err()
+                    profile_error.err(),
+                    room_error.err()
                 ));
                 sleep(Duration::from_millis(delay_ms)).await;
             }
@@ -81,6 +92,57 @@ async fn initialize_schema_with_retry(pool: &SqlitePool) -> Result<(), ClientErr
     Err(ClientError::Database(
         last_error.unwrap_or_else(|| "unknown schema initialization failure".to_owned()),
     ))
+}
+
+#[async_trait]
+impl RoomRepository for SqliteSessionRepository {
+    async fn add_room(&self, room: &RoomListItem) -> Result<(), ClientError> {
+        sqlx::query(
+            "INSERT INTO client_room (server_url, user_id, room_id, name, topic)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(server_url, user_id, room_id) DO UPDATE SET
+                name = excluded.name,
+                topic = excluded.topic",
+        )
+        .bind(&room.server_url)
+        .bind(&room.user_id)
+        .bind(&room.room_id)
+        .bind(&room.name)
+        .bind(&room.topic)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| ClientError::Database(error.to_string()))?;
+        Ok(())
+    }
+
+    async fn list_rooms_by_server_user(
+        &self,
+        server_url: &str,
+        user_id: &str,
+    ) -> Result<Vec<RoomListItem>, ClientError> {
+        let rows = sqlx::query(
+            "SELECT server_url, user_id, room_id, name, topic
+             FROM client_room
+             WHERE server_url = ?1 AND user_id = ?2
+             ORDER BY COALESCE(name, room_id)",
+        )
+        .bind(server_url)
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| ClientError::Database(error.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| RoomListItem {
+                server_url: row.get::<String, _>("server_url"),
+                user_id: row.get::<String, _>("user_id"),
+                room_id: row.get::<String, _>("room_id"),
+                name: row.get::<Option<String>, _>("name"),
+                topic: row.get::<Option<String>, _>("topic"),
+            })
+            .collect())
+    }
 }
 
 #[async_trait]
