@@ -1,5 +1,6 @@
 pub mod authorization;
 pub mod events;
+pub mod messages;
 pub mod rooms;
 pub mod syncronization;
 

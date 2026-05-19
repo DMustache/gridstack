@@ -145,14 +145,14 @@ fn validate_event_content(content: &MatrixEventContent) -> Result<(), EventInten
         MatrixEventContent::RoomMessage { body, msgtype } => {
             if body.trim().is_empty() || msgtype.trim().is_empty() {
                 return Err(EventIntentValidationError::InvalidEventContentShape {
-                    event_type: MessageEventKind::RoomMessage.as_ref().to_owned(),
+                    event_type: MessageEventKind::RoomMessage.to_string(),
                 });
             }
         }
         MatrixEventContent::RoomRedaction { redacts, .. } => {
             if redacts.trim().is_empty() {
                 return Err(EventIntentValidationError::InvalidEventContentShape {
-                    event_type: MessageEventKind::RoomRedaction.as_ref().to_owned(),
+                    event_type: MessageEventKind::RoomRedaction.to_string(),
                 });
             }
         }
