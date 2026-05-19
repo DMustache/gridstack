@@ -95,3 +95,21 @@ This document defines the contract for tasks in `.zed/tasks.json`.
 - Represents: clone `tuwunel` into `temp/` if missing, otherwise update local checkout.
 - Validation: `temp/tuwunel/.git/HEAD` exists and is non-empty.
 - Failure log: `generated/logs/tuwunel-sync.log`.
+
+15. `Client: Cargo Check`
+- Script: `scripts/tasks/client_cargo_check.sh`
+- Represents: compile validation for standalone `client/` crate.
+- Validation: command exit code.
+- Failure log: `generated/logs/client-cargo-check.log`.
+
+16. `Client: Run`
+- Script: `scripts/tasks/client_run.sh`
+- Represents: run desktop client application.
+- Validation: command exit code.
+- Failure log: `generated/logs/client-run.log`.
+
+17. `Client: Build (Windows Release)`
+- Script: `scripts/tasks/client_build_windows_release.sh`
+- Represents: cross-compile the standalone `client/` crate for Windows 10/11 (`x86_64-pc-windows-gnu`) in release mode.
+- Validation: command exit code; `client/target/x86_64-pc-windows-gnu/release/client.exe` exists and is non-empty.
+- Failure log: `generated/logs/client-build-windows-release.log`.
