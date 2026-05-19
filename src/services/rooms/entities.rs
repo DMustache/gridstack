@@ -810,6 +810,17 @@ pub struct JoinedRooms {
 }
 
 #[derive(Clone, Debug)]
+pub struct JoinedRoomMember {
+    pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct JoinedMembers {
+    pub joined: BTreeMap<String, JoinedRoomMember>,
+}
+
+#[derive(Clone, Debug)]
 pub struct LeftRoom;
 
 #[derive(Clone, Debug, Serialize)]
@@ -835,6 +846,19 @@ pub struct JoinedRoomsView {
     pub joined_rooms: Vec<String>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct JoinedRoomMemberView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct JoinedMembersView {
+    pub joined: BTreeMap<String, JoinedRoomMemberView>,
+}
+
 impl From<JoinedRoom> for JoinRoomView {
     fn from(value: JoinedRoom) -> Self {
         Self {
@@ -847,6 +871,27 @@ impl From<JoinedRooms> for JoinedRoomsView {
     fn from(value: JoinedRooms) -> Self {
         Self {
             joined_rooms: value.room_ids,
+        }
+    }
+}
+
+impl From<JoinedMembers> for JoinedMembersView {
+    fn from(value: JoinedMembers) -> Self {
+        Self {
+            joined: value
+                .joined
+                .into_iter()
+                .map(|(user_id, member)| (user_id, JoinedRoomMemberView::from(member)))
+                .collect(),
+        }
+    }
+}
+
+impl From<JoinedRoomMember> for JoinedRoomMemberView {
+    fn from(value: JoinedRoomMember) -> Self {
+        Self {
+            display_name: value.display_name,
+            avatar_url: value.avatar_url,
         }
     }
 }

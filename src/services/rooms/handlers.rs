@@ -15,6 +15,7 @@ use crate::services::{
             get_room_messages::{GetRoomMessagesQuery, GetRoomMessagesView},
             get_room_state::RoomStateEventView,
             get_room_state_with_key::{GetRoomStateWithKeyFormatQuery, room_state_event_to_value},
+            joined_members::JoinedMembersView,
             joined_rooms::JoinedRoomsView,
             join_room::{JoinRoomCommand, JoinRoomInfo, JoinRoomView},
             leave_room::{LeaveRoomCommand, LeaveRoomInfo, LeaveRoomView},
@@ -31,6 +32,7 @@ pub mod get_room_event;
 pub mod get_room_messages;
 pub mod get_room_state;
 pub mod get_room_state_with_key;
+pub mod joined_members;
 pub mod joined_rooms;
 pub mod join_room;
 pub mod leave_room;
@@ -71,6 +73,16 @@ pub enum JoinRoomResponse {
 pub enum GetJoinedRoomsResponse {
     #[matrix(status = 200)]
     Ok(Json<JoinedRoomsView>),
+    #[matrix(status = 500, error = [(matrix_error = "M_UNKNOWN", from = RoomsApplicationError::Internal)])]
+    Internal(Json<MatrixErrorResponse>),
+}
+
+#[derive(IntoResponseEnum)]
+pub enum GetJoinedMembersResponse {
+    #[matrix(status = 200)]
+    Ok(Json<JoinedMembersView>),
+    #[matrix(status = 403, error = [(matrix_error = "M_FORBIDDEN", from = RoomsApplicationError::Forbidden)])]
+    Forbidden(Json<MatrixErrorResponse>),
     #[matrix(status = 500, error = [(matrix_error = "M_UNKNOWN", from = RoomsApplicationError::Internal)])]
     Internal(Json<MatrixErrorResponse>),
 }
@@ -225,6 +237,28 @@ pub async fn get_joined_rooms(
         Err(error_kind) => {
             error!(error = %error_kind, "get joined rooms failed");
             GetJoinedRoomsResponse::from_mapped_error(error_kind)
+        }
+    }
+}
+
+pub async fn get_joined_members(
+    Path(room_id): Path<String>,
+    State(application_state): State<ApplicationState>,
+    Extension(access_session): Extension<AccessSessionStorageUnit>,
+) -> GetJoinedMembersResponse {
+    match application_state
+        .rooms_service
+        .get_joined_members(access_session.user_identifier(), room_id)
+        .map(JoinedMembersView::from)
+    {
+        Ok(view) => GetJoinedMembersResponse::Ok(Json(view)),
+        Err(error_kind) => {
+            if matches!(error_kind, RoomsApplicationError::Internal) {
+                error!("get joined members failed with internal error");
+            } else {
+                info!(error = %error_kind, "get joined members rejected");
+            }
+            GetJoinedMembersResponse::from_mapped_error(error_kind)
         }
     }
 }

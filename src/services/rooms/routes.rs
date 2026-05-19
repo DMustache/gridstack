@@ -28,6 +28,10 @@ pub fn routes(state: &ApplicationState) -> Router<ApplicationState> {
             get(handlers::get_joined_rooms),
         )
         .route(
+            "/_matrix/client/v3/rooms/{roomId}/joined_members",
+            get(handlers::get_joined_members),
+        )
+        .route(
             "/_matrix/client/v3/rooms/{roomId}/leave",
             post(handlers::leave_room_by_id),
         )
