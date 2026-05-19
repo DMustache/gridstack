@@ -54,6 +54,7 @@ pub trait RoomRepository: Send + Sync {
         room_id: &str,
         user_id: &str,
     ) -> Result<Option<RoomJoinContext>, DomainError>;
+    fn fetch_joined_room_ids_for_user(&self, user_id: &str) -> Result<Vec<String>, DomainError>;
 
     fn append_room_event(
         &self,
@@ -484,6 +485,23 @@ impl RoomRepository for RoomPersistence {
                 membership_state,
             },
         ))
+    }
+
+    fn fetch_joined_room_ids_for_user(&self, user_id: &str) -> Result<Vec<String>, DomainError> {
+        use schema::room_membership_projection;
+
+        let mut connection = self
+            .connection_pool
+            .get()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        room_membership_projection::table
+            .filter(room_membership_projection::user_id.eq(user_id))
+            .filter(room_membership_projection::membership.eq("join"))
+            .select(room_membership_projection::room_id)
+            .order(room_membership_projection::room_id.asc())
+            .load::<String>(&mut connection)
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))
     }
 
     fn append_room_event(

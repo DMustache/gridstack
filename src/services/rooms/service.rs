@@ -20,9 +20,9 @@ use crate::{
         rooms::{
             entities::{
                 CreateRoomCommand, CreatedRoom, GetRoomMessagesCommand, JoinRoomCommand,
-                JoinedRoom, LeaveRoomCommand, LeftRoom, RoomCreationFlow, RoomFactoryEvent,
-                RoomIdentifier, RoomMessageDirection, RoomMessagesPage, RoomStateEvent,
-                RoomTimelineEvent,
+                JoinedRoom, JoinedRooms, LeaveRoomCommand, LeftRoom, RoomCreationFlow,
+                RoomFactoryEvent, RoomIdentifier, RoomMessageDirection, RoomMessagesPage,
+                RoomStateEvent, RoomTimelineEvent,
                 RoomValidationError, ValidatedCreateRoomInput, parse_room_message_event_content,
                 parse_room_state_event_content,
             },
@@ -154,6 +154,18 @@ impl RoomsService {
         )?;
 
         Ok(JoinedRoom { room_id })
+    }
+
+    pub fn get_joined_rooms(
+        &self,
+        user_id: &AuthorizedUserIdentifier,
+    ) -> Result<JoinedRooms, RoomsApplicationError> {
+        let room_ids = self
+            .room_repository
+            .fetch_joined_room_ids_for_user(user_id.as_existing_user_identifier().as_str())
+            .map_err(|_| RoomsApplicationError::Internal)?;
+
+        Ok(JoinedRooms { room_ids })
     }
 
     pub fn leave_room_by_id(

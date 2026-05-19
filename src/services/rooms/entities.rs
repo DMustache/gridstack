@@ -805,6 +805,11 @@ pub struct JoinedRoom {
 }
 
 #[derive(Clone, Debug)]
+pub struct JoinedRooms {
+    pub room_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
 pub struct LeftRoom;
 
 #[derive(Clone, Debug, Serialize)]
@@ -825,10 +830,23 @@ pub struct JoinRoomView {
     pub room_id: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct JoinedRoomsView {
+    pub joined_rooms: Vec<String>,
+}
+
 impl From<JoinedRoom> for JoinRoomView {
     fn from(value: JoinedRoom) -> Self {
         Self {
             room_id: value.room_id,
+        }
+    }
+}
+
+impl From<JoinedRooms> for JoinedRoomsView {
+    fn from(value: JoinedRooms) -> Self {
+        Self {
+            joined_rooms: value.room_ids,
         }
     }
 }
