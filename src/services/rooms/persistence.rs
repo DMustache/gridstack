@@ -95,6 +95,19 @@ pub trait RoomRepository: Send + Sync {
         room_id: &str,
         event_id: &str,
     ) -> Result<Option<RoomTimelineEvent>, DomainError>;
+
+    fn fetch_membership_at_event(
+        &self,
+        room_id: &str,
+        event_id: &str,
+        user_id: &str,
+    ) -> Result<Option<String>, DomainError>;
+
+    fn fetch_history_visibility_at_event(
+        &self,
+        room_id: &str,
+        event_id: &str,
+    ) -> Result<Option<String>, DomainError>;
 }
 
 #[derive(Clone)]
@@ -895,6 +908,87 @@ impl RoomRepository for RoomPersistence {
                 }
             },
         ))
+    }
+
+    fn fetch_membership_at_event(
+        &self,
+        room_id: &str,
+        event_id: &str,
+        user_id: &str,
+    ) -> Result<Option<String>, DomainError> {
+        use schema::{room_events, room_timeline_projection};
+
+        let mut connection = self
+            .connection_pool
+            .get()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        let target_stream_position = room_timeline_projection::table
+            .filter(room_timeline_projection::room_id.eq(room_id))
+            .filter(room_timeline_projection::event_id.eq(event_id))
+            .select(room_timeline_projection::stream_position)
+            .first::<i64>(&mut connection)
+            .optional()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        let Some(target_stream_position) = target_stream_position else {
+            return Ok(None);
+        };
+
+        room_timeline_projection::table
+            .inner_join(
+                room_events::table.on(room_events::event_id.eq(room_timeline_projection::event_id)),
+            )
+            .filter(room_timeline_projection::room_id.eq(room_id))
+            .filter(room_timeline_projection::stream_position.le(target_stream_position))
+            .filter(room_events::event_type.eq("m.room.member"))
+            .filter(room_events::state_key.eq(Some(user_id.to_owned())))
+            .order(room_timeline_projection::stream_position.desc())
+            .select(room_events::membership)
+            .first::<Option<String>>(&mut connection)
+            .optional()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))
+            .map(|value| value.flatten())
+    }
+
+    fn fetch_history_visibility_at_event(
+        &self,
+        room_id: &str,
+        event_id: &str,
+    ) -> Result<Option<String>, DomainError> {
+        use schema::{room_events, room_timeline_projection};
+
+        let mut connection = self
+            .connection_pool
+            .get()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        let target_stream_position = room_timeline_projection::table
+            .filter(room_timeline_projection::room_id.eq(room_id))
+            .filter(room_timeline_projection::event_id.eq(event_id))
+            .select(room_timeline_projection::stream_position)
+            .first::<i64>(&mut connection)
+            .optional()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        let Some(target_stream_position) = target_stream_position else {
+            return Ok(None);
+        };
+
+        room_timeline_projection::table
+            .inner_join(
+                room_events::table.on(room_events::event_id.eq(room_timeline_projection::event_id)),
+            )
+            .filter(room_timeline_projection::room_id.eq(room_id))
+            .filter(room_timeline_projection::stream_position.le(target_stream_position))
+            .filter(room_events::event_type.eq("m.room.history_visibility"))
+            .filter(room_events::state_key.eq(Some(String::new())))
+            .order(room_timeline_projection::stream_position.desc())
+            .select(room_events::history_visibility)
+            .first::<Option<String>>(&mut connection)
+            .optional()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))
+            .map(|value| value.flatten())
     }
 }
 

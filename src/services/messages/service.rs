@@ -13,12 +13,6 @@ pub fn get_room_event(
     application_state
         .rooms_service
         .get_room_event(user_id, room_id, event_id)
-        .map_err(|error| match error {
-            RoomsApplicationError::Forbidden | RoomsApplicationError::InvalidParameter => {
-                RoomsApplicationError::NotFound
-            }
-            other => other,
-        })
 }
 
 pub fn send_message_event(
