@@ -20,9 +20,9 @@ use crate::{
         rooms::{
             entities::{
                 CreateRoomCommand, CreatedRoom, GetRoomMessagesCommand, JoinRoomCommand,
-                JoinedRoom, JoinedRooms, LeaveRoomCommand, LeftRoom, RoomCreationFlow,
-                RoomFactoryEvent, RoomIdentifier, RoomMessageDirection, RoomMessagesPage,
-                RoomStateEvent, RoomTimelineEvent,
+                JoinedMembers, JoinedRoom, JoinedRoomMember, JoinedRooms, LeaveRoomCommand,
+                LeftRoom, RoomCreationFlow, RoomFactoryEvent, RoomIdentifier,
+                RoomMessageDirection, RoomMessagesPage, RoomStateEvent, RoomTimelineEvent,
                 RoomValidationError, ValidatedCreateRoomInput, parse_room_message_event_content,
                 parse_room_state_event_content,
             },
@@ -166,6 +166,34 @@ impl RoomsService {
             .map_err(|_| RoomsApplicationError::Internal)?;
 
         Ok(JoinedRooms { room_ids })
+    }
+
+    pub fn get_joined_members(
+        &self,
+        user_id: &AuthorizedUserIdentifier,
+        room_id: String,
+    ) -> Result<JoinedMembers, RoomsApplicationError> {
+        self.require_joined_membership(&room_id, user_id.as_existing_user_identifier())?;
+
+        let members = self
+            .room_repository
+            .fetch_joined_members_profiles(&room_id)
+            .map_err(|_| RoomsApplicationError::Internal)?;
+
+        Ok(JoinedMembers {
+            joined: members
+                .into_iter()
+                .map(|member| {
+                    (
+                        member.user_id,
+                        JoinedRoomMember {
+                            display_name: member.display_name,
+                            avatar_url: member.avatar_url,
+                        },
+                    )
+                })
+                .collect(),
+        })
     }
 
     pub fn leave_room_by_id(
@@ -480,16 +508,26 @@ impl RoomsService {
         room_id: &str,
         user_id: &ExistingUserIdentifier,
     ) -> Result<SupportedRoomVersion, RoomsApplicationError> {
-        let room_join_context = self.require_room_membership_context(room_id, user_id)?;
-        if room_join_context.membership_state.as_deref() != Some("join") {
-            return Err(RoomsApplicationError::Forbidden);
-        }
+        let room_join_context = self.require_joined_membership(room_id, user_id)?;
 
         room_join_context
             .room_version
             .unwrap_or_else(|| self.events_service.default_room_version().to_string())
             .parse::<SupportedRoomVersion>()
             .map_err(|_| RoomsApplicationError::Internal)
+    }
+
+    fn require_joined_membership(
+        &self,
+        room_id: &str,
+        user_id: &ExistingUserIdentifier,
+    ) -> Result<crate::services::rooms::persistence::RoomJoinContext, RoomsApplicationError> {
+        self.require_room_identifier(room_id)?;
+        let room_join_context = self.require_room_membership_context(room_id, user_id)?;
+        if room_join_context.membership_state.as_deref() != Some("join") {
+            return Err(RoomsApplicationError::Forbidden);
+        }
+        Ok(room_join_context)
     }
 
     fn append_membership_change(

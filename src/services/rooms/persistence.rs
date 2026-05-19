@@ -42,6 +42,13 @@ pub struct RoomJoinContext {
     pub membership_state: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+pub struct JoinedRoomMemberProfile {
+    pub user_id: String,
+    pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
+}
+
 pub trait RoomRepository: Send + Sync {
     fn create_room_with_initial_events(
         &self,
@@ -55,6 +62,10 @@ pub trait RoomRepository: Send + Sync {
         user_id: &str,
     ) -> Result<Option<RoomJoinContext>, DomainError>;
     fn fetch_joined_room_ids_for_user(&self, user_id: &str) -> Result<Vec<String>, DomainError>;
+    fn fetch_joined_members_profiles(
+        &self,
+        room_id: &str,
+    ) -> Result<Vec<JoinedRoomMemberProfile>, DomainError>;
 
     fn append_room_event(
         &self,
@@ -502,6 +513,50 @@ impl RoomRepository for RoomPersistence {
             .order(room_membership_projection::room_id.asc())
             .load::<String>(&mut connection)
             .map_err(|error| DomainError::InvalidRequest(error.to_string()))
+    }
+
+    fn fetch_joined_members_profiles(
+        &self,
+        room_id: &str,
+    ) -> Result<Vec<JoinedRoomMemberProfile>, DomainError> {
+        use schema::{room_events, room_membership_projection};
+
+        let mut connection = self
+            .connection_pool
+            .get()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        let rows = room_membership_projection::table
+            .inner_join(
+                room_events::table.on(room_events::event_id.eq(room_membership_projection::event_id)),
+            )
+            .filter(room_membership_projection::room_id.eq(room_id))
+            .filter(room_membership_projection::membership.eq("join"))
+            .order(room_membership_projection::user_id.asc())
+            .select((room_membership_projection::user_id, room_events::content_json))
+            .load::<(String, serde_json::Value)>(&mut connection)
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(user_id, content)| {
+                let display_name = content
+                    .get("displayname")
+                    .or_else(|| content.get("display_name"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned);
+                let avatar_url = content
+                    .get("avatar_url")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned);
+
+                JoinedRoomMemberProfile {
+                    user_id,
+                    display_name,
+                    avatar_url,
+                }
+            })
+            .collect())
     }
 
     fn append_room_event(
