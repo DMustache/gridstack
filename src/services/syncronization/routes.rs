@@ -1,4 +1,7 @@
-use axum::{Router, middleware, routing::{get, post}};
+use axum::{
+    Router, middleware,
+    routing::{get, post},
+};
 
 use crate::services::{
     layers::{AuthorizationLayer, RateLimitLayer},
@@ -23,6 +26,7 @@ pub fn routes(state: &ApplicationState) -> Router<ApplicationState> {
             "/_matrix/client/v3/user/{userId}/filter/{filterId}",
             get(handlers::get_filter),
         )
+        .route("/_matrix/client/v3/sync", get(handlers::sync))
         .route_layer(authorization_layer)
         .route_layer(rate_limit_layer)
 }

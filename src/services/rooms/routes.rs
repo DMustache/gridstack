@@ -1,4 +1,7 @@
-use axum::{Router, middleware, routing::{get, post}};
+use axum::{
+    Router, middleware,
+    routing::{get, post},
+};
 
 use crate::services::{
     layers::{AuthorizationLayer, RateLimitLayer},

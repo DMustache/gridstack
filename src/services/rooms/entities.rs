@@ -204,10 +204,11 @@ fn validate_initial_state(
         }
 
         let parsed_content =
-            parse_room_state_event_content(event_type.clone(), raw_state_event.content)
-                .map_err(|_| RoomValidationError::InvalidInitialStateEventContent {
+            parse_room_state_event_content(event_type.clone(), raw_state_event.content).map_err(
+                |_| RoomValidationError::InvalidInitialStateEventContent {
                     event_type: event_type.as_ref().to_owned(),
-                })?;
+                },
+            )?;
 
         validated_initial_state.push(ValidatedInitialStateEventInput {
             event_type,

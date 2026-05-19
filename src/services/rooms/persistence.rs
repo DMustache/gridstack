@@ -504,7 +504,9 @@ impl RoomRepository for RoomPersistence {
             .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
 
         let rows = room_current_state::table
-            .inner_join(room_events::table.on(room_events::event_id.eq(room_current_state::event_id)))
+            .inner_join(
+                room_events::table.on(room_events::event_id.eq(room_current_state::event_id)),
+            )
             .filter(room_current_state::room_id.eq(room_id))
             .order((
                 room_current_state::event_type.asc(),
@@ -535,7 +537,16 @@ impl RoomRepository for RoomPersistence {
         Ok(rows
             .into_iter()
             .map(
-                |(content, event_id, origin_server_ts, room_id, sender, state_key, event_type, unsigned)| {
+                |(
+                    content,
+                    event_id,
+                    origin_server_ts,
+                    room_id,
+                    sender,
+                    state_key,
+                    event_type,
+                    unsigned,
+                )| {
                     RoomStateEvent {
                         content,
                         event_id,
@@ -565,7 +576,9 @@ impl RoomRepository for RoomPersistence {
             .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
 
         let row = room_current_state::table
-            .inner_join(room_events::table.on(room_events::event_id.eq(room_current_state::event_id)))
+            .inner_join(
+                room_events::table.on(room_events::event_id.eq(room_current_state::event_id)),
+            )
             .filter(room_current_state::room_id.eq(room_id))
             .filter(room_current_state::event_type.eq(event_type))
             .filter(room_current_state::state_key.eq(state_key))
@@ -593,7 +606,16 @@ impl RoomRepository for RoomPersistence {
             .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
 
         Ok(row.map(
-            |(content, event_id, origin_server_ts, room_id, sender, state_key, event_type, unsigned)| {
+            |(
+                content,
+                event_id,
+                origin_server_ts,
+                room_id,
+                sender,
+                state_key,
+                event_type,
+                unsigned,
+            )| {
                 RoomStateEvent {
                     content,
                     event_id,
@@ -665,15 +687,19 @@ impl RoomRepository for RoomPersistence {
             .into_boxed();
 
         if backward {
-            query = query.filter(room_timeline_projection::stream_position.le(start_stream_position));
+            query =
+                query.filter(room_timeline_projection::stream_position.le(start_stream_position));
             if let Some(to_stream_position) = to_stream_position {
-                query = query.filter(room_timeline_projection::stream_position.gt(to_stream_position));
+                query =
+                    query.filter(room_timeline_projection::stream_position.gt(to_stream_position));
             }
             query = query.order(room_timeline_projection::stream_position.desc());
         } else {
-            query = query.filter(room_timeline_projection::stream_position.ge(start_stream_position));
+            query =
+                query.filter(room_timeline_projection::stream_position.ge(start_stream_position));
             if let Some(to_stream_position) = to_stream_position {
-                query = query.filter(room_timeline_projection::stream_position.lt(to_stream_position));
+                query =
+                    query.filter(room_timeline_projection::stream_position.lt(to_stream_position));
             }
             query = query.order(room_timeline_projection::stream_position.asc());
         }

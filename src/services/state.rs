@@ -98,9 +98,9 @@ impl ApplicationState {
             Arc::clone(&authorization_service),
             &server_name,
         ));
-        let filter_repository: Arc<dyn FilterRepository> = Arc::new(SyncronizationPersistence::new(
-            &application_configuration.database.url,
-        ));
+        let filter_repository: Arc<dyn FilterRepository> = Arc::new(
+            SyncronizationPersistence::new(&application_configuration.database.url),
+        );
         let syncronization_service = Arc::new(SyncronizationService::new(
             filter_repository,
             Arc::clone(&authorization_service),

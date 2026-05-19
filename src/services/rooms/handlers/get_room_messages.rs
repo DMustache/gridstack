@@ -39,7 +39,9 @@ impl TryFrom<GetRoomMessagesQuery> for GetRoomMessagesCommand {
         };
 
         let limit = match value.limit {
-            Some(limit) => usize::try_from(limit).map_err(|_| RoomsApplicationError::InvalidParameter)?,
+            Some(limit) => {
+                usize::try_from(limit).map_err(|_| RoomsApplicationError::InvalidParameter)?
+            }
             None => 10,
         };
 
@@ -86,9 +88,17 @@ impl From<RoomMessagesPage> for GetRoomMessagesView {
     fn from(value: RoomMessagesPage) -> Self {
         Self {
             start: value.start,
-            chunk: value.chunk.into_iter().map(RoomTimelineEventView::from).collect(),
+            chunk: value
+                .chunk
+                .into_iter()
+                .map(RoomTimelineEventView::from)
+                .collect(),
             end: value.end,
-            state: value.state.into_iter().map(RoomTimelineEventView::from).collect(),
+            state: value
+                .state
+                .into_iter()
+                .map(RoomTimelineEventView::from)
+                .collect(),
         }
     }
 }

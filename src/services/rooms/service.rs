@@ -19,8 +19,8 @@ use crate::{
         },
         rooms::{
             entities::{
-                CreateRoomCommand, CreatedRoom, GetRoomMessagesCommand, JoinedRoom,
-                JoinRoomCommand, LeaveRoomCommand, LeftRoom, RoomCreationFlow, RoomFactoryEvent,
+                CreateRoomCommand, CreatedRoom, GetRoomMessagesCommand, JoinRoomCommand,
+                JoinedRoom, LeaveRoomCommand, LeftRoom, RoomCreationFlow, RoomFactoryEvent,
                 RoomIdentifier, RoomMessageDirection, RoomMessagesPage, RoomStateEvent,
                 RoomValidationError, ValidatedCreateRoomInput, parse_room_state_event_content,
             },
@@ -121,8 +121,10 @@ impl RoomsService {
             return Err(RoomsApplicationError::Forbidden);
         }
 
-        let room_join_context =
-            self.require_room_membership_context(&room_id, joined_user_id.as_existing_user_identifier())?;
+        let room_join_context = self.require_room_membership_context(
+            &room_id,
+            joined_user_id.as_existing_user_identifier(),
+        )?;
 
         if room_join_context.membership_state.as_deref() == Some("join") {
             return Ok(JoinedRoom { room_id });
@@ -160,8 +162,10 @@ impl RoomsService {
     ) -> Result<LeftRoom, RoomsApplicationError> {
         self.require_room_identifier(&room_id)?;
 
-        let room_join_context =
-            self.require_room_membership_context(&room_id, left_user_id.as_existing_user_identifier())?;
+        let room_join_context = self.require_room_membership_context(
+            &room_id,
+            left_user_id.as_existing_user_identifier(),
+        )?;
 
         let Some(membership_state) = room_join_context.membership_state.as_deref() else {
             return Err(RoomsApplicationError::Forbidden);
@@ -242,9 +246,8 @@ impl RoomsService {
                 .map_err(|_| RoomsApplicationError::InvalidParameter)
         };
 
-        let encode_stream_token = |stream_position: i64| -> String {
-            format!("s{stream_position}_0_0")
-        };
+        let encode_stream_token =
+            |stream_position: i64| -> String { format!("s{stream_position}_0_0") };
 
         let from_stream_position = command
             .from_token
@@ -330,10 +333,7 @@ impl RoomsService {
             .create_state_event(
                 room_id.clone(),
                 room_version,
-                user_id
-                    .as_existing_user_identifier()
-                    .as_str()
-                    .to_owned(),
+                user_id.as_existing_user_identifier().as_str().to_owned(),
                 state_event_kind,
                 state_key,
                 event_content,
