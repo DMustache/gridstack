@@ -116,7 +116,8 @@ impl RoomsService {
         room_id: String,
         command: JoinRoomCommand,
     ) -> Result<JoinedRoom, RoomsApplicationError> {
-        self.require_room_identifier(&room_id)?;
+        self.require_room_identifier(&room_id)
+            .map_err(|_| RoomsApplicationError::InvalidParameter)?;
 
         if command.third_party_signed.is_some() {
             return Err(RoomsApplicationError::Forbidden);
@@ -303,11 +304,34 @@ impl RoomsService {
         room_id: String,
         event_id: String,
     ) -> Result<RoomTimelineEvent, RoomsApplicationError> {
-        if event_id.trim().is_empty() {
+        self.require_room_identifier(&room_id)?;
+        if !event_id.starts_with('$') || event_id.trim().is_empty() {
             return Err(RoomsApplicationError::InvalidParameter);
         }
 
-        self.require_room_state_read_access(&room_id, user_id.as_existing_user_identifier())?;
+        let membership = self
+            .room_repository
+            .fetch_membership_at_event(
+                &room_id,
+                &event_id,
+                user_id.as_existing_user_identifier().as_str(),
+            )
+            .map_err(|_| RoomsApplicationError::Internal)?;
+
+        let history_visibility = self
+            .room_repository
+            .fetch_history_visibility_at_event(&room_id, &event_id)
+            .map_err(|_| RoomsApplicationError::Internal)?;
+
+        let can_read_via_membership = membership.as_deref() == Some("join");
+        let can_read_via_history_visibility = matches!(
+            history_visibility.as_deref(),
+            Some("shared") | Some("world_readable")
+        );
+
+        if !can_read_via_membership && !can_read_via_history_visibility {
+            return Err(RoomsApplicationError::NotFound);
+        }
 
         self.room_repository
             .fetch_room_event_by_id(&room_id, &event_id)

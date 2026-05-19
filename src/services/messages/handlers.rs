@@ -30,6 +30,8 @@ pub enum SendMessageEventResponse {
 pub enum GetRoomEventResponse {
     #[matrix(status = 200)]
     Ok(Json<RoomTimelineEventView>),
+    #[matrix(status = 400, error = [(matrix_error = "M_INVALID_PARAM", from = RoomsApplicationError::InvalidParameter)])]
+    BadRequest(Json<MatrixErrorResponse>),
     #[matrix(status = 404, error = [(matrix_error = "M_NOT_FOUND", from = RoomsApplicationError::NotFound)])]
     NotFound(Json<MatrixErrorResponse>),
     #[matrix(status = 500, error = [(matrix_error = "M_UNKNOWN", from = RoomsApplicationError::Internal)])]
