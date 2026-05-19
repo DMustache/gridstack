@@ -95,6 +95,16 @@ pub struct SendReceiptRequestDto {
     pub thread_id: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Default)]
+pub struct SetReadMarkersRequestDto {
+    #[serde(rename = "m.fully_read")]
+    pub fully_read_event_id: Option<String>,
+    #[serde(rename = "m.read")]
+    pub read_event_id: Option<String>,
+    #[serde(rename = "m.read.private")]
+    pub private_read_event_id: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RoomReceiptType {
     Read,
@@ -126,6 +136,13 @@ pub struct SendReceiptCommand {
     pub receipt_type: RoomReceiptType,
     pub event_id: String,
     pub thread_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SetReadMarkersCommand {
+    pub fully_read_event_id: Option<String>,
+    pub read_event_id: Option<String>,
+    pub private_read_event_id: Option<String>,
 }
 
 impl TryFrom<CreateRoomRequestDto> for CreateRoomCommand {

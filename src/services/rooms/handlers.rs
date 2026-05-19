@@ -22,6 +22,7 @@ use crate::services::{
             leave_room::{LeaveRoomCommand, LeaveRoomInfo, LeaveRoomView},
             send_receipt::{SendReceiptInfo, SendReceiptView},
             send_room_event::SendRoomEventView,
+            set_read_markers::{SetReadMarkersInfo, SetReadMarkersView},
             set_room_state_with_key::SetRoomStateWithKeyView,
         },
     },
@@ -41,6 +42,7 @@ pub mod joined_rooms;
 pub mod leave_room;
 pub mod send_receipt;
 pub mod send_room_event;
+pub mod set_read_markers;
 pub mod set_room_state_with_key;
 
 #[derive(IntoResponseEnum)]
@@ -187,6 +189,18 @@ pub enum SendRoomEventResponse {
 pub enum SendReceiptResponse {
     #[matrix(status = 200)]
     Ok(Json<SendReceiptView>),
+    #[matrix(status = 400, error = [(matrix_error = "M_INVALID_PARAM", from = RoomsApplicationError::InvalidParameter)])]
+    BadRequest(Json<MatrixErrorResponse>),
+    #[matrix(status = 403, error = [(matrix_error = "M_FORBIDDEN", from = RoomsApplicationError::Forbidden)])]
+    Forbidden(Json<MatrixErrorResponse>),
+    #[matrix(status = 500, error = [(matrix_error = "M_UNKNOWN", from = RoomsApplicationError::Internal)])]
+    Internal(Json<MatrixErrorResponse>),
+}
+
+#[derive(IntoResponseEnum)]
+pub enum SetReadMarkersResponse {
+    #[matrix(status = 200)]
+    Ok(Json<SetReadMarkersView>),
     #[matrix(status = 400, error = [(matrix_error = "M_INVALID_PARAM", from = RoomsApplicationError::InvalidParameter)])]
     BadRequest(Json<MatrixErrorResponse>),
     #[matrix(status = 403, error = [(matrix_error = "M_FORBIDDEN", from = RoomsApplicationError::Forbidden)])]
@@ -576,6 +590,31 @@ pub async fn send_room_receipt(
                 info!(error = %error_kind, "send receipt rejected");
             }
             SendReceiptResponse::from_mapped_error(error_kind)
+        }
+    }
+}
+
+pub async fn set_room_read_markers(
+    Path(room_id): Path<String>,
+    State(application_state): State<ApplicationState>,
+    Extension(access_session): Extension<AccessSessionStorageUnit>,
+    Json(request): Json<SetReadMarkersInfo>,
+) -> SetReadMarkersResponse {
+    let command = request.into();
+
+    match application_state
+        .rooms_service
+        .set_read_markers(access_session.user_identifier(), room_id, command)
+        .map(|()| SetReadMarkersView::default())
+    {
+        Ok(view) => SetReadMarkersResponse::Ok(Json(view)),
+        Err(error_kind) => {
+            if matches!(error_kind, RoomsApplicationError::Internal) {
+                error!("set read markers failed with internal error");
+            } else {
+                info!(error = %error_kind, "set read markers rejected");
+            }
+            SetReadMarkersResponse::from_mapped_error(error_kind)
         }
     }
 }
