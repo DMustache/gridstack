@@ -11,6 +11,7 @@ use crate::services::{
         errors::RoomsApplicationError,
         handlers::{
             create_room::{CreateRoomCommand, CreateRoomInfo, CreateRoomView},
+            get_room_event::GetRoomEventView,
             get_room_messages::{GetRoomMessagesQuery, GetRoomMessagesView},
             get_room_state::RoomStateEventView,
             get_room_state_with_key::{GetRoomStateWithKeyFormatQuery, room_state_event_to_value},
@@ -25,6 +26,7 @@ use crate::services::{
 };
 
 pub mod create_room;
+pub mod get_room_event;
 pub mod get_room_messages;
 pub mod get_room_state;
 pub mod get_room_state_with_key;
@@ -105,6 +107,16 @@ pub enum GetRoomMessagesResponse {
     BadRequest(Json<MatrixErrorResponse>),
     #[matrix(status = 403, error = [(matrix_error = "M_FORBIDDEN", from = RoomsApplicationError::Forbidden)])]
     Forbidden(Json<MatrixErrorResponse>),
+    #[matrix(status = 500, error = [(matrix_error = "M_UNKNOWN", from = RoomsApplicationError::Internal)])]
+    Internal(Json<MatrixErrorResponse>),
+}
+
+#[derive(IntoResponseEnum)]
+pub enum GetRoomEventResponse {
+    #[matrix(status = 200)]
+    Ok(Json<GetRoomEventView>),
+    #[matrix(status = 404, error = [(matrix_error = "M_NOT_FOUND", from = RoomsApplicationError::Forbidden), (matrix_error = "M_NOT_FOUND", from = RoomsApplicationError::NotFound)])]
+    NotFound(Json<MatrixErrorResponse>),
     #[matrix(status = 500, error = [(matrix_error = "M_UNKNOWN", from = RoomsApplicationError::Internal)])]
     Internal(Json<MatrixErrorResponse>),
 }
@@ -339,6 +351,28 @@ pub async fn get_room_messages(
                 info!(error = %error_kind, "get room messages rejected");
             }
             GetRoomMessagesResponse::from_mapped_error(error_kind)
+        }
+    }
+}
+
+pub async fn get_room_event(
+    Path((room_id, event_id)): Path<(String, String)>,
+    State(application_state): State<ApplicationState>,
+    Extension(access_session): Extension<AccessSessionStorageUnit>,
+) -> GetRoomEventResponse {
+    match application_state
+        .rooms_service
+        .get_room_event(access_session.user_identifier(), room_id, event_id)
+        .map(GetRoomEventView::from)
+    {
+        Ok(view) => GetRoomEventResponse::Ok(Json(view)),
+        Err(error_kind) => {
+            if matches!(error_kind, RoomsApplicationError::Internal) {
+                error!("get room event failed with internal error");
+            } else {
+                info!(error = %error_kind, "get room event rejected");
+            }
+            GetRoomEventResponse::from_mapped_error(error_kind)
         }
     }
 }
