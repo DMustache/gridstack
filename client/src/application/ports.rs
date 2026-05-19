@@ -6,7 +6,10 @@ use crate::domain::{
         LoginUserInfo, LoginUserView, LogoutUserView, RegisterUserInfo, RegisterUserView,
         ServerCredentials, SessionRecord, UiaaResponseView, WhoAmIView,
     },
-    rooms::{CreateRoomInfo, CreateRoomView, RoomListItem},
+    rooms::{
+        CreateRoomInfo, CreateRoomView, GetRoomMessagesQuery, GetRoomMessagesView, JoinRoomInfo,
+        JoinRoomView, LeaveRoomInfo, LeaveRoomView, RoomListItem, RoomStateEventView,
+    },
     error::ClientError,
 };
 
@@ -50,11 +53,40 @@ pub trait RoomsApi: Send + Sync {
         access_token: &str,
         request: &CreateRoomInfo,
     ) -> Result<CreateRoomView, ClientError>;
+    async fn join_room_by_id(
+        &self,
+        access_token: &str,
+        room_id: &str,
+        request: &JoinRoomInfo,
+    ) -> Result<JoinRoomView, ClientError>;
+    async fn leave_room_by_id(
+        &self,
+        access_token: &str,
+        room_id: &str,
+        request: &LeaveRoomInfo,
+    ) -> Result<LeaveRoomView, ClientError>;
+    async fn get_room_state(
+        &self,
+        access_token: &str,
+        room_id: &str,
+    ) -> Result<Vec<RoomStateEventView>, ClientError>;
+    async fn get_room_messages(
+        &self,
+        access_token: &str,
+        room_id: &str,
+        query: &GetRoomMessagesQuery,
+    ) -> Result<GetRoomMessagesView, ClientError>;
 }
 
 #[async_trait]
 pub trait RoomRepository: Send + Sync {
     async fn add_room(&self, room: &RoomListItem) -> Result<(), ClientError>;
+    async fn remove_room(
+        &self,
+        server_url: &str,
+        user_id: &str,
+        room_id: &str,
+    ) -> Result<(), ClientError>;
     async fn list_rooms_by_server_user(
         &self,
         server_url: &str,
@@ -78,4 +110,8 @@ pub trait ServerProfileRepository: Send + Sync {
         server_url: &str,
         username: &str,
     ) -> Result<Option<ServerCredentials>, ClientError>;
+
+    async fn set_preference(&self, key: &str, value: &str) -> Result<(), ClientError>;
+
+    async fn get_preference(&self, key: &str) -> Result<Option<String>, ClientError>;
 }
