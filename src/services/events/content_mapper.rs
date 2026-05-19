@@ -132,6 +132,15 @@ struct MatrixPduRoomThirdPartyInviteContent {
 struct MatrixPduRoomMessageContent {
     body: String,
     msgtype: String,
+    #[serde(rename = "m.relates_to", skip_serializing_if = "Option::is_none")]
+    relates_to: Option<MatrixPduRelatesToContent>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct MatrixPduRelatesToContent {
+    #[serde(rename = "rel_type")]
+    relation_type: String,
+    event_id: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -245,9 +254,18 @@ impl From<MatrixEventContent> for MatrixPduContent {
                 medium,
                 id_server,
             }),
-            MatrixEventContent::RoomMessage { body, msgtype } => {
-                Self::RoomMessage(MatrixPduRoomMessageContent { body, msgtype })
-            }
+            MatrixEventContent::RoomMessage {
+                body,
+                msgtype,
+                thread_root_event_id,
+            } => Self::RoomMessage(MatrixPduRoomMessageContent {
+                body,
+                msgtype,
+                relates_to: thread_root_event_id.map(|event_id| MatrixPduRelatesToContent {
+                    relation_type: "m.thread".to_owned(),
+                    event_id,
+                }),
+            }),
             MatrixEventContent::RoomRedaction { redacts, reason } => {
                 Self::RoomRedaction(MatrixPduRoomRedactionContent { redacts, reason })
             }

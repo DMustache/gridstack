@@ -1,9 +1,10 @@
 use chrono::Utc;
 use diesel::{
     BoolExpressionMethods, Connection, ExpressionMethods, JoinOnDsl, NullableExpressionMethods,
-    OptionalExtension, QueryDsl, RunQueryDsl, insert_into,
+    OptionalExtension, QueryDsl, QueryableByName, RunQueryDsl, insert_into,
     pg::PgConnection,
     r2d2::{self, ConnectionManager},
+    sql_query,
 };
 use uuid::Uuid;
 
@@ -71,6 +72,26 @@ pub trait RoomRepository: Send + Sync {
         &self,
         event_write_contract: &EventWriteContract,
     ) -> Result<(), DomainError>;
+    fn append_room_receipt(
+        &self,
+        room_id: &str,
+        user_id: &str,
+        receipt_type: &str,
+        event_id: &str,
+        thread_id: Option<&str>,
+    ) -> Result<(), DomainError>;
+    fn append_room_fully_read_marker(
+        &self,
+        room_id: &str,
+        user_id: &str,
+        event_id: &str,
+    ) -> Result<(), DomainError>;
+    fn room_event_matches_thread(
+        &self,
+        room_id: &str,
+        event_id: &str,
+        thread_id: &str,
+    ) -> Result<bool, DomainError>;
 
     fn fetch_room_event_id_by_transaction_id(
         &self,
@@ -149,6 +170,12 @@ pub struct RoomPersistence {
     connection_pool: r2d2::Pool<ConnectionManager<PgConnection>>,
 }
 
+#[derive(QueryableByName)]
+struct ThreadMatchSqlRecord {
+    #[diesel(sql_type = diesel::sql_types::Bool)]
+    matches: bool,
+}
+
 impl RoomPersistence {
     #[must_use]
     pub fn new(database_url: &str) -> Self {
@@ -209,6 +236,7 @@ impl RoomRepository for RoomPersistence {
                 }
 
                 let mut room_events_rows = Vec::new();
+                let mut event_relation_rows = Vec::new();
                 let mut prev_edge_rows = Vec::new();
                 let mut auth_edge_rows = Vec::new();
                 let mut forward_extremity_rows = Vec::new();
@@ -250,6 +278,16 @@ impl RoomRepository for RoomPersistence {
                                 .unwrap_or_default(),
                             created_at: now,
                         });
+                        if let Some((relation_type, related_event_id)) =
+                            extract_event_relation(&event_row.content)
+                        {
+                            event_relation_rows.push((
+                                event_row.room_id.clone(),
+                                event_row.event_id.clone(),
+                                relation_type,
+                                related_event_id,
+                            ));
+                        }
                     }
 
                     for edge in &event_write_contract.prev_edge_rows {
@@ -333,6 +371,21 @@ impl RoomRepository for RoomPersistence {
                     insert_into(room_events::table)
                         .values(room_events_rows)
                         .execute(connection)?;
+                }
+                if !event_relation_rows.is_empty() {
+                    for (room_id, event_id, relation_type, related_event_id) in event_relation_rows
+                    {
+                        sql_query(
+                            "INSERT INTO public.room_event_relations (room_id, event_id, rel_type, related_event_id)
+                             VALUES ($1, $2, $3, $4)
+                             ON CONFLICT DO NOTHING",
+                        )
+                        .bind::<diesel::sql_types::Text, _>(room_id)
+                        .bind::<diesel::sql_types::Text, _>(event_id)
+                        .bind::<diesel::sql_types::Text, _>(relation_type)
+                        .bind::<diesel::sql_types::Text, _>(related_event_id)
+                        .execute(connection)?;
+                    }
                 }
                 if !prev_edge_rows.is_empty() {
                     insert_into(room_event_prev_edges::table)
@@ -617,6 +670,110 @@ impl RoomRepository for RoomPersistence {
         };
 
         persist_event_batch(&self.connection_pool, &event_batch_write_contract)
+    }
+
+    fn append_room_receipt(
+        &self,
+        room_id: &str,
+        user_id: &str,
+        receipt_type: &str,
+        event_id: &str,
+        thread_id: Option<&str>,
+    ) -> Result<(), DomainError> {
+        let mut connection = self
+            .connection_pool
+            .get()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        let inserted_rows = sql_query(
+            "INSERT INTO public.room_receipts (room_id, user_id, receipt_type, event_id, thread_id, receipt_ts)
+             SELECT $1, $2, $3, e.event_id, $5, (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT
+             FROM public.room_events e
+             WHERE e.room_id = $1 AND e.event_id = $4",
+        )
+        .bind::<diesel::sql_types::Text, _>(room_id)
+        .bind::<diesel::sql_types::Text, _>(user_id)
+        .bind::<diesel::sql_types::Text, _>(receipt_type)
+        .bind::<diesel::sql_types::Text, _>(event_id)
+        .bind::<diesel::sql_types::Text, _>(thread_id.unwrap_or_default())
+        .execute(&mut connection)
+        .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        if inserted_rows == 0 {
+            return Err(DomainError::NotFound);
+        }
+        Ok(())
+    }
+
+    fn append_room_fully_read_marker(
+        &self,
+        room_id: &str,
+        user_id: &str,
+        event_id: &str,
+    ) -> Result<(), DomainError> {
+        let mut connection = self
+            .connection_pool
+            .get()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        let inserted_rows = sql_query(
+            "INSERT INTO public.room_read_markers (room_id, user_id, fully_read_event_id)
+             SELECT $1, $2, e.event_id
+             FROM public.room_events e
+             WHERE e.room_id = $1 AND e.event_id = $3",
+        )
+        .bind::<diesel::sql_types::Text, _>(room_id)
+        .bind::<diesel::sql_types::Text, _>(user_id)
+        .bind::<diesel::sql_types::Text, _>(event_id)
+        .execute(&mut connection)
+        .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        if inserted_rows == 0 {
+            return Err(DomainError::NotFound);
+        }
+        Ok(())
+    }
+
+    fn room_event_matches_thread(
+        &self,
+        room_id: &str,
+        event_id: &str,
+        thread_id: &str,
+    ) -> Result<bool, DomainError> {
+        let mut connection = self
+            .connection_pool
+            .get()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        let row = sql_query(
+            "SELECT CASE
+                WHEN $3 = 'main' THEN NOT EXISTS (
+                    SELECT 1
+                    FROM public.room_event_relations rel
+                    WHERE rel.room_id = $1
+                      AND rel.event_id = $2
+                      AND rel.rel_type = 'm.thread'
+                )
+                ELSE (
+                    $2 = $3
+                    OR EXISTS (
+                        SELECT 1
+                        FROM public.room_event_relations rel
+                        WHERE rel.room_id = $1
+                          AND rel.event_id = $2
+                          AND rel.rel_type = 'm.thread'
+                          AND rel.related_event_id = $3
+                    )
+                )
+             END AS matches",
+        )
+        .bind::<diesel::sql_types::Text, _>(room_id)
+        .bind::<diesel::sql_types::Text, _>(event_id)
+        .bind::<diesel::sql_types::Text, _>(thread_id)
+        .get_result::<ThreadMatchSqlRecord>(&mut connection)
+        .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        Ok(row.matches)
     }
 
     fn fetch_room_event_id_by_transaction_id(
@@ -1257,6 +1414,7 @@ fn persist_event_batch(
         .transaction(|connection| {
             let now = Utc::now().naive_utc();
             let mut room_events_rows = Vec::new();
+            let mut event_relation_rows = Vec::new();
             let mut prev_edge_rows = Vec::new();
             let mut auth_edge_rows = Vec::new();
             let mut forward_extremity_rows = Vec::new();
@@ -1297,6 +1455,16 @@ fn persist_event_batch(
                             .unwrap_or_default(),
                         created_at: now,
                     });
+                    if let Some((relation_type, related_event_id)) =
+                        extract_event_relation(&event_row.content)
+                    {
+                        event_relation_rows.push((
+                            event_row.room_id.clone(),
+                            event_row.event_id.clone(),
+                            relation_type,
+                            related_event_id,
+                        ));
+                    }
                 }
 
                 for edge in &event_write_contract.prev_edge_rows {
@@ -1380,6 +1548,20 @@ fn persist_event_batch(
                 insert_into(room_events::table)
                     .values(room_events_rows)
                     .execute(connection)?;
+            }
+            if !event_relation_rows.is_empty() {
+                for (room_id, event_id, relation_type, related_event_id) in event_relation_rows {
+                    sql_query(
+                        "INSERT INTO public.room_event_relations (room_id, event_id, rel_type, related_event_id)
+                         VALUES ($1, $2, $3, $4)
+                         ON CONFLICT DO NOTHING",
+                    )
+                    .bind::<diesel::sql_types::Text, _>(room_id)
+                    .bind::<diesel::sql_types::Text, _>(event_id)
+                    .bind::<diesel::sql_types::Text, _>(relation_type)
+                    .bind::<diesel::sql_types::Text, _>(related_event_id)
+                    .execute(connection)?;
+                }
             }
             if !prev_edge_rows.is_empty() {
                 insert_into(room_event_prev_edges::table)
@@ -1595,6 +1777,25 @@ fn extract_room_topic(content: &MatrixEventContent) -> Option<String> {
 fn extract_is_direct(content: &MatrixEventContent) -> Option<bool> {
     match content {
         MatrixEventContent::RoomMember(value) => value.is_direct,
+        _ => None,
+    }
+}
+
+fn extract_event_relation(content: &MatrixEventContent) -> Option<(String, String)> {
+    match content {
+        MatrixEventContent::RoomMessage {
+            thread_root_event_id: Some(thread_root_event_id),
+            ..
+        } => Some(("m.thread".to_owned(), thread_root_event_id.clone())),
+        MatrixEventContent::CustomJson(content) => {
+            let relation_object = content.get("m.relates_to")?.as_object()?;
+            let relation_type = relation_object.get("rel_type")?.as_str()?.trim();
+            let related_event_id = relation_object.get("event_id")?.as_str()?.trim();
+            if relation_type.is_empty() || related_event_id.is_empty() {
+                return None;
+            }
+            Some((relation_type.to_owned(), related_event_id.to_owned()))
+        }
         _ => None,
     }
 }

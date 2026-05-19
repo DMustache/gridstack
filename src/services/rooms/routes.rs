@@ -63,6 +63,10 @@ pub fn routes(state: &ApplicationState) -> Router<ApplicationState> {
             "/_matrix/client/v3/rooms/{roomId}/send/{eventType}/{txnId}",
             put(handlers::send_room_message_event),
         )
+        .route(
+            "/_matrix/client/v3/rooms/{roomId}/receipt/{receiptType}/{eventId}",
+            post(handlers::send_room_receipt),
+        )
         .route_layer(authorization_layer)
         .route_layer(rate_limit_layer)
 }

@@ -142,7 +142,7 @@ fn validate_event_content(content: &MatrixEventContent) -> Result<(), EventInten
                 });
             }
         }
-        MatrixEventContent::RoomMessage { body, msgtype } => {
+        MatrixEventContent::RoomMessage { body, msgtype, .. } => {
             if body.trim().is_empty() || msgtype.trim().is_empty() {
                 return Err(EventIntentValidationError::InvalidEventContentShape {
                     event_type: MessageEventKind::RoomMessage.as_ref().to_owned(),

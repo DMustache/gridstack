@@ -45,6 +45,16 @@ diesel::table! {
 }
 
 diesel::table! {
+    room_event_relations (room_id, event_id, rel_type, related_event_id) {
+        room_id -> Varchar,
+        event_id -> Varchar,
+        rel_type -> Varchar,
+        related_event_id -> Varchar,
+        created_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     room_events (event_id) {
         event_id -> Varchar,
         room_id -> Varchar,
@@ -109,6 +119,29 @@ diesel::table! {
         task_type -> Varchar,
         status -> Varchar,
         payload_json -> Nullable<Jsonb>,
+        created_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    room_read_markers (stream_position) {
+        stream_position -> Int8,
+        room_id -> Varchar,
+        user_id -> Varchar,
+        fully_read_event_id -> Varchar,
+        updated_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    room_receipts (stream_position) {
+        stream_position -> Int8,
+        room_id -> Varchar,
+        user_id -> Varchar,
+        receipt_type -> Varchar,
+        event_id -> Varchar,
+        thread_id -> Varchar,
+        receipt_ts -> Int8,
         created_at -> Timestamptz,
     }
 }
@@ -198,6 +231,8 @@ diesel::joinable!(room_event_auth_edges -> room_events (event_id));
 diesel::joinable!(room_event_auth_edges -> rooms (room_id));
 diesel::joinable!(room_event_prev_edges -> room_events (event_id));
 diesel::joinable!(room_event_prev_edges -> rooms (room_id));
+diesel::joinable!(room_event_relations -> room_events (event_id));
+diesel::joinable!(room_event_relations -> rooms (room_id));
 diesel::joinable!(room_events -> rooms (room_id));
 diesel::joinable!(room_forward_extremities -> room_events (event_id));
 diesel::joinable!(room_forward_extremities -> rooms (room_id));
@@ -207,6 +242,10 @@ diesel::joinable!(room_membership_projection -> room_events (event_id));
 diesel::joinable!(room_membership_projection -> rooms (room_id));
 diesel::joinable!(room_outbox_tasks -> room_events (event_id));
 diesel::joinable!(room_outbox_tasks -> rooms (room_id));
+diesel::joinable!(room_read_markers -> room_events (fully_read_event_id));
+diesel::joinable!(room_read_markers -> rooms (room_id));
+diesel::joinable!(room_receipts -> room_events (event_id));
+diesel::joinable!(room_receipts -> rooms (room_id));
 diesel::joinable!(room_state_events -> rooms (room_id));
 diesel::joinable!(room_summary_projection -> rooms (room_id));
 diesel::joinable!(room_sync_stream -> room_events (event_id));
@@ -223,11 +262,14 @@ diesel::allow_tables_to_appear_in_same_query!(
     room_current_state,
     room_event_auth_edges,
     room_event_prev_edges,
+    room_event_relations,
     room_events,
     room_forward_extremities,
     room_idempotency_records,
     room_membership_projection,
     room_outbox_tasks,
+    room_read_markers,
+    room_receipts,
     room_state_events,
     room_summary_projection,
     room_sync_stream,

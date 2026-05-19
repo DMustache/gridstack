@@ -53,6 +53,19 @@ pub trait FilterRepository: Send + Sync {
         room_identifier: &str,
         since_stream_position: i64,
     ) -> Result<i64, DomainError>;
+    fn fetch_room_ephemeral_receipt_events_since(
+        &self,
+        room_identifier: &str,
+        user_identifier: &str,
+        since_stream_position: i64,
+    ) -> Result<Vec<Value>, DomainError>;
+    fn fetch_room_account_data_events(
+        &self,
+        room_identifier: &str,
+        user_identifier: &str,
+        since_stream_position: i64,
+        full_state: bool,
+    ) -> Result<Vec<Value>, DomainError>;
     fn upsert_presence(&self, user_identifier: &str, presence: &str) -> Result<(), DomainError>;
     fn fetch_presence_events_for_users(
         &self,
@@ -210,6 +223,26 @@ struct StateEventSqlRecord {
 struct PrevBatchSqlRecord {
     #[diesel(sql_type = Nullable<BigInt>)]
     stream_position: Option<i64>,
+}
+
+#[derive(QueryableByName)]
+struct ReceiptEphemeralSqlRecord {
+    #[diesel(sql_type = Text)]
+    event_id: String,
+    #[diesel(sql_type = Text)]
+    receipt_type: String,
+    #[diesel(sql_type = Text)]
+    user_id: String,
+    #[diesel(sql_type = Text)]
+    thread_id: String,
+    #[diesel(sql_type = BigInt)]
+    receipt_ts: i64,
+}
+
+#[derive(QueryableByName)]
+struct FullyReadMarkerSqlRecord {
+    #[diesel(sql_type = Text)]
+    fully_read_event_id: String,
 }
 
 impl FilterRepository for SyncronizationPersistence {
@@ -426,6 +459,103 @@ impl FilterRepository for SyncronizationPersistence {
             .stream_position
             .unwrap_or(since_stream_position)
             .saturating_sub(1))
+    }
+
+    fn fetch_room_ephemeral_receipt_events_since(
+        &self,
+        room_identifier: &str,
+        user_identifier: &str,
+        since_stream_position: i64,
+    ) -> Result<Vec<Value>, DomainError> {
+        let mut connection = self
+            .connection_pool
+            .get()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+        let rows = sql_query(
+            "SELECT event_id, receipt_type, user_id, thread_id, receipt_ts
+            FROM public.room_receipts
+            WHERE room_id = $1
+              AND stream_position > $2
+              AND (receipt_type = 'm.read' OR (receipt_type = 'm.read.private' AND user_id = $3))
+            ORDER BY stream_position ASC",
+        )
+        .bind::<Text, _>(room_identifier)
+        .bind::<BigInt, _>(since_stream_position)
+        .bind::<Text, _>(user_identifier)
+        .load::<ReceiptEphemeralSqlRecord>(&mut connection)
+        .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let mut receipt_content = serde_json::Map::new();
+                receipt_content.insert("ts".to_owned(), Value::Number(row.receipt_ts.into()));
+                if !row.thread_id.is_empty() {
+                    receipt_content.insert("thread_id".to_owned(), Value::String(row.thread_id));
+                }
+
+                serde_json::json!({
+                    "type": "m.receipt",
+                    "content": {
+                        row.event_id: {
+                            row.receipt_type: {
+                                row.user_id: receipt_content
+                            }
+                        }
+                    }
+                })
+            })
+            .collect())
+    }
+
+    fn fetch_room_account_data_events(
+        &self,
+        room_identifier: &str,
+        user_identifier: &str,
+        since_stream_position: i64,
+        full_state: bool,
+    ) -> Result<Vec<Value>, DomainError> {
+        let mut connection = self
+            .connection_pool
+            .get()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        let rows = if full_state {
+            sql_query(
+                "SELECT DISTINCT ON (room_id, user_id) fully_read_event_id
+                 FROM public.room_read_markers
+                 WHERE room_id = $1 AND user_id = $2
+                 ORDER BY room_id, user_id, stream_position DESC",
+            )
+            .bind::<Text, _>(room_identifier)
+            .bind::<Text, _>(user_identifier)
+            .load::<FullyReadMarkerSqlRecord>(&mut connection)
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?
+        } else {
+            sql_query(
+                "SELECT fully_read_event_id
+                 FROM public.room_read_markers
+                 WHERE room_id = $1 AND user_id = $2 AND stream_position > $3
+                 ORDER BY stream_position ASC",
+            )
+            .bind::<Text, _>(room_identifier)
+            .bind::<Text, _>(user_identifier)
+            .bind::<BigInt, _>(since_stream_position)
+            .load::<FullyReadMarkerSqlRecord>(&mut connection)
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?
+        };
+
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                serde_json::json!({
+                    "type": "m.fully_read",
+                    "content": {
+                        "event_id": row.fully_read_event_id
+                    }
+                })
+            })
+            .collect())
     }
 
     fn upsert_presence(&self, user_identifier: &str, presence: &str) -> Result<(), DomainError> {
