@@ -16,6 +16,7 @@ use crate::services::{
             get_room_state_with_key::{GetRoomStateWithKeyFormatQuery, room_state_event_to_value},
             join_room::{JoinRoomCommand, JoinRoomInfo, JoinRoomView},
             leave_room::{LeaveRoomCommand, LeaveRoomInfo, LeaveRoomView},
+            send_room_event::SendRoomEventView,
             set_room_state_with_key::SetRoomStateWithKeyView,
         },
     },
@@ -29,6 +30,7 @@ pub mod get_room_state;
 pub mod get_room_state_with_key;
 pub mod join_room;
 pub mod leave_room;
+pub mod send_room_event;
 pub mod set_room_state_with_key;
 
 #[derive(IntoResponseEnum)]
@@ -111,6 +113,18 @@ pub enum GetRoomMessagesResponse {
 pub enum SetRoomStateWithKeyResponse {
     #[matrix(status = 200)]
     Ok(Json<SetRoomStateWithKeyView>),
+    #[matrix(status = 400, error = [(matrix_error = "M_INVALID_PARAM", from = RoomsApplicationError::InvalidParameter), (matrix_error = "M_BAD_JSON", from = RoomsApplicationError::InvalidRoomState), (matrix_error = "M_BAD_ALIAS", from = RoomsApplicationError::BadAlias)])]
+    BadRequest(Json<MatrixErrorResponse>),
+    #[matrix(status = 403, error = [(matrix_error = "M_FORBIDDEN", from = RoomsApplicationError::Forbidden), (matrix_error = "M_INVITE_BLOCKED", from = RoomsApplicationError::InviteBlocked)])]
+    Forbidden(Json<MatrixErrorResponse>),
+    #[matrix(status = 500, error = [(matrix_error = "M_UNKNOWN", from = RoomsApplicationError::Internal)])]
+    Internal(Json<MatrixErrorResponse>),
+}
+
+#[derive(IntoResponseEnum)]
+pub enum SendRoomEventResponse {
+    #[matrix(status = 200)]
+    Ok(Json<SendRoomEventView>),
     #[matrix(status = 400, error = [(matrix_error = "M_INVALID_PARAM", from = RoomsApplicationError::InvalidParameter), (matrix_error = "M_BAD_JSON", from = RoomsApplicationError::InvalidRoomState), (matrix_error = "M_BAD_ALIAS", from = RoomsApplicationError::BadAlias)])]
     BadRequest(Json<MatrixErrorResponse>),
     #[matrix(status = 403, error = [(matrix_error = "M_FORBIDDEN", from = RoomsApplicationError::Forbidden), (matrix_error = "M_INVITE_BLOCKED", from = RoomsApplicationError::InviteBlocked)])]
@@ -354,6 +368,35 @@ pub async fn set_room_state_with_key(
                 info!(error = %error_kind, "set room state with key rejected");
             }
             SetRoomStateWithKeyResponse::from_mapped_error(error_kind)
+        }
+    }
+}
+
+pub async fn send_room_message_event(
+    Path((room_id, event_type, transaction_id)): Path<(String, String, String)>,
+    State(application_state): State<ApplicationState>,
+    Extension(access_session): Extension<AccessSessionStorageUnit>,
+    Json(content): Json<serde_json::Value>,
+) -> SendRoomEventResponse {
+    match application_state
+        .rooms_service
+        .send_room_message_event(
+            access_session.user_identifier(),
+            room_id,
+            event_type,
+            transaction_id,
+            content,
+        )
+        .map(|event_id| SendRoomEventView { event_id })
+    {
+        Ok(view) => SendRoomEventResponse::Ok(Json(view)),
+        Err(error_kind) => {
+            if matches!(error_kind, RoomsApplicationError::Internal) {
+                error!("send room event failed with internal error");
+            } else {
+                info!(error = %error_kind, "send room event rejected");
+            }
+            SendRoomEventResponse::from_mapped_error(error_kind)
         }
     }
 }

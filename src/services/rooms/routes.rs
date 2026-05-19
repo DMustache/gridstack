@@ -1,6 +1,6 @@
 use axum::{
     Router, middleware,
-    routing::{get, post},
+    routing::{get, post, put},
 };
 
 use crate::services::{
@@ -42,6 +42,10 @@ pub fn routes(state: &ApplicationState) -> Router<ApplicationState> {
         .route(
             "/_matrix/client/v3/rooms/{roomId}/messages",
             get(handlers::get_room_messages),
+        )
+        .route(
+            "/_matrix/client/v3/rooms/{roomId}/send/{eventType}/{txnId}",
+            put(handlers::send_room_message_event),
         )
         .route_layer(authorization_layer)
         .route_layer(rate_limit_layer)
