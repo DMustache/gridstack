@@ -13,9 +13,7 @@ use crate::services::{
             create_room::{CreateRoomCommand, CreateRoomInfo, CreateRoomView},
             get_room_messages::{GetRoomMessagesQuery, GetRoomMessagesView},
             get_room_state::RoomStateEventView,
-            get_room_state_with_key::{
-                GetRoomStateWithKeyFormatQuery, room_state_event_to_value,
-            },
+            get_room_state_with_key::{GetRoomStateWithKeyFormatQuery, room_state_event_to_value},
             join_room::{JoinRoomCommand, JoinRoomInfo, JoinRoomView},
             leave_room::{LeaveRoomCommand, LeaveRoomInfo, LeaveRoomView},
             set_room_state_with_key::SetRoomStateWithKeyView,
@@ -26,8 +24,8 @@ use crate::services::{
 };
 
 pub mod create_room;
-pub mod get_room_state;
 pub mod get_room_messages;
+pub mod get_room_state;
 pub mod get_room_state_with_key;
 pub mod join_room;
 pub mod leave_room;
@@ -240,14 +238,12 @@ pub async fn get_room_state_with_key(
         Err(error_kind) => return GetRoomStateWithKeyResponse::from_mapped_error(error_kind),
     };
 
-    match application_state
-        .rooms_service
-        .get_room_state_with_key(
-            access_session.user_identifier(),
-            room_id,
-            event_type,
-            state_key,
-        ) {
+    match application_state.rooms_service.get_room_state_with_key(
+        access_session.user_identifier(),
+        room_id,
+        event_type,
+        state_key,
+    ) {
         Ok(event) => {
             if include_full_event {
                 GetRoomStateWithKeyResponse::Ok(Json(room_state_event_to_value(
@@ -279,10 +275,12 @@ pub async fn get_room_state_with_empty_key(
         Err(error_kind) => return GetRoomStateWithKeyResponse::from_mapped_error(error_kind),
     };
 
-    match application_state
-        .rooms_service
-        .get_room_state_with_key(access_session.user_identifier(), room_id, event_type, String::new())
-    {
+    match application_state.rooms_service.get_room_state_with_key(
+        access_session.user_identifier(),
+        room_id,
+        event_type,
+        String::new(),
+    ) {
         Ok(event) => {
             if include_full_event {
                 GetRoomStateWithKeyResponse::Ok(Json(room_state_event_to_value(
