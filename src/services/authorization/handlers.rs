@@ -160,11 +160,10 @@ pub async fn register_user(
             ))
         }
         Err(error_kind) => {
-            match error_kind {
-                AuthorizationApplicationError::Internal => {
-                    error!("user registration failed with internal error");
-                }
-                _ => info!(error = %error_kind, "user registration rejected"),
+            if matches!(error_kind, AuthorizationApplicationError::Internal) {
+                error!("user registration failed with internal error");
+            } else {
+                info!(error = %error_kind, "user registration rejected");
             }
             RegisterUserResponse::from_mapped_error(error_kind)
         }
@@ -200,11 +199,10 @@ pub async fn login_user(
             LoginUserResponse::Ok(Json(view))
         }
         Err(error_kind) => {
-            match error_kind {
-                AuthorizationApplicationError::Internal => {
-                    error!("user login failed with internal error");
-                }
-                _ => info!(error = %error_kind, "user login rejected"),
+            if matches!(error_kind, AuthorizationApplicationError::Internal) {
+                error!("user login failed with internal error");
+            } else {
+                info!(error = %error_kind, "user login rejected");
             }
             LoginUserResponse::from_mapped_error(error_kind)
         }

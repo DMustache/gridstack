@@ -33,7 +33,7 @@ where
     Repository: IdentityAssociationLookupRepository,
 {
     #[must_use]
-    pub fn new(association_lookup_repository: Repository) -> Self {
+    pub const fn new(association_lookup_repository: Repository) -> Self {
         Self {
             association_lookup_repository,
         }

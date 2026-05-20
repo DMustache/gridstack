@@ -137,29 +137,7 @@ impl AuthorizationService {
             return Err(AuthorizationApplicationError::GuestRegistrationDisabled);
         }
 
-        let authentication = info
-            .authentication
-            .as_ref()
-            .ok_or(AuthorizationApplicationError::Unauthorized)?;
-
-        let session_identifier = authentication
-            .session
-            .as_deref()
-            .ok_or(AuthorizationApplicationError::Unauthorized)?;
-        if !self.is_known_registration_session(session_identifier) {
-            return Err(AuthorizationApplicationError::Unauthorized);
-        }
-
-        let authentication_type = UiaaFlowType::from_str(
-            authentication
-                .authentication_type
-                .as_deref()
-                .unwrap_or_default(),
-        )
-        .map_err(|_| AuthorizationApplicationError::Unauthorized)?;
-        if !Self::is_supported_registration_uiaa_flow(&authentication_type) {
-            return Err(AuthorizationApplicationError::Unauthorized);
-        }
+        let session_identifier = self.validate_registration_authentication(info)?;
 
         let username = info
             .username
@@ -208,14 +186,7 @@ impl AuthorizationService {
             .transpose()?;
 
         if info.inhibit_login {
-            return Ok(RegisterUserView {
-                user_identifier: user_identifier.into_inner(),
-                access_token: None,
-                device_identifier: None,
-                home_server_name: None,
-                expires_in_milliseconds: None,
-                refresh_token: None,
-            });
+            return Ok(Self::registration_inhibited_view(user_identifier));
         }
 
         let (raw_access_token, access_token_expiry_seconds) = self.generate_access_token()?;
@@ -422,7 +393,7 @@ impl AuthorizationService {
                 controlled_user_id_patterns,
                 ..
             } => {
-                if !self.user_identifier_matches_any_pattern(
+                if !Self::user_identifier_matches_any_pattern(
                     requested_user_identifier,
                     controlled_user_id_patterns,
                 )? {
@@ -446,8 +417,10 @@ impl AuthorizationService {
             SessionPrincipal::Appservice {
                 controlled_user_id_patterns,
                 ..
-            } => self
-                .user_identifier_matches_any_pattern(user_identifier, controlled_user_id_patterns),
+            } => Self::user_identifier_matches_any_pattern(
+                user_identifier,
+                controlled_user_id_patterns,
+            ),
         }
     }
 
@@ -527,8 +500,7 @@ impl AuthorizationService {
     fn is_known_registration_session(&self, session_identifier: &str) -> bool {
         self.registration_sessions
             .read()
-            .map(|sessions| sessions.contains(session_identifier))
-            .unwrap_or(false)
+            .is_ok_and(|sessions| sessions.contains(session_identifier))
     }
 
     fn remove_registration_session(&self, session_identifier: &str) {
@@ -587,7 +559,7 @@ impl AuthorizationService {
         user_identifier: &UserIdentifier,
     ) -> Result<bool, AuthorizationApplicationError> {
         for appservice in &self.configuration.appservices {
-            if self.user_identifier_matches_any_pattern(
+            if Self::user_identifier_matches_any_pattern(
                 user_identifier,
                 &appservice.controlled_user_id_patterns,
             )? {
@@ -598,7 +570,6 @@ impl AuthorizationService {
     }
 
     fn user_identifier_matches_any_pattern(
-        &self,
         user_identifier: &UserIdentifier,
         patterns: &[String],
     ) -> Result<bool, AuthorizationApplicationError> {
@@ -614,5 +585,46 @@ impl AuthorizationService {
             }
         }
         Ok(false)
+    }
+
+    fn validate_registration_authentication<'a>(
+        &self,
+        info: &'a RegisterUserInfo,
+    ) -> Result<&'a str, AuthorizationApplicationError> {
+        let authentication = info
+            .authentication
+            .as_ref()
+            .ok_or(AuthorizationApplicationError::Unauthorized)?;
+        let session_identifier = authentication
+            .session
+            .as_deref()
+            .ok_or(AuthorizationApplicationError::Unauthorized)?;
+        if !self.is_known_registration_session(session_identifier) {
+            return Err(AuthorizationApplicationError::Unauthorized);
+        }
+
+        let authentication_type = UiaaFlowType::from_str(
+            authentication
+                .authentication_type
+                .as_deref()
+                .unwrap_or_default(),
+        )
+        .map_err(|_| AuthorizationApplicationError::Unauthorized)?;
+        if !Self::is_supported_registration_uiaa_flow(&authentication_type) {
+            return Err(AuthorizationApplicationError::Unauthorized);
+        }
+
+        Ok(session_identifier)
+    }
+
+    fn registration_inhibited_view(user_identifier: UserIdentifier) -> RegisterUserView {
+        RegisterUserView {
+            user_identifier: user_identifier.into_inner(),
+            access_token: None,
+            device_identifier: None,
+            home_server_name: None,
+            expires_in_milliseconds: None,
+            refresh_token: None,
+        }
     }
 }

@@ -44,14 +44,14 @@ pub async fn store_invite(
                     format!(
                         "https://{}{}",
                         application_state.server_name,
-                        IdentityV2PublicKeyIsValidPath.to_uri().to_string()
+                        IdentityV2PublicKeyIsValidPath.to_uri()
                     )
                 }
                 crate::services::identity::entities::IdentitySigningKeyUsage::EphemeralInvite => {
                     format!(
                         "https://{}{}",
                         application_state.server_name,
-                        IdentityV2PublicKeyEphemeralIsValidPath.to_uri().to_string()
+                        IdentityV2PublicKeyEphemeralIsValidPath.to_uri()
                     )
                 }
             };

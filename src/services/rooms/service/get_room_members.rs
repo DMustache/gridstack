@@ -16,19 +16,19 @@ impl<'a, Repository> GetRoomMembersUseCase<'a, Repository>
 where
     Repository: RoomStateQueryRepository + ?Sized,
 {
-    pub fn new(room_repository: &'a Repository) -> Self {
+    pub const fn new(room_repository: &'a Repository) -> Self {
         Self { room_repository }
     }
 
     pub fn execute(
         &self,
         user_id: &AuthorizedUserIdentifier,
-        room_id: String,
-        command: GetRoomMembersCommand,
+        room_id: &str,
+        command: &GetRoomMembersCommand,
     ) -> Result<RoomMembersChunk, RoomsApplicationError> {
         require_room_state_read_access(
             self.room_repository,
-            &room_id,
+            room_id,
             user_id.as_existing_user_identifier(),
         )?;
 
@@ -36,12 +36,12 @@ where
             Some(token) => {
                 let stream_position = super::parse_room_stream_position_token(token)?;
                 self.room_repository
-                    .fetch_room_member_state_events_at_stream_position(&room_id, stream_position)
+                    .fetch_room_member_state_events_at_stream_position(room_id, stream_position)
                     .map_err(|_| RoomsApplicationError::Internal)?
             }
             None => self
                 .room_repository
-                .fetch_room_state_events(&room_id)
+                .fetch_room_state_events(room_id)
                 .map_err(|_| RoomsApplicationError::Internal)?,
         };
 

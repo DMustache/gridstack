@@ -35,7 +35,7 @@ impl EventsService {
         self.room_version_registry.default_room_version()
     }
 
-    pub fn room_version_is_supported(&self, room_version: SupportedRoomVersion) -> bool {
+    pub const fn room_version_is_supported(&self, room_version: SupportedRoomVersion) -> bool {
         self.room_version_registry.resolve(room_version).is_some()
     }
 
@@ -87,6 +87,10 @@ impl EventsService {
         self.compile_single_event_intent(room_id, room_version, event_intent)
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "event creation API is explicit by design"
+    )]
     pub fn create_state_event(
         &self,
         room_id: String,
@@ -145,7 +149,7 @@ impl EventsService {
         let room_version_definition = self
             .room_version_registry
             .resolve(room_event_flow.room_version)
-            .ok_or(EventCompilationError::UnsupportedRoomVersion {
+            .ok_or_else(|| EventCompilationError::UnsupportedRoomVersion {
                 room_version: room_event_flow.room_version.to_string(),
             })?;
 
@@ -156,10 +160,14 @@ impl EventsService {
             validate_event_intent(event_intent)
                 .map_err(map_validation_error_to_compilation_error)?;
 
-            let prev_events = self.select_prev_events(&compilation_state, &room_version_definition);
-            let auth_events =
-                self.select_auth_events(event_intent, &compilation_state, &room_version_definition);
-            let depth = self.select_depth(&prev_events, &compilation_state);
+            let prev_events =
+                Self::select_prev_events(&compilation_state, &room_version_definition);
+            let auth_events = Self::select_auth_events(
+                event_intent,
+                &compilation_state,
+                &room_version_definition,
+            );
+            let depth = Self::select_depth(&prev_events, &compilation_state);
 
             let event_draft = EventDraft {
                 room_id: event_intent.room_id.clone(),
@@ -172,14 +180,15 @@ impl EventsService {
                 prev_events: prev_events.clone(),
                 auth_events: auth_events.clone(),
                 depth,
-                origin_server_ts: self.clock.now_unix_milliseconds() as u64,
+                origin_server_ts: u64::try_from(self.clock.now_unix_milliseconds())
+                    .unwrap_or_default(),
                 redacts: None,
             };
 
-            self.authorize_event(event_index, &event_draft, &compilation_state)?;
+            Self::authorize_event(event_index, &event_draft, &compilation_state)?;
 
             let persisted_event = self.persist_event(event_draft, room_event_flow.room_version);
-            let event_write_contract = self.plan_event_write_contract(
+            let event_write_contract = Self::plan_event_write_contract(
                 event_intent,
                 &persisted_event,
                 prev_events,
@@ -197,7 +206,6 @@ impl EventsService {
     }
 
     fn select_prev_events(
-        &self,
         compilation_state: &CompilationState,
         room_version_definition: &RoomVersionDefinition,
     ) -> Vec<String> {
@@ -212,7 +220,6 @@ impl EventsService {
     }
 
     fn select_auth_events(
-        &self,
         event_intent: &EventIntent,
         compilation_state: &CompilationState,
         room_version_definition: &RoomVersionDefinition,
@@ -238,7 +245,7 @@ impl EventsService {
         auth_events
     }
 
-    fn select_depth(&self, prev_events: &[String], compilation_state: &CompilationState) -> u64 {
+    fn select_depth(prev_events: &[String], compilation_state: &CompilationState) -> u64 {
         prev_events
             .first()
             .and_then(|event_id| compilation_state.event_depth(event_id))
@@ -247,7 +254,6 @@ impl EventsService {
     }
 
     fn authorize_event(
-        &self,
         event_index: usize,
         event_draft: &EventDraft,
         compilation_state: &CompilationState,
@@ -315,7 +321,6 @@ impl EventsService {
     }
 
     fn plan_event_write_contract(
-        &self,
         event_intent: &EventIntent,
         persisted_event: &PersistedEvent,
         prev_events: Vec<String>,
@@ -364,7 +369,7 @@ struct CompilationState {
 }
 
 impl CompilationState {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             accepted_event_ids: Vec::new(),
             current_state: Vec::new(),

@@ -17,21 +17,21 @@ impl<'a, Repository> GetRoomEventUseCase<'a, Repository>
 where
     Repository: RoomTimelineQueryRepository + ?Sized,
 {
-    pub fn new(room_repository: &'a Repository) -> Self {
+    pub const fn new(room_repository: &'a Repository) -> Self {
         Self { room_repository }
     }
 
     pub fn execute(
         &self,
         user_id: &AuthorizedUserIdentifier,
-        room_id: String,
-        event_id: String,
+        room_id: &str,
+        event_id: &str,
     ) -> Result<RoomTimelineEvent, RoomsApplicationError> {
-        require_room_identifier(&room_id)?;
+        require_room_identifier(room_id)?;
 
         let room_event = self
             .room_repository
-            .fetch_room_timeline_event_by_id(&room_id, &event_id)
+            .fetch_room_timeline_event_by_id(room_id, event_id)
             .map_err(|_| RoomsApplicationError::Internal)?
             .ok_or(RoomsApplicationError::NotFound)?;
 
@@ -39,7 +39,7 @@ where
         let membership_at_event = self
             .room_repository
             .fetch_user_membership_at_stream_position(
-                &room_id,
+                room_id,
                 user_id.as_str(),
                 room_event.stream_position,
             )
@@ -47,7 +47,7 @@ where
         let user_joined_since_event = self
             .room_repository
             .user_joined_since_stream_position(
-                &room_id,
+                room_id,
                 user_id.as_str(),
                 room_event.stream_position,
             )
@@ -55,44 +55,49 @@ where
 
         let history_visibility_at_event = self
             .room_repository
-            .fetch_room_history_visibility_at_stream_position(&room_id, room_event.stream_position)
+            .fetch_room_history_visibility_at_stream_position(room_id, room_event.stream_position)
             .map_err(|_| RoomsApplicationError::Internal)?;
-        let mut history_visibility_before_event = None;
-        let mut history_visibility_after_event = None;
-
-        if room_event.event_type == "m.room.history_visibility"
-            && room_event.state_key.as_deref() == Some("")
-        {
-            history_visibility_before_event = self
-                .room_repository
-                .fetch_room_history_visibility_before_stream_position(
-                    &room_id,
-                    room_event.stream_position,
+        let (history_visibility_before_event, history_visibility_after_event) =
+            if room_event.event_type == "m.room.history_visibility"
+                && room_event.state_key.as_deref() == Some("")
+            {
+                let history_visibility_before_event = self
+                    .room_repository
+                    .fetch_room_history_visibility_before_stream_position(
+                        room_id,
+                        room_event.stream_position,
+                    )
+                    .map_err(|_| RoomsApplicationError::Internal)?;
+                let history_visibility_after_event =
+                    super::history_visibility_from_timeline_event(&room_event)
+                        .or_else(|| history_visibility_at_event.clone());
+                (
+                    history_visibility_before_event,
+                    history_visibility_after_event,
                 )
-                .map_err(|_| RoomsApplicationError::Internal)?;
+            } else {
+                (None, None)
+            };
 
-            history_visibility_after_event =
-                super::history_visibility_from_timeline_event(&room_event)
-                    .or(history_visibility_at_event.clone());
-        }
-
-        let mut membership_before_event = None;
-        let mut membership_after_event = None;
-        if room_event.event_type == "m.room.member"
+        let (membership_before_event, membership_after_event) = if room_event.event_type
+            == "m.room.member"
             && room_event.state_key.as_deref() == Some(user_id.as_str())
         {
-            membership_before_event = self
+            let membership_before_event = self
                 .room_repository
                 .fetch_user_membership_before_stream_position(
-                    &room_id,
+                    room_id,
                     user_id.as_str(),
                     room_event.stream_position,
                 )
                 .map_err(|_| RoomsApplicationError::Internal)?;
-            membership_after_event = super::room_membership_from_timeline_event(&room_event)
+            let membership_after_event = super::room_membership_from_timeline_event(&room_event)
                 .map(str::to_owned)
-                .or(membership_at_event.clone());
-        }
+                .or_else(|| membership_at_event.clone());
+            (membership_before_event, membership_after_event)
+        } else {
+            (None, None)
+        };
 
         let event_visible = evaluate_event_visibility(&EventVisibilityEvaluationInput {
             event_type: room_event.event_type.as_str(),

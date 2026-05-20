@@ -564,6 +564,10 @@ impl RoomPersistence {
 }
 
 impl RoomRepository for RoomPersistence {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "transactional room bootstrap is intentionally centralized"
+    )]
     fn create_room_with_initial_events(
         &self,
         room_creation_flow: &RoomCreationFlow,
@@ -1626,6 +1630,10 @@ impl RoomRepository for RoomPersistence {
             .map_err(|error| DomainError::InvalidRequest(error.to_string()))
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "timeline query composes many optional filters and joins"
+    )]
     fn fetch_room_timeline_events(
         &self,
         room_id: &str,
@@ -1785,6 +1793,10 @@ impl RoomRepository for RoomPersistence {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "event persistence writes denormalized projections atomically"
+)]
 fn persist_event_batch(
     connection_pool: &r2d2::Pool<ConnectionManager<PgConnection>>,
     event_batch_write_contract: &EventBatchWriteContract,
@@ -2163,7 +2175,7 @@ fn extract_room_topic(content: &MatrixEventContent) -> Option<String> {
     }
 }
 
-fn extract_is_direct(content: &MatrixEventContent) -> Option<bool> {
+const fn extract_is_direct(content: &MatrixEventContent) -> Option<bool> {
     match content {
         MatrixEventContent::RoomMember(value) => value.is_direct,
         _ => None,

@@ -21,7 +21,7 @@ impl<'a, Repository> SetRoomStateWithKeyUseCase<'a, Repository>
 where
     Repository: RoomStateWriteRepository + ?Sized,
 {
-    pub fn new(
+    pub const fn new(
         room_repository: &'a Repository,
         events_service: &'a EventsService,
         server_name: &'a ServerName,
@@ -33,6 +33,10 @@ where
         }
     }
 
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "owned at service boundary to align with command DTO ownership"
+    )]
     pub fn execute(
         &self,
         user_id: &AuthorizedUserIdentifier,
@@ -55,11 +59,11 @@ where
 
         let state_event_kind = event_type
             .parse::<StateEventKind>()
-            .map_err(|_| RoomsApplicationError::InvalidParameter)?;
+            .map_err(|()| RoomsApplicationError::InvalidParameter)?;
         self.validate_canonical_alias_state_if_needed(&room_id, &state_event_kind, &content)?;
 
         let event_content = parse_room_state_event_content(state_event_kind.clone(), content)
-            .map_err(|_| RoomsApplicationError::InvalidRoomState)?;
+            .map_err(|()| RoomsApplicationError::InvalidRoomState)?;
 
         let event_write_contract = self
             .events_service
@@ -82,7 +86,7 @@ where
 
         self.room_repository
             .append_room_event(&event_write_contract)
-            .map_err(|error| super::map_room_persistence_error(error, room_id))?;
+            .map_err(|error| super::map_room_persistence_error(error, &room_id))?;
 
         Ok(event_id)
     }

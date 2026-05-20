@@ -34,7 +34,7 @@ impl<'a, Repository> CreateRoomUseCase<'a, Repository>
 where
     Repository: RoomCreationRepository + ?Sized,
 {
-    pub fn new(
+    pub const fn new(
         room_repository: &'a Repository,
         events_service: &'a EventsService,
         authorization_service: &'a AuthorizationService,
@@ -84,7 +84,7 @@ where
         let event_batch_write_contract: EventBatchWriteContract =
             self.events_service.compile_room_event_flow(RoomEventFlow {
                 room_id: room_creation_flow.room_shell_intent.room_id.clone(),
-                room_version: room_creation_flow.room_shell_intent.room_version.clone(),
+                room_version: room_creation_flow.room_shell_intent.room_version,
                 intents: room_creation_flow.ordered_event_intents.clone(),
             })?;
 
@@ -93,7 +93,7 @@ where
             .map_err(|error| {
                 super::map_room_persistence_error(
                     error,
-                    room_creation_flow.room_shell_intent.room_id.clone(),
+                    &room_creation_flow.room_shell_intent.room_id,
                 )
             })?;
 
@@ -195,6 +195,7 @@ impl<'a> RoomCreationFactory<'a> {
         }
     }
 
+    #[must_use]
     pub fn add_event(mut self, event: RoomFactoryEvent) -> Self {
         self.planned_events.push(event);
         self
@@ -434,7 +435,7 @@ impl<'a> RoomCreationFactory<'a> {
                     key_validity_url: format!(
                         "https://{}{}",
                         third_party_invite.id_server.as_str(),
-                        IdentityLegacyV1PublicKeyIsValidPath.to_uri().to_string()
+                        IdentityLegacyV1PublicKeyIsValidPath.to_uri()
                     ),
                     public_key: String::new(),
                     medium: third_party_invite.medium.clone(),
@@ -453,26 +454,29 @@ enum RoomVersionEventRules {
 }
 
 impl RoomVersionEventRules {
-    fn from_supported_room_version(room_version: SupportedRoomVersion) -> Self {
+    const fn from_supported_room_version(room_version: SupportedRoomVersion) -> Self {
         match room_version {
             SupportedRoomVersion::V1 => Self::Version1,
             SupportedRoomVersion::V2 => Self::Version2,
         }
     }
 
-    fn supports_additional_creators(self) -> bool {
+    const fn supports_additional_creators(self) -> bool {
         match self {
             Self::Version1 | Self::Version2 => false,
         }
     }
 
-    fn power_levels_must_be_integer_values(self) -> bool {
+    const fn power_levels_must_be_integer_values(self) -> bool {
         match self {
             Self::Version1 | Self::Version2 => true,
         }
     }
 
-    fn preset_defaults(self, preset: RoomPreset) -> (&'static str, &'static str, &'static str) {
+    const fn preset_defaults(
+        self,
+        preset: RoomPreset,
+    ) -> (&'static str, &'static str, &'static str) {
         let _ = self;
         match preset {
             RoomPreset::PrivateChat | RoomPreset::TrustedPrivateChat => {

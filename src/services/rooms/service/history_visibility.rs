@@ -24,7 +24,6 @@ fn parse_room_history_visibility(value: Option<&str>) -> RoomHistoryVisibility {
         Some("world_readable") => RoomHistoryVisibility::WorldReadable,
         Some("invited") => RoomHistoryVisibility::Invited,
         Some("joined") => RoomHistoryVisibility::Joined,
-        Some("shared") => RoomHistoryVisibility::Shared,
         _ => RoomHistoryVisibility::Shared,
     }
 }
@@ -49,29 +48,30 @@ fn evaluate_general_event_visibility(
 pub fn evaluate_event_visibility(input: &EventVisibilityEvaluationInput<'_>) -> bool {
     let history_visibility_at_event =
         parse_room_history_visibility(input.history_visibility_at_event);
-    let mut visible = evaluate_general_event_visibility(
-        history_visibility_at_event,
-        input.membership_at_event,
-        input.user_joined_since_event,
-    );
-
-    if input.event_type == "m.room.history_visibility" && input.event_state_key == Some("") {
-        let visible_before = evaluate_general_event_visibility(
-            parse_room_history_visibility(input.history_visibility_before_event),
-            input.membership_at_event,
-            input.user_joined_since_event,
-        );
-        let visible_after = evaluate_general_event_visibility(
-            parse_room_history_visibility(
-                input
-                    .history_visibility_after_event
-                    .or(input.history_visibility_at_event),
-            ),
-            input.membership_at_event,
-            input.user_joined_since_event,
-        );
-        visible = visible_before || visible_after;
-    }
+    let visible =
+        if input.event_type == "m.room.history_visibility" && input.event_state_key == Some("") {
+            let visible_before = evaluate_general_event_visibility(
+                parse_room_history_visibility(input.history_visibility_before_event),
+                input.membership_at_event,
+                input.user_joined_since_event,
+            );
+            let visible_after = evaluate_general_event_visibility(
+                parse_room_history_visibility(
+                    input
+                        .history_visibility_after_event
+                        .or(input.history_visibility_at_event),
+                ),
+                input.membership_at_event,
+                input.user_joined_since_event,
+            );
+            visible_before || visible_after
+        } else {
+            evaluate_general_event_visibility(
+                history_visibility_at_event,
+                input.membership_at_event,
+                input.user_joined_since_event,
+            )
+        };
 
     if input.event_type == "m.room.member"
         && input.event_state_key == Some(input.requesting_user_id)
@@ -86,7 +86,7 @@ pub fn evaluate_event_visibility(input: &EventVisibilityEvaluationInput<'_>) -> 
             input.membership_after_event.or(input.membership_at_event),
             input.user_joined_since_event,
         );
-        visible = visible || visible_before || visible_after;
+        return visible || visible_before || visible_after;
     }
 
     visible

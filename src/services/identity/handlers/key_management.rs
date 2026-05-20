@@ -55,7 +55,7 @@ fn evaluate_public_key_validity<F>(
 where
     F: FnOnce(&EncodedPublicKey) -> Result<bool, IdentityServiceError>,
 {
-    let query = query.map_err(map_public_key_query_rejection)?;
+    let query = query.map_err(|error| map_public_key_query_rejection(&error))?;
     let Query(query) = query;
     let public_key = EncodedPublicKey::parse(query.public_key)?;
     let valid = validator(&public_key)?;
@@ -63,7 +63,7 @@ where
     Ok(Json(PublicKeyValidityResponse { valid }))
 }
 
-fn map_public_key_query_rejection(error: QueryRejection) -> IdentityServiceError {
+fn map_public_key_query_rejection(error: &QueryRejection) -> IdentityServiceError {
     let message = error.body_text();
     if message.contains("missing field `public_key`") {
         return IdentityServiceError::MissingParameters(

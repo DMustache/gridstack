@@ -32,7 +32,7 @@ where
     Repository: IdentitySigningKeyRepository,
 {
     #[must_use]
-    pub fn new(signing_key_repository: Repository) -> Self {
+    pub const fn new(signing_key_repository: Repository) -> Self {
         Self {
             signing_key_repository,
         }

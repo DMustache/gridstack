@@ -20,24 +20,18 @@ pub fn validate_event_intent(event_intent: &EventIntent) -> Result<(), EventInte
     if event_intent.event_type().trim().is_empty() {
         return Err(EventIntentValidationError::InvalidEventType);
     }
-    match (
-        event_definition.event_class,
-        &event_intent.state_key,
-        event_definition.state_key_policy,
-    ) {
-        (EventClass::State, Some(_), StateKeyPolicy::Required | StateKeyPolicy::MustBeEmpty)
-        | (EventClass::Message, None, StateKeyPolicy::Forbidden) => {}
-        (EventClass::State, None, _) => {
-            return Err(EventIntentValidationError::MissingStateKeyForStateEvent {
-                event_type: event_intent.event_type().to_owned(),
-            });
-        }
-        (EventClass::Message, Some(_), _) => {
-            return Err(EventIntentValidationError::MessageEventCannotHaveStateKey {
-                event_type: event_intent.event_type().to_owned(),
-            });
-        }
-        _ => {}
+    if matches!(event_definition.event_class, EventClass::State) && event_intent.state_key.is_none()
+    {
+        return Err(EventIntentValidationError::MissingStateKeyForStateEvent {
+            event_type: event_intent.event_type().to_owned(),
+        });
+    }
+    if matches!(event_definition.event_class, EventClass::Message)
+        && event_intent.state_key.is_some()
+    {
+        return Err(EventIntentValidationError::MessageEventCannotHaveStateKey {
+            event_type: event_intent.event_type().to_owned(),
+        });
     }
 
     if matches!(
@@ -50,11 +44,13 @@ pub fn validate_event_intent(event_intent: &EventIntent) -> Result<(), EventInte
         });
     }
 
-    if let EventKind::State(StateEventKind::RoomMember) = &event_intent.event_kind
-        && event_intent
-            .state_key
-            .as_deref()
-            .is_some_and(|state_key| UserIdentifier::try_from(state_key.to_owned()).is_err())
+    if matches!(
+        &event_intent.event_kind,
+        EventKind::State(StateEventKind::RoomMember)
+    ) && event_intent
+        .state_key
+        .as_deref()
+        .is_some_and(|state_key| UserIdentifier::try_from(state_key.to_owned()).is_err())
     {
         return Err(EventIntentValidationError::InvalidMembershipStateKey {
             state_key: event_intent.state_key.clone().unwrap_or_default(),
@@ -81,7 +77,7 @@ fn validate_event_content(content: &MatrixEventContent) -> Result<(), EventInten
             | crate::services::events::entities::MembershipContent::Ban
             | crate::services::events::entities::MembershipContent::Knock => {}
         },
-        MatrixEventContent::RoomPowerLevels(_) => {}
+        MatrixEventContent::RoomPowerLevels(_) | MatrixEventContent::CustomJson(_) => {}
         MatrixEventContent::RoomJoinRules { join_rule } => {
             if join_rule.trim().is_empty() {
                 return Err(EventIntentValidationError::InvalidEventContentShape {
@@ -156,7 +152,6 @@ fn validate_event_content(content: &MatrixEventContent) -> Result<(), EventInten
                 });
             }
         }
-        MatrixEventContent::CustomJson(_) => {}
     }
 
     Ok(())

@@ -315,7 +315,7 @@ fn validate_initial_state(
             .event_type
             .trim()
             .parse::<StateEventKind>()
-            .map_err(|_| RoomValidationError::InvalidInitialStateEventType)?;
+            .map_err(|()| RoomValidationError::InvalidInitialStateEventType)?;
         if matches!(event_type, StateEventKind::RoomCreate) {
             return Err(RoomValidationError::InitialStateContainsRoomCreate);
         }
@@ -327,7 +327,7 @@ fn validate_initial_state(
 
         let parsed_content =
             parse_room_state_event_content(event_type.clone(), raw_state_event.content).map_err(
-                |_| RoomValidationError::InvalidInitialStateEventContent {
+                |()| RoomValidationError::InvalidInitialStateEventContent {
                     event_type: event_type.as_ref().to_owned(),
                 },
             )?;
@@ -360,6 +360,10 @@ fn validate_third_party_invite(
     })
 }
 
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "event kind is moved from parser boundary into exhaustive matching"
+)]
 pub(crate) fn parse_room_state_event_content(
     state_event_kind: StateEventKind,
     content: Value,
@@ -738,6 +742,10 @@ impl From<RoomVisibility> for RoomPreset {
 pub struct ValidatedRoomAliasLocalPart(String);
 
 impl ValidatedRoomAliasLocalPart {
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "validation boundary accepts owned strings from API inputs"
+    )]
     pub fn parse(value: String) -> Option<Self> {
         let candidate = value.trim();
         if candidate.is_empty()
@@ -760,6 +768,10 @@ impl ValidatedRoomAliasLocalPart {
 pub struct ValidatedRoomName(String);
 
 impl ValidatedRoomName {
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "validation boundary accepts owned strings from API inputs"
+    )]
     pub fn parse(value: String) -> Option<Self> {
         let candidate = value.trim();
         if candidate.is_empty() {
@@ -777,6 +789,10 @@ impl ValidatedRoomName {
 pub struct ValidatedRoomTopic(String);
 
 impl ValidatedRoomTopic {
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "validation boundary accepts owned strings from API inputs"
+    )]
     pub fn parse(value: String) -> Option<Self> {
         let candidate = value.trim();
         if candidate.is_empty() {
@@ -888,7 +904,7 @@ impl RoomIdentifier {
         &self.full_identifier
     }
 
-    pub fn server_name(&self) -> &ServerName {
+    pub const fn server_name(&self) -> &ServerName {
         &self.server_name
     }
 }

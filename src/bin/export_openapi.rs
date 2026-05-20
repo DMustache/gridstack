@@ -197,8 +197,7 @@ fn service_tag_from_routes_file(routes_file: &Path) -> String {
         .parent()
         .and_then(Path::file_name)
         .and_then(|v| v.to_str())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| "services".to_owned())
+        .map_or_else(|| "services".to_owned(), ToOwned::to_owned)
 }
 
 fn extract_operations(route_files: &[PathBuf]) -> Result<Vec<RouteOperation>> {
@@ -1157,7 +1156,7 @@ fn extract_schema_aliases_from_files(paths: &[PathBuf]) -> Result<HashMap<String
         for item in parsed.items {
             match item {
                 Item::Use(item_use) => {
-                    collect_schema_aliases_from_use_tree(&item_use.tree, &mut aliases)
+                    collect_schema_aliases_from_use_tree(&item_use.tree, &mut aliases);
                 }
                 Item::Type(item_type) => {
                     if let Some(target) = type_name_from_type(&item_type.ty) {
@@ -1198,7 +1197,7 @@ fn resolve_schema_alias(
         if !visited.insert(current.clone()) {
             break;
         }
-        current = next.clone();
+        current.clone_from(next);
     }
 
     if schemas.contains_key(&current) {
@@ -1254,18 +1253,15 @@ fn enum_to_schema(item_enum: &syn::ItemEnum) -> Value {
             continue;
         }
 
-        match &variant.fields {
-            syn::Fields::Unit => {
-                variants.push(enum_variant_serialized_name(
-                    &variant.ident.to_string(),
-                    &variant.attrs,
-                    rename_all.as_deref(),
-                ));
-            }
-            _ => {
-                has_payload = true;
-                break;
-            }
+        if matches!(&variant.fields, syn::Fields::Unit) {
+            variants.push(enum_variant_serialized_name(
+                &variant.ident.to_string(),
+                &variant.attrs,
+                rename_all.as_deref(),
+            ));
+        } else {
+            has_payload = true;
+            break;
         }
     }
 

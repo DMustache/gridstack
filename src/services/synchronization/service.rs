@@ -15,7 +15,7 @@ use crate::{
             },
             errors::SyncronizationApplicationError,
             handlers::DefineFilterView,
-            persistence::FilterRepository,
+            persistence::{FilterRepository, UserRoomMembershipRecord},
         },
     },
 };
@@ -105,7 +105,7 @@ impl SyncronizationService {
                 .map_err(Self::map_domain_error)?;
         }
 
-        let _use_state_after = request.use_state_after;
+        let _ = request.use_state_after;
         self.persist_presence_update(
             authorized_user_identifier.as_str(),
             request.set_presence.as_ref(),
@@ -142,57 +142,18 @@ impl SyncronizationService {
             )
             .map_err(Self::map_domain_error)?;
 
-        let mut join_rooms = Map::new();
-        let mut invite_rooms = Map::new();
-        let mut leave_rooms = Map::new();
-
-        for membership in memberships {
-            if !sync_filter_constraints.room_allows(&membership.room_id, &membership.membership) {
-                continue;
-            }
-            let room_entry = self.build_room_sync_entry(
-                &membership.room_id,
-                authorized_user_identifier.as_str(),
-                since_stream_position,
-                request.full_state,
-                request.timeline_limit,
-                &sync_filter_constraints,
-            )?;
-
-            match membership.membership.as_str() {
-                "join" => {
-                    join_rooms.insert(membership.room_id, room_entry);
-                }
-                "invite" => {
-                    invite_rooms.insert(
-                        membership.room_id,
-                        json!({
-                            "invite_state": {
-                                "events": room_entry
-                                    .get("state")
-                                    .and_then(Value::as_object)
-                                    .and_then(|state| state.get("events"))
-                                    .cloned()
-                                    .unwrap_or_else(|| Value::Array(Vec::new()))
-                            }
-                        }),
-                    );
-                }
-                "leave" | "ban" => {
-                    leave_rooms.insert(membership.room_id, room_entry);
-                }
-                _ => {}
-            }
-        }
+        let rooms = self.build_sync_rooms_batch(
+            memberships,
+            authorized_user_identifier.as_str(),
+            since_stream_position,
+            request.full_state,
+            request.timeline_limit,
+            &sync_filter_constraints,
+        )?;
 
         Ok(SyncBatch {
             next_batch: format!("s{current_stream_position}_0_0_0_0_0_0_0_0"),
-            rooms: SyncRoomsBatch {
-                join: join_rooms,
-                invite: invite_rooms,
-                leave: leave_rooms,
-                knock: serde_json::Map::new(),
-            },
+            rooms,
             presence: SyncEventsBatch {
                 events: presence_events,
             },
@@ -244,10 +205,6 @@ impl SyncronizationService {
                 .fetch_room_state_events_since(room_identifier, since_stream_position)
                 .map_err(Self::map_domain_error)?
         };
-        let state_events = state_events
-            .into_iter()
-            .filter(|event| sync_filter_constraints.state_allows(event))
-            .collect::<Vec<_>>();
 
         let limited = timeline_events.len() >= timeline_limit && timeline_limit > 0;
         let prev_batch = self
@@ -284,6 +241,7 @@ impl SyncronizationService {
             "state": {
                 "events": state_events
                     .into_iter()
+                    .filter(|event| sync_filter_constraints.state_allows(event))
                     .map(state_event_to_json)
                     .collect::<Vec<_>>()
             },
@@ -316,7 +274,67 @@ impl SyncronizationService {
                 .ok_or(SyncronizationApplicationError::InvalidParameter)?,
         };
 
-        Ok(SyncFilterConstraints::from_json(filter_json))
+        Ok(SyncFilterConstraints::from_json(&filter_json))
+    }
+
+    fn build_sync_rooms_batch(
+        &self,
+        memberships: Vec<UserRoomMembershipRecord>,
+        user_identifier: &str,
+        since_stream_position: i64,
+        full_state: bool,
+        timeline_limit: usize,
+        sync_filter_constraints: &SyncFilterConstraints,
+    ) -> Result<SyncRoomsBatch, SyncronizationApplicationError> {
+        let mut join_rooms = Map::new();
+        let mut invite_rooms = Map::new();
+        let mut leave_rooms = Map::new();
+
+        for membership in memberships {
+            if !sync_filter_constraints.room_allows(&membership.room_id, &membership.membership) {
+                continue;
+            }
+            let room_entry = self.build_room_sync_entry(
+                &membership.room_id,
+                user_identifier,
+                since_stream_position,
+                full_state,
+                timeline_limit,
+                sync_filter_constraints,
+            )?;
+
+            match membership.membership.as_str() {
+                "join" => {
+                    join_rooms.insert(membership.room_id, room_entry);
+                }
+                "invite" => {
+                    invite_rooms.insert(
+                        membership.room_id,
+                        json!({
+                            "invite_state": {
+                                "events": room_entry
+                                    .get("state")
+                                    .and_then(Value::as_object)
+                                    .and_then(|state| state.get("events"))
+                                    .cloned()
+                                    .unwrap_or_else(|| Value::Array(Vec::new()))
+                            }
+                        }),
+                    );
+                }
+                "leave" | "ban" => {
+                    leave_rooms.insert(membership.room_id, room_entry);
+                }
+                _ => {}
+            }
+        }
+
+        Ok(SyncRoomsBatch {
+            join: join_rooms,
+            invite: invite_rooms,
+            leave: leave_rooms,
+            knock: serde_json::Map::new(),
+        })
     }
 
     fn require_authorized_user_for_request(
@@ -465,7 +483,7 @@ struct SyncFilterConstraints {
 }
 
 impl SyncFilterConstraints {
-    fn from_json(filter_json: Value) -> Self {
+    fn from_json(filter_json: &Value) -> Self {
         let room = filter_json.get("room");
         Self {
             include_leave: room

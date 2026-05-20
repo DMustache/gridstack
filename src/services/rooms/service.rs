@@ -61,6 +61,10 @@ pub struct RoomsService {
     server_name: Arc<ServerName>,
 }
 
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "service boundary accepts owned handler DTOs for clarity"
+)]
 impl RoomsService {
     pub fn new(
         room_repository: Arc<dyn RoomRepository>,
@@ -124,7 +128,7 @@ impl RoomsService {
             self.room_repository.as_ref(),
             self.authorization_service.as_ref(),
         )
-        .execute(access_session, room_id)
+        .execute(access_session, &room_id)
     }
 
     pub fn leave_room_by_id(
@@ -172,7 +176,8 @@ impl RoomsService {
         room_id: String,
         command: GetRoomMembersCommand,
     ) -> Result<RoomMembersChunk, RoomsApplicationError> {
-        GetRoomMembersUseCase::new(self.room_repository.as_ref()).execute(user_id, room_id, command)
+        GetRoomMembersUseCase::new(self.room_repository.as_ref())
+            .execute(user_id, &room_id, &command)
     }
 
     pub fn get_room_state_with_key(
@@ -182,8 +187,12 @@ impl RoomsService {
         event_type: String,
         state_key: String,
     ) -> Result<RoomStateEvent, RoomsApplicationError> {
-        GetRoomStateWithKeyUseCase::new(self.room_repository.as_ref())
-            .execute(user_id, room_id, event_type, state_key)
+        GetRoomStateWithKeyUseCase::new(self.room_repository.as_ref()).execute(
+            user_id,
+            &room_id,
+            &event_type,
+            &state_key,
+        )
     }
 
     pub fn get_room_event(
@@ -192,7 +201,8 @@ impl RoomsService {
         room_id: String,
         event_id: String,
     ) -> Result<RoomTimelineEvent, RoomsApplicationError> {
-        GetRoomEventUseCase::new(self.room_repository.as_ref()).execute(user_id, room_id, event_id)
+        GetRoomEventUseCase::new(self.room_repository.as_ref())
+            .execute(user_id, &room_id, &event_id)
     }
 
     pub fn get_room_messages(
@@ -202,7 +212,7 @@ impl RoomsService {
         command: GetRoomMessagesCommand,
     ) -> Result<RoomMessagesPage, RoomsApplicationError> {
         GetRoomMessagesUseCase::new(self.room_repository.as_ref())
-            .execute(user_id, room_id, command)
+            .execute(user_id, &room_id, command)
     }
 
     pub fn set_room_state_with_key(
@@ -233,7 +243,7 @@ impl RoomsService {
             self.room_repository.as_ref(),
             self.events_service.as_ref(),
         )
-        .execute(user_id, room_id, event_type, transaction_id, content)
+        .execute(user_id, room_id, &event_type, transaction_id, content)
     }
 
     pub fn send_room_receipt(
@@ -243,7 +253,7 @@ impl RoomsService {
         command: SendReceiptCommand,
     ) -> Result<(), RoomsApplicationError> {
         SendRoomReceiptUseCase::new(self.room_repository.as_ref())
-            .execute(user_id, room_id, command)
+            .execute(user_id, &room_id, &command)
     }
 
     pub fn set_read_markers(
@@ -252,27 +262,12 @@ impl RoomsService {
         room_id: String,
         command: SetReadMarkersCommand,
     ) -> Result<(), RoomsApplicationError> {
-        SetReadMarkersUseCase::new(self.room_repository.as_ref()).execute(user_id, room_id, command)
+        SetReadMarkersUseCase::new(self.room_repository.as_ref())
+            .execute(user_id, &room_id, &command)
     }
 }
 
 impl RoomsService {
-    fn require_room_identifier(&self, room_id: &str) -> Result<(), RoomsApplicationError> {
-        room_access::require_room_identifier(room_id)
-    }
-
-    fn require_room_membership_context(
-        &self,
-        room_id: &str,
-        user_id: &ExistingUserIdentifier,
-    ) -> Result<crate::services::rooms::persistence::RoomJoinContext, RoomsApplicationError> {
-        room_access::require_room_membership_context(
-            self.room_repository.as_ref(),
-            room_id,
-            user_id,
-        )
-    }
-
     fn require_room_state_read_access(
         &self,
         room_id: &str,
@@ -297,7 +292,7 @@ fn room_membership_from_timeline_event(event: &RoomTimelineEvent) -> Option<&str
         .and_then(serde_json::Value::as_str)
 }
 
-fn map_room_persistence_error(error: DomainError, room_id: String) -> RoomsApplicationError {
+fn map_room_persistence_error(error: DomainError, room_id: &str) -> RoomsApplicationError {
     match error {
         DomainError::AlreadyExists => RoomsApplicationError::RoomInUse,
         DomainError::InvalidRequest(reason) => {
@@ -358,6 +353,6 @@ fn parse_room_stream_position_token(token: &str) -> Result<i64, RoomsApplication
 }
 
 #[allow(dead_code)]
-fn _supported_room_versions() -> [SupportedRoomVersion; 2] {
+const fn _supported_room_versions() -> [SupportedRoomVersion; 2] {
     [SupportedRoomVersion::V1, SupportedRoomVersion::V2]
 }

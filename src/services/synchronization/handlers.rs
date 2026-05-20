@@ -126,6 +126,10 @@ pub struct SyncDeviceListsResponseView {
 }
 
 #[derive(IntoResponseEnum)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "HTTP response payload carries the full sync body in success case"
+)]
 pub enum SyncResponse {
     #[matrix(status = 200)]
     Ok(Json<SyncResponseView>),
@@ -170,13 +174,8 @@ pub async fn sync(
     State(application_state): State<ApplicationState>,
     Extension(access_session): Extension<AccessSessionStorageUnit>,
 ) -> SyncResponse {
-    let query = match sync_query {
-        Ok(Query(query)) => query,
-        Err(_) => {
-            return SyncResponse::from_mapped_error(
-                SyncronizationApplicationError::InvalidParameter,
-            );
-        }
+    let Ok(Query(query)) = sync_query else {
+        return SyncResponse::from_mapped_error(SyncronizationApplicationError::InvalidParameter);
     };
 
     let request = match build_sync_request(query) {
@@ -202,7 +201,7 @@ pub async fn sync(
 }
 
 fn build_sync_request(query: SyncQueryInfo) -> Result<SyncRequest, SyncronizationApplicationError> {
-    let filter = query.filter.map(parse_sync_filter).transpose()?;
+    let filter = query.filter.as_deref().map(parse_sync_filter).transpose()?;
     let timeline_limit = parse_timeline_limit_from_filter(filter.as_ref())?.unwrap_or(10);
 
     Ok(SyncRequest {
@@ -217,7 +216,7 @@ fn build_sync_request(query: SyncQueryInfo) -> Result<SyncRequest, Syncronizatio
 }
 
 fn parse_sync_filter(
-    raw_filter: String,
+    raw_filter: &str,
 ) -> Result<SyncFilterSelection, SyncronizationApplicationError> {
     let trimmed_filter = raw_filter.trim();
     if trimmed_filter.starts_with('{') {
@@ -251,12 +250,11 @@ fn parse_timeline_limit_from_filter(
         .and_then(|timeline| timeline.get("limit"))
         .and_then(serde_json::Value::as_u64);
 
-    match timeline_limit {
-        Some(value) => usize::try_from(value)
+    timeline_limit.map_or(Ok(None), |value| {
+        usize::try_from(value)
             .map(Some)
-            .map_err(|_| SyncronizationApplicationError::InvalidParameter),
-        None => Ok(None),
-    }
+            .map_err(|_| SyncronizationApplicationError::InvalidParameter)
+    })
 }
 
 pub async fn get_filter(
