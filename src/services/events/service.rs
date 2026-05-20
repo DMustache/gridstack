@@ -4,18 +4,16 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::infrastructure::server_name::ServerName;
-use crate::services::events::content_mapper::matrix_event_content_to_json;
 use crate::services::events::entities::{
-    CurrentStateUpdate, EventBatchWriteContract, EventDraft, EventGraphEdge, EventHashes,
-    EventIntent, EventJsonRow, EventKind, EventOriginKind, EventSignature, EventWriteContract,
-    ForwardExtremityUpdate, IdempotencyRecord, MatrixEventContent, MembershipProjectionUpdate,
-    MembershipState, OutboxTask, OutboxTaskType, PersistedEvent, RoomEventFlow,
-    RoomSummaryProjectionKind, RoomSummaryProjectionUpdate, RoomVersionDefinition,
-    RoomVersionRegistry, StateEventKind, SupportedRoomVersion, SyncStreamRow,
-    TimelineProjectionUpdate,
+    EventBatchWriteContract, EventDraft, EventHashes, EventIntent, EventKind, EventOriginKind,
+    EventSignature, EventWriteContract, MatrixEventContent, PersistedEvent, RoomEventFlow,
+    RoomVersionDefinition, RoomVersionRegistry, StateEventKind, SupportedRoomVersion,
 };
 use crate::services::events::validator::{EventIntentValidationError, validate_event_intent};
 use crate::services::traits::Clock;
+
+mod event_write_contract_builder;
+use event_write_contract_builder::EventWriteContractBuilder;
 
 #[derive(Clone)]
 pub struct EventsService {
@@ -324,154 +322,14 @@ impl EventsService {
         auth_events: Vec<String>,
         compilation_state: &mut CompilationState,
     ) -> EventWriteContract {
-        let mut prev_edge_rows = Vec::with_capacity(prev_events.len());
-        for prev_event_id in prev_events {
-            prev_edge_rows.push(EventGraphEdge {
-                room_id: persisted_event.room_id.clone(),
-                event_id: persisted_event.event_id.clone(),
-                linked_event_id: prev_event_id,
-            });
-        }
-
-        let mut auth_edge_rows = Vec::with_capacity(auth_events.len());
-        for auth_event_id in auth_events {
-            auth_edge_rows.push(EventGraphEdge {
-                room_id: persisted_event.room_id.clone(),
-                event_id: persisted_event.event_id.clone(),
-                linked_event_id: auth_event_id,
-            });
-        }
-
-        let mut current_state_updates = Vec::new();
-        let mut membership_projection_updates = Vec::new();
-        let mut timeline_projection_updates = Vec::new();
-        let mut room_summary_projection_updates = Vec::new();
-
-        if let Some(state_key) = persisted_event.state_key.as_ref() {
-            current_state_updates.push(CurrentStateUpdate {
-                room_id: persisted_event.room_id.clone(),
-                event_type: persisted_event.event_type.clone(),
-                state_key: state_key.clone(),
-                event_id: persisted_event.event_id.clone(),
-            });
-            compilation_state.set_current_state_event_id(
-                persisted_event.event_type.clone(),
-                state_key.clone(),
-                persisted_event.event_id.clone(),
-            );
-
-            if persisted_event.event_type == "m.room.member"
-                && let Some(membership_state) =
-                    membership_state_from_content(&persisted_event.content)
-            {
-                membership_projection_updates.push(MembershipProjectionUpdate {
-                    room_id: persisted_event.room_id.clone(),
-                    user_id: state_key.clone(),
-                    membership: membership_state,
-                    event_id: persisted_event.event_id.clone(),
-                });
-            }
-
-            if let Some(summary_kind) =
-                summary_projection_kind_from_event_type(&persisted_event.event_type)
-            {
-                room_summary_projection_updates.push(RoomSummaryProjectionUpdate {
-                    room_id: persisted_event.room_id.clone(),
-                    event_id: persisted_event.event_id.clone(),
-                    projection_kind: summary_kind,
-                });
-            }
-        } else {
-            compilation_state.stream_position += 1;
-            timeline_projection_updates.push(TimelineProjectionUpdate {
-                room_id: persisted_event.room_id.clone(),
-                event_id: persisted_event.event_id.clone(),
-                stream_position: compilation_state.stream_position,
-            });
-        }
-
-        compilation_state
-            .accepted_event_ids
-            .push(persisted_event.event_id.clone());
-        compilation_state.set_event_depth(persisted_event.event_id.clone(), persisted_event.depth);
-
-        if persisted_event.state_key.is_some() {
-            compilation_state.stream_position += 1;
-        }
-
-        let mut idempotency_records = Vec::new();
-        if let Some(transaction_id) = event_intent.transaction_id.as_ref() {
-            idempotency_records.push(IdempotencyRecord {
-                room_id: persisted_event.room_id.clone(),
-                sender_user_id: persisted_event.sender.clone(),
-                transaction_id: transaction_id.clone(),
-                event_id: persisted_event.event_id.clone(),
-            });
-        }
-
-        EventWriteContract {
-            event_rows: vec![persisted_event.clone()],
-            event_json_rows: vec![EventJsonRow {
-                event_id: persisted_event.event_id.clone(),
-                canonical_json: matrix_event_content_to_json(&persisted_event.content),
-            }],
-            prev_edge_rows,
-            auth_edge_rows,
-            forward_extremity_updates: vec![ForwardExtremityUpdate {
-                room_id: persisted_event.room_id.clone(),
-                event_id: persisted_event.event_id.clone(),
-            }],
-            current_state_updates,
-            membership_projection_updates,
-            timeline_projection_updates,
-            room_summary_projection_updates,
-            sync_stream_rows: vec![SyncStreamRow {
-                room_id: persisted_event.room_id.clone(),
-                event_id: persisted_event.event_id.clone(),
-                stream_position: compilation_state.stream_position,
-            }],
-            outbox_tasks: vec![
-                OutboxTask {
-                    room_id: persisted_event.room_id.clone(),
-                    event_id: persisted_event.event_id.clone(),
-                    task_type: OutboxTaskType::NotifyLocalUsers,
-                },
-                OutboxTask {
-                    room_id: persisted_event.room_id.clone(),
-                    event_id: persisted_event.event_id.clone(),
-                    task_type: OutboxTaskType::WakeSyncWaiters,
-                },
-            ],
-            idempotency_records,
-        }
-    }
-}
-
-fn summary_projection_kind_from_event_type(event_type: &str) -> Option<RoomSummaryProjectionKind> {
-    match event_type {
-        "m.room.name" => Some(RoomSummaryProjectionKind::RoomName),
-        "m.room.topic" => Some(RoomSummaryProjectionKind::RoomTopic),
-        "m.room.canonical_alias" => Some(RoomSummaryProjectionKind::CanonicalAlias),
-        "m.room.join_rules" => Some(RoomSummaryProjectionKind::JoinRule),
-        "m.room.history_visibility" => Some(RoomSummaryProjectionKind::HistoryVisibility),
-        "m.room.guest_access" => Some(RoomSummaryProjectionKind::GuestAccess),
-        "m.room.power_levels" => Some(RoomSummaryProjectionKind::PowerLevels),
-        _ => None,
-    }
-}
-
-fn membership_state_from_content(content: &MatrixEventContent) -> Option<MembershipState> {
-    let MatrixEventContent::RoomMember(room_member_content) = content else {
-        return None;
-    };
-    let membership = room_member_content.membership.as_str();
-    match membership {
-        "join" => Some(MembershipState::Join),
-        "invite" => Some(MembershipState::Invite),
-        "leave" => Some(MembershipState::Leave),
-        "ban" => Some(MembershipState::Ban),
-        "knock" => Some(MembershipState::Knock),
-        _ => None,
+        EventWriteContractBuilder::new(
+            event_intent,
+            persisted_event,
+            prev_events,
+            auth_events,
+            compilation_state,
+        )
+        .build()
     }
 }
 

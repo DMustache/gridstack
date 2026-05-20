@@ -1,17 +1,126 @@
 use uuid::Uuid;
 
 use crate::infrastructure::server_name::ServerName;
-use crate::services::authorization::entities::ExistingUserIdentifier;
+use crate::infrastructure::user_identifier::UserIdentifier;
+use crate::services::authorization::entities::{AuthorizedUserIdentifier, ExistingUserIdentifier};
+use crate::services::authorization::service::AuthorizationService;
 use crate::services::events::entities::{
-    EventIntent, EventOriginKind, MatrixEventContent, MembershipContent, RoomCreateContent,
-    RoomMemberContent, RoomPowerLevelsContent, StateEventKind, SupportedRoomVersion,
-    UserPowerLevel,
+    EventBatchWriteContract, EventIntent, EventOriginKind, MatrixEventContent, MembershipContent,
+    RoomCreateContent, RoomEventFlow, RoomMemberContent, RoomPowerLevelsContent, StateEventKind,
+    SupportedRoomVersion, UserPowerLevel,
 };
+use crate::services::events::service::EventsService;
 use crate::services::rooms::entities::{
-    AliasIntent, CreateRoomCommand, DirectoryVisibilityIntent, RoomCreationFlow, RoomFactoryEvent,
-    RoomIdentifier, RoomPowerLevelsOverrideDto, RoomPreset, RoomShellIntent, RoomValidationError,
-    RoomVisibility, ValidatedCreateRoomInput, ValidatedCreationContent,
+    AliasIntent, CreateRoomCommand, CreatedRoom, DirectoryVisibilityIntent, RoomCreationFlow,
+    RoomFactoryEvent, RoomIdentifier, RoomPowerLevelsOverrideDto, RoomPreset, RoomShellIntent,
+    RoomValidationError, RoomVisibility, ValidatedCreateRoomInput, ValidatedCreationContent,
 };
+use crate::services::rooms::errors::RoomsApplicationError;
+use crate::services::rooms::persistence::RoomCreationRepository;
+
+pub struct CreateRoomUseCase<'a, Repository>
+where
+    Repository: RoomCreationRepository + ?Sized,
+{
+    room_repository: &'a Repository,
+    events_service: &'a EventsService,
+    authorization_service: &'a AuthorizationService,
+    server_name: &'a ServerName,
+}
+
+impl<'a, Repository> CreateRoomUseCase<'a, Repository>
+where
+    Repository: RoomCreationRepository + ?Sized,
+{
+    pub fn new(
+        room_repository: &'a Repository,
+        events_service: &'a EventsService,
+        authorization_service: &'a AuthorizationService,
+        server_name: &'a ServerName,
+    ) -> Self {
+        Self {
+            room_repository,
+            events_service,
+            authorization_service,
+            server_name,
+        }
+    }
+
+    pub fn execute(
+        &self,
+        creator_user_id: &AuthorizedUserIdentifier,
+        command: CreateRoomCommand,
+    ) -> Result<CreatedRoom, RoomsApplicationError> {
+        let resolved_invite = self.resolve_invited_users(command.invite.clone())?;
+        let validated_input: ValidatedCreateRoomInput = CreateRoomValidationInput {
+            creator: creator_user_id.as_existing_user_identifier().clone(),
+            command,
+            resolved_invite,
+            default_room_version: self.events_service.default_room_version(),
+        }
+        .try_into()?;
+
+        if !self
+            .events_service
+            .room_version_is_supported(validated_input.room_version)
+        {
+            return Err(RoomsApplicationError::UnsupportedRoomVersion);
+        }
+
+        let room_creation_flow: RoomCreationFlow =
+            RoomCreationFactory::new(&validated_input, self.server_name)
+                .add_event(RoomFactoryEvent::RequiredCreateEvent)
+                .add_event(RoomFactoryEvent::CreatorJoinEvent)
+                .add_event(RoomFactoryEvent::DefaultPowerLevelsEvent)
+                .add_event(RoomFactoryEvent::CanonicalAliasEventIfNeeded)
+                .add_event(RoomFactoryEvent::PresetEvents)
+                .add_event(RoomFactoryEvent::InitialStateEvents)
+                .add_event(RoomFactoryEvent::NameAndTopicEvents)
+                .add_event(RoomFactoryEvent::InviteEvents)
+                .build_event_flow();
+
+        let event_batch_write_contract: EventBatchWriteContract =
+            self.events_service.compile_room_event_flow(RoomEventFlow {
+                room_id: room_creation_flow.room_shell_intent.room_id.clone(),
+                room_version: room_creation_flow.room_shell_intent.room_version.clone(),
+                intents: room_creation_flow.ordered_event_intents.clone(),
+            })?;
+
+        self.room_repository
+            .create_room_with_initial_events(&room_creation_flow, &event_batch_write_contract)
+            .map_err(|error| {
+                super::map_room_persistence_error(
+                    error,
+                    room_creation_flow.room_shell_intent.room_id.clone(),
+                )
+            })?;
+
+        Ok(CreatedRoom {
+            room_id: room_creation_flow.room_shell_intent.room_id,
+        })
+    }
+
+    fn resolve_invited_users(
+        &self,
+        invited_user_ids: Vec<UserIdentifier>,
+    ) -> Result<Vec<ExistingUserIdentifier>, RoomsApplicationError> {
+        let mut invite = Vec::with_capacity(invited_user_ids.len());
+
+        for invited_user_id in invited_user_ids {
+            let existing_user = self
+                .authorization_service
+                .require_existing_user_identifier(invited_user_id.clone())
+                .map_err(|_| {
+                    RoomsApplicationError::from(RoomValidationError::InvalidInviteUserIdentifier {
+                        user_id: invited_user_id.to_string(),
+                    })
+                })?;
+            invite.push(existing_user);
+        }
+
+        Ok(invite)
+    }
+}
 
 pub struct CreateRoomValidationInput {
     pub creator: ExistingUserIdentifier,

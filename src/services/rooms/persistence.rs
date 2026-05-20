@@ -50,6 +50,388 @@ pub struct JoinedRoomMemberProfile {
     pub avatar_url: Option<String>,
 }
 
+pub trait RoomCreationRepository: Send + Sync {
+    fn create_room_with_initial_events(
+        &self,
+        room_creation_flow: &RoomCreationFlow,
+        event_batch_write_contract: &EventBatchWriteContract,
+    ) -> Result<(), DomainError>;
+}
+
+impl<T: RoomRepository + ?Sized> RoomCreationRepository for T {
+    fn create_room_with_initial_events(
+        &self,
+        room_creation_flow: &RoomCreationFlow,
+        event_batch_write_contract: &EventBatchWriteContract,
+    ) -> Result<(), DomainError> {
+        <T as RoomRepository>::create_room_with_initial_events(
+            self,
+            room_creation_flow,
+            event_batch_write_contract,
+        )
+    }
+}
+
+pub trait RoomMembershipRepository: Send + Sync {
+    fn fetch_join_context(
+        &self,
+        room_id: &str,
+        user_id: &str,
+    ) -> Result<Option<RoomJoinContext>, DomainError>;
+
+    fn append_room_event(
+        &self,
+        event_write_contract: &EventWriteContract,
+    ) -> Result<(), DomainError>;
+}
+
+impl<T: RoomRepository + ?Sized> RoomMembershipRepository for T {
+    fn fetch_join_context(
+        &self,
+        room_id: &str,
+        user_id: &str,
+    ) -> Result<Option<RoomJoinContext>, DomainError> {
+        <T as RoomRepository>::fetch_join_context(self, room_id, user_id)
+    }
+
+    fn append_room_event(
+        &self,
+        event_write_contract: &EventWriteContract,
+    ) -> Result<(), DomainError> {
+        <T as RoomRepository>::append_room_event(self, event_write_contract)
+    }
+}
+
+pub trait RoomStateWriteRepository: RoomMembershipRepository + Send + Sync {
+    fn fetch_room_id_by_alias_localpart(
+        &self,
+        alias_localpart: &str,
+    ) -> Result<Option<String>, DomainError>;
+}
+
+impl<T: RoomRepository + ?Sized> RoomStateWriteRepository for T {
+    fn fetch_room_id_by_alias_localpart(
+        &self,
+        alias_localpart: &str,
+    ) -> Result<Option<String>, DomainError> {
+        <T as RoomRepository>::fetch_room_id_by_alias_localpart(self, alias_localpart)
+    }
+}
+
+pub trait RoomMessageWriteRepository: RoomMembershipRepository + Send + Sync {
+    fn fetch_room_event_id_by_transaction_id(
+        &self,
+        room_id: &str,
+        sender_user_id: &str,
+        event_type: &str,
+        transaction_id: &str,
+    ) -> Result<Option<String>, DomainError>;
+}
+
+impl<T: RoomRepository + ?Sized> RoomMessageWriteRepository for T {
+    fn fetch_room_event_id_by_transaction_id(
+        &self,
+        room_id: &str,
+        sender_user_id: &str,
+        event_type: &str,
+        transaction_id: &str,
+    ) -> Result<Option<String>, DomainError> {
+        <T as RoomRepository>::fetch_room_event_id_by_transaction_id(
+            self,
+            room_id,
+            sender_user_id,
+            event_type,
+            transaction_id,
+        )
+    }
+}
+
+pub trait RoomReceiptRepository: RoomMembershipRepository + Send + Sync {
+    fn append_room_receipt(
+        &self,
+        room_id: &str,
+        user_id: &str,
+        receipt_type: &str,
+        event_id: &str,
+        thread_id: Option<&str>,
+    ) -> Result<(), DomainError>;
+
+    fn append_room_fully_read_marker(
+        &self,
+        room_id: &str,
+        user_id: &str,
+        event_id: &str,
+    ) -> Result<(), DomainError>;
+
+    fn room_event_matches_thread(
+        &self,
+        room_id: &str,
+        event_id: &str,
+        thread_id: &str,
+    ) -> Result<bool, DomainError>;
+
+    fn fetch_room_timeline_event_by_id(
+        &self,
+        room_id: &str,
+        event_id: &str,
+    ) -> Result<Option<RoomTimelineEvent>, DomainError>;
+}
+
+impl<T: RoomRepository + ?Sized> RoomReceiptRepository for T {
+    fn append_room_receipt(
+        &self,
+        room_id: &str,
+        user_id: &str,
+        receipt_type: &str,
+        event_id: &str,
+        thread_id: Option<&str>,
+    ) -> Result<(), DomainError> {
+        <T as RoomRepository>::append_room_receipt(
+            self,
+            room_id,
+            user_id,
+            receipt_type,
+            event_id,
+            thread_id,
+        )
+    }
+
+    fn append_room_fully_read_marker(
+        &self,
+        room_id: &str,
+        user_id: &str,
+        event_id: &str,
+    ) -> Result<(), DomainError> {
+        <T as RoomRepository>::append_room_fully_read_marker(self, room_id, user_id, event_id)
+    }
+
+    fn room_event_matches_thread(
+        &self,
+        room_id: &str,
+        event_id: &str,
+        thread_id: &str,
+    ) -> Result<bool, DomainError> {
+        <T as RoomRepository>::room_event_matches_thread(self, room_id, event_id, thread_id)
+    }
+
+    fn fetch_room_timeline_event_by_id(
+        &self,
+        room_id: &str,
+        event_id: &str,
+    ) -> Result<Option<RoomTimelineEvent>, DomainError> {
+        <T as RoomRepository>::fetch_room_timeline_event_by_id(self, room_id, event_id)
+    }
+}
+
+pub trait RoomTimelineQueryRepository: Send + Sync {
+    fn fetch_room_timeline_event_by_id(
+        &self,
+        room_id: &str,
+        event_id: &str,
+    ) -> Result<Option<RoomTimelineEvent>, DomainError>;
+
+    fn fetch_room_history_visibility_at_stream_position(
+        &self,
+        room_id: &str,
+        stream_position: i64,
+    ) -> Result<Option<String>, DomainError>;
+
+    fn fetch_room_history_visibility_before_stream_position(
+        &self,
+        room_id: &str,
+        stream_position: i64,
+    ) -> Result<Option<String>, DomainError>;
+
+    fn fetch_user_membership_at_stream_position(
+        &self,
+        room_id: &str,
+        user_id: &str,
+        stream_position: i64,
+    ) -> Result<Option<String>, DomainError>;
+
+    fn fetch_user_membership_before_stream_position(
+        &self,
+        room_id: &str,
+        user_id: &str,
+        stream_position: i64,
+    ) -> Result<Option<String>, DomainError>;
+
+    fn user_joined_since_stream_position(
+        &self,
+        room_id: &str,
+        user_id: &str,
+        stream_position: i64,
+    ) -> Result<bool, DomainError>;
+
+    fn fetch_room_timeline_events(
+        &self,
+        room_id: &str,
+        from_stream_position: Option<i64>,
+        to_stream_position: Option<i64>,
+        limit: usize,
+        backward: bool,
+        filter: Option<RoomEventFilter>,
+    ) -> Result<RoomMessagesPage, DomainError>;
+}
+
+impl<T: RoomRepository + ?Sized> RoomTimelineQueryRepository for T {
+    fn fetch_room_timeline_event_by_id(
+        &self,
+        room_id: &str,
+        event_id: &str,
+    ) -> Result<Option<RoomTimelineEvent>, DomainError> {
+        <T as RoomRepository>::fetch_room_timeline_event_by_id(self, room_id, event_id)
+    }
+
+    fn fetch_room_history_visibility_at_stream_position(
+        &self,
+        room_id: &str,
+        stream_position: i64,
+    ) -> Result<Option<String>, DomainError> {
+        <T as RoomRepository>::fetch_room_history_visibility_at_stream_position(
+            self,
+            room_id,
+            stream_position,
+        )
+    }
+
+    fn fetch_room_history_visibility_before_stream_position(
+        &self,
+        room_id: &str,
+        stream_position: i64,
+    ) -> Result<Option<String>, DomainError> {
+        <T as RoomRepository>::fetch_room_history_visibility_before_stream_position(
+            self,
+            room_id,
+            stream_position,
+        )
+    }
+
+    fn fetch_user_membership_at_stream_position(
+        &self,
+        room_id: &str,
+        user_id: &str,
+        stream_position: i64,
+    ) -> Result<Option<String>, DomainError> {
+        <T as RoomRepository>::fetch_user_membership_at_stream_position(
+            self,
+            room_id,
+            user_id,
+            stream_position,
+        )
+    }
+
+    fn fetch_user_membership_before_stream_position(
+        &self,
+        room_id: &str,
+        user_id: &str,
+        stream_position: i64,
+    ) -> Result<Option<String>, DomainError> {
+        <T as RoomRepository>::fetch_user_membership_before_stream_position(
+            self,
+            room_id,
+            user_id,
+            stream_position,
+        )
+    }
+
+    fn user_joined_since_stream_position(
+        &self,
+        room_id: &str,
+        user_id: &str,
+        stream_position: i64,
+    ) -> Result<bool, DomainError> {
+        <T as RoomRepository>::user_joined_since_stream_position(
+            self,
+            room_id,
+            user_id,
+            stream_position,
+        )
+    }
+
+    fn fetch_room_timeline_events(
+        &self,
+        room_id: &str,
+        from_stream_position: Option<i64>,
+        to_stream_position: Option<i64>,
+        limit: usize,
+        backward: bool,
+        filter: Option<RoomEventFilter>,
+    ) -> Result<RoomMessagesPage, DomainError> {
+        <T as RoomRepository>::fetch_room_timeline_events(
+            self,
+            room_id,
+            from_stream_position,
+            to_stream_position,
+            limit,
+            backward,
+            filter,
+        )
+    }
+}
+
+pub trait RoomStateQueryRepository: RoomMembershipRepository + Send + Sync {
+    fn fetch_room_state_events(&self, room_id: &str) -> Result<Vec<RoomStateEvent>, DomainError>;
+
+    fn fetch_room_member_state_events_at_stream_position(
+        &self,
+        room_id: &str,
+        stream_position: i64,
+    ) -> Result<Vec<RoomStateEvent>, DomainError>;
+
+    fn fetch_room_state_event_by_type_and_key(
+        &self,
+        room_id: &str,
+        event_type: &str,
+        state_key: &str,
+    ) -> Result<Option<RoomStateEvent>, DomainError>;
+}
+
+impl<T: RoomRepository + ?Sized> RoomStateQueryRepository for T {
+    fn fetch_room_state_events(&self, room_id: &str) -> Result<Vec<RoomStateEvent>, DomainError> {
+        <T as RoomRepository>::fetch_room_state_events(self, room_id)
+    }
+
+    fn fetch_room_member_state_events_at_stream_position(
+        &self,
+        room_id: &str,
+        stream_position: i64,
+    ) -> Result<Vec<RoomStateEvent>, DomainError> {
+        <T as RoomRepository>::fetch_room_member_state_events_at_stream_position(
+            self,
+            room_id,
+            stream_position,
+        )
+    }
+
+    fn fetch_room_state_event_by_type_and_key(
+        &self,
+        room_id: &str,
+        event_type: &str,
+        state_key: &str,
+    ) -> Result<Option<RoomStateEvent>, DomainError> {
+        <T as RoomRepository>::fetch_room_state_event_by_type_and_key(
+            self, room_id, event_type, state_key,
+        )
+    }
+}
+
+pub trait RoomJoinedMembersRepository: RoomMembershipRepository + Send + Sync {
+    fn fetch_joined_members_profiles(
+        &self,
+        room_id: &str,
+    ) -> Result<Vec<JoinedRoomMemberProfile>, DomainError>;
+}
+
+impl<T: RoomRepository + ?Sized> RoomJoinedMembersRepository for T {
+    fn fetch_joined_members_profiles(
+        &self,
+        room_id: &str,
+    ) -> Result<Vec<JoinedRoomMemberProfile>, DomainError> {
+        <T as RoomRepository>::fetch_joined_members_profiles(self, room_id)
+    }
+}
+
 pub trait RoomRepository: Send + Sync {
     fn create_room_with_initial_events(
         &self,
