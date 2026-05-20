@@ -1,5 +1,5 @@
-use uuid::Uuid;
 use axum_extra::routing::TypedPath;
+use uuid::Uuid;
 
 use crate::infrastructure::server_name::ServerName;
 use crate::infrastructure::user_identifier::UserIdentifier;
@@ -11,9 +11,7 @@ use crate::services::events::entities::{
     SupportedRoomVersion, UserPowerLevel,
 };
 use crate::services::events::service::EventsService;
-use crate::services::identity::endpoints::{
-    IdentityLegacyV1PublicKeyIsValidPath,
-};
+use crate::services::identity::endpoints::IdentityLegacyV1PublicKeyIsValidPath;
 use crate::services::rooms::entities::{
     AliasIntent, CreateRoomCommand, CreatedRoom, DirectoryVisibilityIntent, RoomCreationFlow,
     RoomFactoryEvent, RoomIdentifier, RoomPowerLevelsOverrideDto, RoomPreset, RoomShellIntent,

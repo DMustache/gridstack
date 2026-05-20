@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value, json};
 use syn::{
     Expr, ExprAssign, ExprLit, ExprPath, File, FnArg, GenericArgument, Item, Lit, LitInt, LitStr,
-    Meta, PatType, PathArguments, ReturnType, Type, parse::Parser, punctuated::Punctuated,
+    Meta, PatType, PathArguments, ReturnType, Type, UseTree, parse::Parser, punctuated::Punctuated,
     token::Comma,
 };
 
@@ -48,6 +48,17 @@ fn main() -> Result<()> {
     let mut schemas = extract_schemas_from_files(&source_files)?;
     schemas.extend(extract_schemas_from_dir(entities_dir)?);
     schemas.extend(extract_schemas_from_file(shared_file)?);
+    let schema_aliases = extract_schema_aliases_from_files(&source_files)?;
+
+    let normalized_schemas = schemas
+        .iter()
+        .map(|(name, schema)| {
+            (
+                name.clone(),
+                normalize_schema_refs(schema, &schema_aliases, &schemas),
+            )
+        })
+        .collect::<HashMap<_, _>>();
 
     let mut paths: BTreeMap<String, Value> = BTreeMap::new();
     for op in operations {
@@ -56,7 +67,8 @@ fn main() -> Result<()> {
             &handler_specs,
             &response_specs,
             &layer_response_specs,
-            &schemas,
+            &normalized_schemas,
+            &schema_aliases,
         )?;
 
         let entry = paths
@@ -68,7 +80,7 @@ fn main() -> Result<()> {
         object.insert(op.method, method_object);
     }
 
-    let referenced_schemas = retain_referenced_schemas(&paths, &schemas);
+    let referenced_schemas = retain_referenced_schemas(&paths, &normalized_schemas);
 
     let mut schema_map = Map::new();
     for (name, schema) in referenced_schemas {
@@ -126,7 +138,7 @@ struct RouteOperation {
 #[derive(Debug, Clone)]
 struct HandlerSpec {
     query_type: Option<String>,
-    json_body_type: Option<String>,
+    json_body_schema: Option<Value>,
     response_enum: Option<String>,
     auth_requirement: AuthRequirement,
 }
@@ -134,7 +146,8 @@ struct HandlerSpec {
 #[derive(Debug, Clone)]
 struct ResponseVariantSpec {
     status: String,
-    schema_type: Option<String>,
+    schema: Option<Value>,
+    schema_type_name: Option<String>,
     matrix_error_codes: Vec<String>,
     matrix_error_messages: HashMap<String, String>,
 }
@@ -358,7 +371,7 @@ fn extract_handler_specs(handlers_file: &Path) -> Result<HashMap<String, Handler
 
         let handler_name = function.sig.ident.to_string();
         let mut query_type = None;
-        let mut json_body_type = None;
+        let mut json_body_schema = None;
         let mut auth_requirement = AuthRequirement::None;
 
         for input in &function.sig.inputs {
@@ -369,8 +382,8 @@ fn extract_handler_specs(handlers_file: &Path) -> Result<HashMap<String, Handler
             if let Some(inner) = extract_inner_type_name(ty, "Query") {
                 query_type = Some(inner);
             }
-            if let Some(inner) = extract_inner_type_name(ty, "Json") {
-                json_body_type = Some(inner);
+            if let Some(schema) = extract_inner_type_schema(ty, "Json") {
+                json_body_schema = Some(schema);
             }
             auth_requirement =
                 merge_auth_requirement(auth_requirement, extract_auth_requirement(ty));
@@ -385,7 +398,7 @@ fn extract_handler_specs(handlers_file: &Path) -> Result<HashMap<String, Handler
             handler_name,
             HandlerSpec {
                 query_type,
-                json_body_type,
+                json_body_schema,
                 response_enum,
                 auth_requirement,
             },
@@ -530,15 +543,21 @@ fn extract_response_specs(
                 }
             }
 
-            let payload_type = variant
+            let payload_type_name = variant
                 .fields
                 .iter()
                 .next()
                 .and_then(|field| extract_inner_type_name(&field.ty, "Json"));
+            let payload_schema = variant
+                .fields
+                .iter()
+                .next()
+                .and_then(|field| extract_inner_type_schema(&field.ty, "Json"));
 
             variants.push(ResponseVariantSpec {
                 status: status.unwrap_or_else(|| "200".to_owned()),
-                schema_type: payload_type,
+                schema: payload_schema,
+                schema_type_name: payload_type_name,
                 matrix_error_codes,
                 matrix_error_messages: matrix_error_sources,
             });
@@ -706,6 +725,7 @@ fn build_method_object(
     response_specs: &HashMap<String, Vec<ResponseVariantSpec>>,
     layer_response_specs: &HashMap<String, Vec<ResponseVariantSpec>>,
     schemas: &HashMap<String, Value>,
+    schema_aliases: &HashMap<String, String>,
 ) -> Result<Value> {
     let handler = handler_specs.get(&op.operation_id);
 
@@ -713,21 +733,24 @@ fn build_method_object(
     method.insert("tags".to_owned(), json!([op.service_tag]));
     method.insert("operationId".to_owned(), json!(op.operation_id));
 
+    let mut parameters = build_path_parameters(&op.path);
     if let Some(query_type) = handler.and_then(|h| h.query_type.as_ref()) {
-        let parameters = build_query_parameters(query_type, schemas)?;
-        if !parameters.is_empty() {
-            method.insert("parameters".to_owned(), Value::Array(parameters));
-        }
+        let resolved_query_type = resolve_schema_alias(query_type, schema_aliases, schemas);
+        parameters.extend(build_query_parameters(&resolved_query_type, schemas)?);
+    }
+    if !parameters.is_empty() {
+        method.insert("parameters".to_owned(), Value::Array(parameters));
     }
 
-    if let Some(body_type) = handler.and_then(|h| h.json_body_type.as_ref()) {
+    if let Some(body_schema) = handler.and_then(|h| h.json_body_schema.as_ref()) {
+        let normalized_body_schema = normalize_schema_refs(body_schema, schema_aliases, schemas);
         method.insert(
             "requestBody".to_owned(),
             json!({
                 "required": true,
                 "content": {
                     "application/json": {
-                        "schema": { "$ref": format!("#/components/schemas/{}", body_type) }
+                        "schema": normalized_body_schema
                     }
                 }
             }),
@@ -745,7 +768,7 @@ fn build_method_object(
             layer_variants.push(spec.clone());
         }
     }
-    let responses = build_responses(handler_responses, &layer_variants);
+    let responses = build_responses(handler_responses, &layer_variants, schema_aliases, schemas);
     method.insert("responses".to_owned(), responses);
     let auth_requirement = handler.map_or(AuthRequirement::None, |handler_specification| {
         handler_specification.auth_requirement
@@ -830,9 +853,38 @@ fn build_query_parameters(
     Ok(parameters)
 }
 
+fn build_path_parameters(path: &str) -> Vec<Value> {
+    let mut parameters = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut remaining = path;
+
+    while let Some(start_index) = remaining.find('{') {
+        let tail = &remaining[start_index + 1..];
+        let Some(end_index) = tail.find('}') else {
+            break;
+        };
+
+        let parameter_name = tail[..end_index].trim();
+        if !parameter_name.is_empty() && seen.insert(parameter_name.to_owned()) {
+            parameters.push(json!({
+                "name": parameter_name,
+                "in": "path",
+                "required": true,
+                "schema": { "type": "string" }
+            }));
+        }
+
+        remaining = &tail[end_index + 1..];
+    }
+
+    parameters
+}
+
 fn build_responses(
     handler_specs: Option<&Vec<ResponseVariantSpec>>,
     layer_specs: &[Vec<ResponseVariantSpec>],
+    schema_aliases: &HashMap<String, String>,
+    schemas: &HashMap<String, Value>,
 ) -> Value {
     let mut merged_by_status: BTreeMap<String, ResponseVariantSpec> = BTreeMap::new();
 
@@ -853,13 +905,15 @@ fn build_responses(
         let description = build_response_description(&spec);
         response.insert("description".to_owned(), json!(description));
 
-        if let Some(schema_type) = &spec.schema_type {
+        if let Some(schema) = &spec.schema {
             let mut media = Map::new();
             media.insert(
                 "schema".to_owned(),
-                json!({ "$ref": format!("#/components/schemas/{}", schema_type) }),
+                normalize_schema_refs(schema, schema_aliases, schemas),
             );
-            if let Some(example) = build_response_example(&spec, schema_type) {
+            if let Some(schema_type_name) = &spec.schema_type_name
+                && let Some(example) = build_response_example(&spec, schema_type_name)
+            {
                 media.insert("example".to_owned(), example);
             }
             response.insert(
@@ -942,13 +996,17 @@ fn merge_response_spec(
         .entry(incoming.status.clone())
         .or_insert_with(|| ResponseVariantSpec {
             status: incoming.status.clone(),
-            schema_type: incoming.schema_type.clone(),
+            schema: incoming.schema.clone(),
+            schema_type_name: incoming.schema_type_name.clone(),
             matrix_error_codes: Vec::new(),
             matrix_error_messages: HashMap::new(),
         });
 
-    if entry.schema_type.is_none() {
-        entry.schema_type = incoming.schema_type.take();
+    if entry.schema.is_none() {
+        entry.schema = incoming.schema.take();
+    }
+    if entry.schema_type_name.is_none() {
+        entry.schema_type_name = incoming.schema_type_name.take();
     }
     entry
         .matrix_error_codes
@@ -1086,6 +1144,104 @@ fn extract_schemas_from_file(path: &Path) -> Result<HashMap<String, Value>> {
     }
 
     Ok(schemas)
+}
+
+fn extract_schema_aliases_from_files(paths: &[PathBuf]) -> Result<HashMap<String, String>> {
+    let mut aliases = HashMap::new();
+    for path in paths {
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let parsed: File = syn::parse_file(&content)
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+
+        for item in parsed.items {
+            match item {
+                Item::Use(item_use) => {
+                    collect_schema_aliases_from_use_tree(&item_use.tree, &mut aliases)
+                }
+                Item::Type(item_type) => {
+                    if let Some(target) = type_name_from_type(&item_type.ty) {
+                        aliases.insert(item_type.ident.to_string(), target);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(aliases)
+}
+
+fn collect_schema_aliases_from_use_tree(use_tree: &UseTree, aliases: &mut HashMap<String, String>) {
+    match use_tree {
+        UseTree::Path(path) => collect_schema_aliases_from_use_tree(&path.tree, aliases),
+        UseTree::Rename(rename) => {
+            aliases.insert(rename.rename.to_string(), rename.ident.to_string());
+        }
+        UseTree::Group(group) => {
+            for nested in &group.items {
+                collect_schema_aliases_from_use_tree(nested, aliases);
+            }
+        }
+        UseTree::Name(_) | UseTree::Glob(_) => {}
+    }
+}
+
+fn resolve_schema_alias(
+    schema_name: &str,
+    aliases: &HashMap<String, String>,
+    schemas: &HashMap<String, Value>,
+) -> String {
+    let mut current = schema_name.to_owned();
+    let mut visited = std::collections::HashSet::new();
+
+    while let Some(next) = aliases.get(&current) {
+        if !visited.insert(current.clone()) {
+            break;
+        }
+        current = next.clone();
+    }
+
+    if schemas.contains_key(&current) {
+        current
+    } else if schemas.contains_key(schema_name) {
+        schema_name.to_owned()
+    } else {
+        current
+    }
+}
+
+fn normalize_schema_refs(
+    value: &Value,
+    aliases: &HashMap<String, String>,
+    schemas: &HashMap<String, Value>,
+) -> Value {
+    match value {
+        Value::Object(object) => {
+            let mut normalized = Map::new();
+            for (key, child) in object {
+                if key == "$ref"
+                    && let Value::String(reference) = child
+                    && let Some(name) = reference.strip_prefix("#/components/schemas/")
+                {
+                    let resolved = resolve_schema_alias(name, aliases, schemas);
+                    normalized.insert(
+                        key.clone(),
+                        Value::String(format!("#/components/schemas/{resolved}")),
+                    );
+                } else {
+                    normalized.insert(key.clone(), normalize_schema_refs(child, aliases, schemas));
+                }
+            }
+            Value::Object(normalized)
+        }
+        Value::Array(array) => Value::Array(
+            array
+                .iter()
+                .map(|child| normalize_schema_refs(child, aliases, schemas))
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
 }
 
 fn enum_to_schema(item_enum: &syn::ItemEnum) -> Value {
@@ -1287,7 +1443,7 @@ fn type_to_schema(ty: &Type) -> (Value, bool) {
                 return type_to_schema(inner);
             }
 
-            if ident == "BTreeMap" || ident == "HashMap" {
+            if ident == "BTreeMap" || ident == "HashMap" || ident == "Map" {
                 if let PathArguments::AngleBracketed(args) = &segment.arguments {
                     let mut iter = args.args.iter();
                     let _key = iter.next();
@@ -1352,6 +1508,29 @@ fn extract_inner_type_name(ty: &Type, wrapper: &str) -> Option<String> {
     };
 
     type_name_from_type(inner_type)
+}
+
+fn extract_inner_type_schema(ty: &Type, wrapper: &str) -> Option<Value> {
+    let Type::Path(path) = ty else {
+        return None;
+    };
+
+    let last = path.path.segments.last()?;
+    if last.ident != wrapper {
+        return None;
+    }
+
+    let PathArguments::AngleBracketed(args) = &last.arguments else {
+        return None;
+    };
+
+    let inner = args.args.first()?;
+    let GenericArgument::Type(inner_type) = inner else {
+        return None;
+    };
+
+    let (schema, _) = type_to_schema(inner_type);
+    Some(schema)
 }
 
 fn type_name_from_type(ty: &Type) -> Option<String> {
