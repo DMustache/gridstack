@@ -1,6 +1,6 @@
 use axum::serve;
 use tokio::net::TcpListener;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt};
 
 use crate::{
@@ -31,6 +31,7 @@ async fn main() -> anyhow::Result<()> {
         error!(error = %error, "server failed");
         return Err(error.into());
     }
+    info!("server stopped gracefully");
     application_state.flush_runtime_state();
 
     Ok(())
@@ -47,7 +48,8 @@ fn initialize_logging() {
 }
 
 async fn shutdown_signal() {
-    if tokio::signal::ctrl_c().await.is_ok() {
-        info!("shutdown signal received");
+    match tokio::signal::ctrl_c().await {
+        Ok(()) => info!("shutdown signal received"),
+        Err(error) => warn!(error = %error, "failed to listen for shutdown signal"),
     }
 }

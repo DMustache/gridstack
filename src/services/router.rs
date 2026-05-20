@@ -1,6 +1,9 @@
 use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::any};
-use tower_http::trace::TraceLayer;
-use tracing::info;
+use tower_http::trace::{
+    DefaultMakeSpan, DefaultOnBodyChunk, DefaultOnEos, DefaultOnFailure, DefaultOnRequest,
+    DefaultOnResponse, TraceLayer,
+};
+use tracing::{Level, info};
 
 use crate::services::{
     authorization, identity, rooms, shared::MatrixErrorResponse, state::ApplicationState,
@@ -13,7 +16,7 @@ pub fn build_router(application_state: ApplicationState) -> Router {
         .merge(identity::routes::routes(&application_state))
         .merge(rooms::routes::routes(&application_state))
         .merge(synchronization::routes::routes(&application_state))
-        .layer(TraceLayer::new_for_http())
+        .layer(http_trace_layer())
         .with_state(application_state.clone())
         .fallback(any(matrix_fallback))
         .with_state(application_state)
@@ -29,4 +32,19 @@ async fn matrix_fallback() -> impl IntoResponse {
         }),
     )
         .into_response()
+}
+
+fn http_trace_layer() -> TraceLayer<
+    tower_http::classify::SharedClassifier<tower_http::classify::ServerErrorsAsFailures>,
+    DefaultMakeSpan,
+    DefaultOnRequest,
+    DefaultOnResponse,
+    DefaultOnBodyChunk,
+    DefaultOnEos,
+    DefaultOnFailure,
+> {
+    TraceLayer::new_for_http()
+        .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+        .on_response(DefaultOnResponse::new().level(Level::INFO))
+        .on_failure(DefaultOnFailure::new().level(Level::WARN))
 }
