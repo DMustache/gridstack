@@ -304,7 +304,7 @@ fn map_room_persistence_error(error: DomainError, room_id: String) -> RoomsAppli
             if reason.contains("room_aliases") || reason.contains("alias_localpart") {
                 RoomsApplicationError::RoomInUse
             } else {
-                error!(room_id, reason, "failed to persist room creation contract");
+                error!(room_id, reason, "failed to persist room event contract");
                 RoomsApplicationError::Internal
             }
         }

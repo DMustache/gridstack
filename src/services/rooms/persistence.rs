@@ -2,7 +2,7 @@ use chrono::Utc;
 use diesel::{
     BoolExpressionMethods, Connection, ExpressionMethods, JoinOnDsl, NullableExpressionMethods,
     OptionalExtension, QueryDsl, RunQueryDsl,
-    dsl::{exists, select},
+    dsl::{exists, max, select},
     insert_into,
     pg::PgConnection,
     r2d2::{self, ConnectionManager},
@@ -1803,6 +1803,11 @@ fn persist_event_batch(
     connection
         .transaction(|connection| {
             let now = Utc::now().naive_utc();
+            let mut next_room_timeline_stream_position = room_timeline_projection::table
+                .filter(room_timeline_projection::room_id.eq(&event_batch_write_contract.room_id))
+                .select(max(room_timeline_projection::stream_position))
+                .first::<Option<i64>>(connection)?
+                .unwrap_or(0);
             let mut room_events_rows = Vec::new();
             let mut event_relation_rows = Vec::new();
             let mut prev_edge_rows = Vec::new();
@@ -1899,9 +1904,11 @@ fn persist_event_batch(
                     });
                 }
                 for timeline in &event_write_contract.timeline_projection_updates {
+                    next_room_timeline_stream_position =
+                        next_room_timeline_stream_position.saturating_add(1);
                     timeline_rows.push(CreateRoomTimelineProjectionModel {
                         room_id: timeline.room_id.clone(),
-                        stream_position: timeline.stream_position,
+                        stream_position: next_room_timeline_stream_position,
                         event_id: timeline.event_id.clone(),
                     });
                 }
