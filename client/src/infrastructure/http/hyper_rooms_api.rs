@@ -7,7 +7,8 @@ use crate::{
         error::ClientError,
         rooms::{
             CreateRoomInfo, CreateRoomView, GetRoomMessagesQuery, GetRoomMessagesView,
-            JoinRoomInfo, JoinRoomView, LeaveRoomInfo, LeaveRoomView, RoomStateEventView,
+            JoinRoomInfo, JoinRoomView, JoinedRoomsView, LeaveRoomInfo, LeaveRoomView,
+            RoomStateEventView, SendRoomEventView,
         },
     },
     infrastructure::http::matrix_http_client::MatrixHttpClient,
@@ -115,6 +116,33 @@ impl RoomsApi for HyperRoomsApi {
                 Some(access_token),
                 None,
             )
+            .await
+    }
+
+    async fn get_joined_rooms(&self, access_token: &str) -> Result<JoinedRoomsView, ClientError> {
+        self.matrix_http_client
+            .send_json::<(), JoinedRoomsView>(
+                Method::GET,
+                "/_matrix/client/v3/joined_rooms",
+                Some(access_token),
+                None,
+            )
+            .await
+    }
+
+    async fn send_room_message_event(
+        &self,
+        access_token: &str,
+        room_id: &str,
+        event_type: &str,
+        transaction_id: &str,
+        content: &serde_json::Value,
+    ) -> Result<SendRoomEventView, ClientError> {
+        let path = format!(
+            "/_matrix/client/v3/rooms/{room_id}/send/{event_type}/{transaction_id}"
+        );
+        self.matrix_http_client
+            .send_json(Method::PUT, &path, Some(access_token), Some(content))
             .await
     }
 }

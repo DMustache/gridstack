@@ -6,8 +6,8 @@ use crate::{
         error::ClientError,
         rooms::{
             CreateRoomInfo, CreateRoomView, GetRoomMessagesQuery, GetRoomMessagesView,
-            JoinRoomInfo, JoinRoomView, LeaveRoomInfo, LeaveRoomView, RoomListItem,
-            RoomStateEventView,
+            JoinRoomInfo, JoinRoomView, JoinedRoomsView, LeaveRoomInfo, LeaveRoomView,
+            RoomListItem, RoomStateEventView, SendRoomEventView,
         },
     },
 };
@@ -152,6 +152,48 @@ impl RoomsClientService {
 
         self.rooms_api
             .get_room_messages(&session.access_token, room_id, query)
+            .await
+    }
+
+    pub async fn get_joined_rooms(&self) -> Result<JoinedRoomsView, ClientError> {
+        let session = self
+            .session_repository
+            .get_session_by_server(&self.server_url)
+            .await?
+            .ok_or_else(|| ClientError::Matrix {
+                status: 401,
+                errcode: "M_MISSING_TOKEN".to_owned(),
+                message: "No saved session token".to_owned(),
+            })?;
+
+        self.rooms_api.get_joined_rooms(&session.access_token).await
+    }
+
+    pub async fn send_room_message_event(
+        &self,
+        room_id: &str,
+        event_type: &str,
+        transaction_id: &str,
+        content: &serde_json::Value,
+    ) -> Result<SendRoomEventView, ClientError> {
+        let session = self
+            .session_repository
+            .get_session_by_server(&self.server_url)
+            .await?
+            .ok_or_else(|| ClientError::Matrix {
+                status: 401,
+                errcode: "M_MISSING_TOKEN".to_owned(),
+                message: "No saved session token".to_owned(),
+            })?;
+
+        self.rooms_api
+            .send_room_message_event(
+                &session.access_token,
+                room_id,
+                event_type,
+                transaction_id,
+                content,
+            )
             .await
     }
 
