@@ -1,4 +1,5 @@
 pub mod contracts;
+pub mod endpoints;
 pub mod entities;
 pub mod errors;
 pub mod handlers;

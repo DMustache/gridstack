@@ -1,4 +1,5 @@
 use uuid::Uuid;
+use axum_extra::routing::TypedPath;
 
 use crate::infrastructure::server_name::ServerName;
 use crate::infrastructure::user_identifier::UserIdentifier;
@@ -10,6 +11,9 @@ use crate::services::events::entities::{
     SupportedRoomVersion, UserPowerLevel,
 };
 use crate::services::events::service::EventsService;
+use crate::services::identity::endpoints::{
+    IdentityLegacyV1PublicKeyIsValidPath,
+};
 use crate::services::rooms::entities::{
     AliasIntent, CreateRoomCommand, CreatedRoom, DirectoryVisibilityIntent, RoomCreationFlow,
     RoomFactoryEvent, RoomIdentifier, RoomPowerLevelsOverrideDto, RoomPreset, RoomShellIntent,
@@ -430,8 +434,9 @@ impl<'a> RoomCreationFactory<'a> {
                 MatrixEventContent::RoomThirdPartyInvite {
                     display_name: third_party_invite.address.clone(),
                     key_validity_url: format!(
-                        "https://{}/_matrix/identity/api/v1/pubkey/isvalid",
-                        third_party_invite.id_server
+                        "https://{}{}",
+                        third_party_invite.id_server.as_str(),
+                        IdentityLegacyV1PublicKeyIsValidPath.to_uri().to_string()
                     ),
                     public_key: String::new(),
                     medium: third_party_invite.medium.clone(),

@@ -12,6 +12,8 @@ use crate::services::shared::MatrixErrorResponse;
 pub enum IdentityServiceError {
     #[error("identity resource not found")]
     NotFound,
+    #[error("identity public key not found")]
+    PublicKeyNotFound,
     #[error("identity authentication required")]
     AuthenticationRequired,
     #[error("identity request is forbidden")]
@@ -45,6 +47,7 @@ impl IntoResponse for IdentityServiceError {
 
         let status_code = match self {
             Self::NotFound => StatusCode::NOT_FOUND,
+            Self::PublicKeyNotFound => StatusCode::NOT_FOUND,
             Self::AuthenticationRequired => StatusCode::UNAUTHORIZED,
             Self::Forbidden => StatusCode::FORBIDDEN,
             Self::InvalidRequest(_) => StatusCode::BAD_REQUEST,
@@ -57,6 +60,10 @@ impl IntoResponse for IdentityServiceError {
             Self::NotFound => (
                 "M_NOT_FOUND".to_owned(),
                 "The identity resource was not found".to_owned(),
+            ),
+            Self::PublicKeyNotFound => (
+                "M_NOT_FOUND".to_owned(),
+                "The public key was not found".to_owned(),
             ),
             Self::AuthenticationRequired => (
                 "M_UNAUTHORIZED".to_owned(),

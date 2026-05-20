@@ -17,7 +17,7 @@ pub fn routes(_application_state: &ApplicationState) -> Router<ApplicationState>
             get(handlers::key_management::is_long_term_public_key_valid),
         )
         .route(
-            "/_matrix/identity/v2/pubkey/{key_id}",
+            "/_matrix/identity/v2/pubkey/{keyId}",
             get(handlers::key_management::get_public_key),
         )
         .route(
