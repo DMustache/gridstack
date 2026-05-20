@@ -110,7 +110,7 @@ impl IdentitySigningKeyId {
     }
 
     #[must_use]
-    pub fn as_str(&self) -> &str {
+    pub const fn as_str(&self) -> &str {
         self.value.as_str()
     }
 }
@@ -135,7 +135,7 @@ impl IdentitySigningAlgorithm {
     }
 
     #[must_use]
-    pub fn as_str(&self) -> &str {
+    pub const fn as_str(&self) -> &str {
         self.value.as_str()
     }
 }
@@ -147,7 +147,7 @@ impl IdentitySigningKeyIdentifier {
     }
 
     #[must_use]
-    pub fn as_str(&self) -> &str {
+    pub const fn as_str(&self) -> &str {
         self.value.as_str()
     }
 }
@@ -159,7 +159,7 @@ impl EncodedPublicKey {
     }
 
     #[must_use]
-    pub fn as_str(&self) -> &str {
+    pub const fn as_str(&self) -> &str {
         self.value.as_str()
     }
 }
@@ -171,7 +171,7 @@ impl EncodedPrivateKey {
     }
 
     #[must_use]
-    pub fn as_str(&self) -> &str {
+    pub const fn as_str(&self) -> &str {
         self.value.as_str()
     }
 }
@@ -183,7 +183,7 @@ impl IdentityServerAccessToken {
     }
 
     #[must_use]
-    pub fn as_str(&self) -> &str {
+    pub const fn as_str(&self) -> &str {
         self.value.as_str()
     }
 }
@@ -195,7 +195,7 @@ impl LookupPepper {
     }
 
     #[must_use]
-    pub fn as_str(&self) -> &str {
+    pub const fn as_str(&self) -> &str {
         self.value.as_str()
     }
 }
@@ -214,7 +214,7 @@ impl IdentityHashAlgorithm {
     }
 
     #[must_use]
-    pub fn as_str(&self) -> &str {
+    pub const fn as_str(&self) -> &str {
         self.value.as_str()
     }
 }
@@ -226,7 +226,7 @@ impl ThirdPartyIdentifierMedium {
     }
 
     #[must_use]
-    pub fn as_str(&self) -> &str {
+    pub const fn as_str(&self) -> &str {
         self.value.as_str()
     }
 }
@@ -238,7 +238,7 @@ impl ThirdPartyIdentifierAddress {
     }
 
     #[must_use]
-    pub fn as_str(&self) -> &str {
+    pub const fn as_str(&self) -> &str {
         self.value.as_str()
     }
 }
@@ -253,7 +253,7 @@ impl MatrixUserIdentifier {
     }
 
     #[must_use]
-    pub fn as_str(&self) -> &str {
+    pub const fn as_str(&self) -> &str {
         self.value.as_str()
     }
 }
@@ -265,7 +265,7 @@ impl RoomIdentifier {
     }
 
     #[must_use]
-    pub fn as_str(&self) -> &str {
+    pub const fn as_str(&self) -> &str {
         self.value.as_str()
     }
 }
@@ -277,7 +277,7 @@ impl InvitationToken {
     }
 
     #[must_use]
-    pub fn as_str(&self) -> &str {
+    pub const fn as_str(&self) -> &str {
         self.value.as_str()
     }
 }

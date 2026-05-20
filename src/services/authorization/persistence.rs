@@ -189,7 +189,7 @@ impl InMemorySessionRepository {
                         sessions_by_token.remove(access_token);
                     }
                 }
-                _ => continue,
+                _ => {}
             }
         }
 
@@ -245,11 +245,10 @@ enum SessionStorageMutation {
 
 impl InMemorySessionRepository {
     fn push_pending_record(&self, record: SessionStorageMutation) -> Result<(), DomainError> {
-        let mut pending_records = self
-            .pending_records
+        self.pending_records
             .write()
-            .map_err(|_| DomainError::InvalidRequest("session storage lock failure".to_owned()))?;
-        pending_records.push(record);
+            .map_err(|_| DomainError::InvalidRequest("session storage lock failure".to_owned()))?
+            .push(record);
         Ok(())
     }
 }
@@ -276,6 +275,7 @@ impl SessionRepository for InMemorySessionRepository {
         let session = sessions_by_token.get(access_token.as_str()).cloned()?;
         if session.expires_at_seconds() <= now_seconds {
             sessions_by_token.remove(access_token.as_str());
+            drop(sessions_by_token);
             let _ = self.push_pending_record(SessionStorageMutation::Delete(
                 access_token.as_str().to_owned(),
             ));

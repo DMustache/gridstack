@@ -12,7 +12,7 @@ use std::{
     fs,
     fs::OpenOptions,
     io::{BufRead, BufReader, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::RwLock,
 };
 
@@ -188,9 +188,8 @@ impl FilterRepository for SyncronizationPersistence {
     ) -> Result<Option<Value>, DomainError> {
         use schema::user_filters;
 
-        let filter_identifier_number = match filter_identifier.parse::<i64>() {
-            Ok(value) => value,
-            Err(_) => return Ok(None),
+        let Ok(filter_identifier_number) = filter_identifier.parse::<i64>() else {
+            return Ok(None);
         };
 
         let mut connection = self
@@ -614,16 +613,15 @@ impl FilterRepository for SyncronizationPersistence {
         event_type: &str,
         content: Value,
     ) -> Result<(), DomainError> {
-        {
-            let mut account_data_store = self
-                .account_data_store
-                .write()
-                .map_err(|_| DomainError::InvalidRequest("account data lock failure".to_owned()))?;
-            let user_events = account_data_store
-                .entry(user_identifier.to_owned())
-                .or_insert_with(HashMap::new);
-            user_events.insert(event_type.to_owned(), content);
-        }
+        let mut account_data_store = self
+            .account_data_store
+            .write()
+            .map_err(|_| DomainError::InvalidRequest("account data lock failure".to_owned()))?;
+        account_data_store
+            .entry(user_identifier.to_owned())
+            .or_insert_with(HashMap::new)
+            .insert(event_type.to_owned(), content);
+        drop(account_data_store);
         persist_account_data_store(&self.state_directory_path, &self.account_data_store)
     }
 
@@ -631,11 +629,10 @@ impl FilterRepository for SyncronizationPersistence {
         &self,
         user_identifier: &str,
     ) -> Result<Vec<Value>, DomainError> {
-        let account_data_store = self
+        let events = self
             .account_data_store
             .read()
-            .map_err(|_| DomainError::InvalidRequest("account data lock failure".to_owned()))?;
-        let events = account_data_store
+            .map_err(|_| DomainError::InvalidRequest("account data lock failure".to_owned()))?
             .get(user_identifier)
             .map(|event_by_type| {
                 event_by_type
@@ -701,7 +698,7 @@ impl FilterRepository for SyncronizationPersistence {
     }
 }
 
-fn load_presence_store(state_directory_path: &PathBuf) -> HashMap<String, String> {
+fn load_presence_store(state_directory_path: &Path) -> HashMap<String, String> {
     let file_path = state_directory_path.join("presence.tsv");
     let Ok(file) = fs::File::open(file_path) else {
         return HashMap::new();
@@ -717,7 +714,7 @@ fn load_presence_store(state_directory_path: &PathBuf) -> HashMap<String, String
 }
 
 fn persist_presence_store(
-    state_directory_path: &PathBuf,
+    state_directory_path: &Path,
     presence_store: &RwLock<HashMap<String, String>>,
 ) -> Result<(), DomainError> {
     fs::create_dir_all(state_directory_path)
@@ -736,14 +733,13 @@ fn persist_presence_store(
         writeln!(file, "{user_identifier}\t{presence}")
             .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
     }
+    drop(snapshot);
     file.flush()
         .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
     Ok(())
 }
 
-fn load_account_data_store(
-    state_directory_path: &PathBuf,
-) -> HashMap<String, HashMap<String, Value>> {
+fn load_account_data_store(state_directory_path: &Path) -> HashMap<String, HashMap<String, Value>> {
     let file_path = state_directory_path.join("account_data.json");
     let Ok(raw) = fs::read_to_string(file_path) else {
         return HashMap::new();
@@ -752,7 +748,7 @@ fn load_account_data_store(
 }
 
 fn persist_account_data_store(
-    state_directory_path: &PathBuf,
+    state_directory_path: &Path,
     account_data_store: &RwLock<HashMap<String, HashMap<String, Value>>>,
 ) -> Result<(), DomainError> {
     fs::create_dir_all(state_directory_path)
@@ -763,10 +759,11 @@ fn persist_account_data_store(
         .map_err(|_| DomainError::InvalidRequest("account data lock failure".to_owned()))?;
     let payload = serde_json::to_vec_pretty(&*snapshot)
         .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+    drop(snapshot);
     fs::write(file_path, payload).map_err(|error| DomainError::InvalidRequest(error.to_string()))
 }
 
-fn load_to_device_store(state_directory_path: &PathBuf) -> Vec<ToDeviceRecord> {
+fn load_to_device_store(state_directory_path: &Path) -> Vec<ToDeviceRecord> {
     let file_path = state_directory_path.join("to_device.jsonl");
     let Ok(file) = fs::File::open(file_path) else {
         return Vec::new();
@@ -780,7 +777,7 @@ fn load_to_device_store(state_directory_path: &PathBuf) -> Vec<ToDeviceRecord> {
 }
 
 fn persist_to_device_store(
-    state_directory_path: &PathBuf,
+    state_directory_path: &Path,
     to_device_store: &RwLock<Vec<ToDeviceRecord>>,
 ) -> Result<(), DomainError> {
     fs::create_dir_all(state_directory_path)
@@ -801,6 +798,7 @@ fn persist_to_device_store(
         writeln!(file, "{payload}")
             .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
     }
+    drop(snapshot);
     file.flush()
         .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
     Ok(())

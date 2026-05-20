@@ -20,7 +20,7 @@ impl<'a, Repository> JoinRoomUseCase<'a, Repository>
 where
     Repository: RoomMembershipRepository + ?Sized,
 {
-    pub fn new(room_repository: &'a Repository, events_service: &'a EventsService) -> Self {
+    pub const fn new(room_repository: &'a Repository, events_service: &'a EventsService) -> Self {
         Self {
             room_repository,
             events_service,
@@ -62,7 +62,7 @@ where
         append_membership_change_for_target(
             self.room_repository,
             self.events_service,
-            room_id.clone(),
+            &room_id,
             room_version,
             joined_user_id.as_str(),
             joined_user_id.as_str(),

@@ -5,7 +5,6 @@ use axum::{
 
 use crate::services::{identity::handlers, state::ApplicationState};
 
-#[must_use]
 pub fn routes(_application_state: &ApplicationState) -> Router<ApplicationState> {
     Router::new()
         .route(

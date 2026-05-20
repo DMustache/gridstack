@@ -48,7 +48,7 @@ where
     JsonSigner: IdentityJsonSigner,
 {
     #[must_use]
-    pub fn new(invitation_repository: Repository, json_signer: JsonSigner) -> Self {
+    pub const fn new(invitation_repository: Repository, json_signer: JsonSigner) -> Self {
         Self {
             invitation_repository,
             json_signer,

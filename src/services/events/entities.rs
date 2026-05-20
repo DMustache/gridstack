@@ -40,7 +40,7 @@ impl Default for RoomVersionRegistry {
 }
 
 impl RoomVersionRegistry {
-    pub fn new(default_room_version: SupportedRoomVersion) -> Self {
+    pub const fn new(default_room_version: SupportedRoomVersion) -> Self {
         Self {
             default_room_version,
         }
@@ -50,7 +50,7 @@ impl RoomVersionRegistry {
         self.default_room_version
     }
 
-    pub fn resolve(self, version: SupportedRoomVersion) -> Option<RoomVersionDefinition> {
+    pub const fn resolve(self, version: SupportedRoomVersion) -> Option<RoomVersionDefinition> {
         match version {
             SupportedRoomVersion::V1 => Some(RoomVersionDefinition {
                 version_id: SupportedRoomVersion::V1,
@@ -105,7 +105,7 @@ pub enum StateEventKind {
 }
 
 impl StateEventKind {
-    pub fn as_event_type(&self) -> &str {
+    pub const fn as_event_type(&self) -> &str {
         match self {
             Self::RoomCreate => "m.room.create",
             Self::RoomMember => "m.room.member",
@@ -162,7 +162,7 @@ pub enum MessageEventKind {
 }
 
 impl MessageEventKind {
-    pub fn as_event_type(&self) -> &str {
+    pub const fn as_event_type(&self) -> &str {
         match self {
             Self::RoomMessage => "m.room.message",
             Self::RoomRedaction => "m.room.redaction",
@@ -317,36 +317,7 @@ pub enum MatrixEventContent {
 impl MatrixEventContent {
     pub fn as_debug_json(&self) -> Value {
         match self {
-            Self::RoomCreate(content) => {
-                let mut value = json!({
-                    "creator": content.creator,
-                    "room_version": content.room_version,
-                    "m.federate": content.federate,
-                });
-                if let Some(room_type) = content.room_type.as_ref() {
-                    value["type"] = Value::String(room_type.clone());
-                }
-                if !content.additional_creators.is_empty() {
-                    value["additional_creators"] = Value::Array(
-                        content
-                            .additional_creators
-                            .iter()
-                            .cloned()
-                            .map(Value::String)
-                            .collect(),
-                    );
-                }
-                if let (Some(event_id), Some(room_id)) = (
-                    content.predecessor_event_id.as_ref(),
-                    content.predecessor_room_id.as_ref(),
-                ) {
-                    value["predecessor"] = json!({
-                        "event_id": event_id,
-                        "room_id": room_id,
-                    });
-                }
-                value
-            }
+            Self::RoomCreate(content) => room_create_debug_json(content),
             Self::RoomMember(content) => {
                 let mut value = json!({ "membership": content.membership.as_str() });
                 if let Some(is_direct) = content.is_direct {
@@ -354,28 +325,7 @@ impl MatrixEventContent {
                 }
                 value
             }
-            Self::RoomPowerLevels(content) => {
-                let users = content
-                    .users
-                    .iter()
-                    .map(|user| (user.user_id.clone(), Value::from(user.level)))
-                    .collect::<serde_json::Map<String, Value>>();
-                let mut value = json!({
-                    "ban": content.ban,
-                    "events": {},
-                    "events_default": content.events_default,
-                    "invite": content.invite,
-                    "kick": content.kick,
-                    "redact": content.redact,
-                    "state_default": content.state_default,
-                    "users": users,
-                    "users_default": content.users_default,
-                });
-                if let Some(notifications_room) = content.notifications_room {
-                    value["notifications"] = json!({ "room": notifications_room });
-                }
-                value
-            }
+            Self::RoomPowerLevels(content) => room_power_levels_debug_json(content),
             Self::RoomJoinRules { join_rule } => json!({ "join_rule": join_rule }),
             Self::RoomHistoryVisibility { history_visibility } => {
                 json!({ "history_visibility": history_visibility })
@@ -423,7 +373,61 @@ impl MatrixEventContent {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+fn room_create_debug_json(content: &RoomCreateContent) -> Value {
+    let mut value = json!({
+        "creator": content.creator,
+        "room_version": content.room_version,
+        "m.federate": content.federate,
+    });
+    if let Some(room_type) = content.room_type.as_ref() {
+        value["type"] = Value::String(room_type.clone());
+    }
+    if !content.additional_creators.is_empty() {
+        value["additional_creators"] = Value::Array(
+            content
+                .additional_creators
+                .iter()
+                .cloned()
+                .map(Value::String)
+                .collect(),
+        );
+    }
+    if let (Some(event_id), Some(room_id)) = (
+        content.predecessor_event_id.as_ref(),
+        content.predecessor_room_id.as_ref(),
+    ) {
+        value["predecessor"] = json!({
+            "event_id": event_id,
+            "room_id": room_id,
+        });
+    }
+    value
+}
+
+fn room_power_levels_debug_json(content: &RoomPowerLevelsContent) -> Value {
+    let users = content
+        .users
+        .iter()
+        .map(|user| (user.user_id.clone(), Value::from(user.level)))
+        .collect::<serde_json::Map<String, Value>>();
+    let mut value = json!({
+        "ban": content.ban,
+        "events": {},
+        "events_default": content.events_default,
+        "invite": content.invite,
+        "kick": content.kick,
+        "redact": content.redact,
+        "state_default": content.state_default,
+        "users": users,
+        "users_default": content.users_default,
+    });
+    if let Some(notifications_room) = content.notifications_room {
+        value["notifications"] = json!({ "room": notifications_room });
+    }
+    value
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventIntent {
     pub room_id: String,
     pub sender: String,
@@ -436,7 +440,7 @@ pub struct EventIntent {
 }
 
 impl EventIntent {
-    pub fn state(
+    pub const fn state(
         room_id: String,
         sender: String,
         state_event_kind: StateEventKind,
@@ -456,7 +460,7 @@ impl EventIntent {
         }
     }
 
-    pub fn message(
+    pub const fn message(
         room_id: String,
         sender: String,
         message_event_kind: MessageEventKind,
@@ -481,14 +485,14 @@ impl EventIntent {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoomEventFlow {
     pub room_id: String,
     pub room_version: SupportedRoomVersion,
     pub intents: Vec<EventIntent>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventDraft {
     pub room_id: String,
     pub room_version: SupportedRoomVersion,
@@ -504,7 +508,7 @@ pub struct EventDraft {
     pub redacts: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedEvent {
     pub event_id: String,
     pub room_id: String,
@@ -637,7 +641,7 @@ pub struct IdempotencyRecord {
     pub event_id: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventWriteContract {
     pub event_rows: Vec<PersistedEvent>,
     pub event_json_rows: Vec<EventJsonRow>,
@@ -653,7 +657,7 @@ pub struct EventWriteContract {
     pub idempotency_records: Vec<IdempotencyRecord>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventBatchWriteContract {
     pub room_id: String,
     pub room_version: SupportedRoomVersion,
@@ -682,25 +686,26 @@ pub struct EventDefinition {
 pub struct EventDefinitionRegistry;
 
 impl EventDefinitionRegistry {
-    pub fn for_event_kind(event_kind: &EventKind) -> EventDefinition {
+    pub const fn for_event_kind(event_kind: &EventKind) -> EventDefinition {
         match event_kind {
-            EventKind::State(StateEventKind::RoomCreate)
-            | EventKind::State(StateEventKind::RoomPowerLevels)
-            | EventKind::State(StateEventKind::RoomJoinRules)
-            | EventKind::State(StateEventKind::RoomHistoryVisibility)
-            | EventKind::State(StateEventKind::RoomGuestAccess)
-            | EventKind::State(StateEventKind::RoomCanonicalAlias)
-            | EventKind::State(StateEventKind::RoomName)
-            | EventKind::State(StateEventKind::RoomTopic) => EventDefinition {
+            EventKind::State(
+                StateEventKind::RoomCreate
+                | StateEventKind::RoomPowerLevels
+                | StateEventKind::RoomJoinRules
+                | StateEventKind::RoomHistoryVisibility
+                | StateEventKind::RoomGuestAccess
+                | StateEventKind::RoomCanonicalAlias
+                | StateEventKind::RoomName
+                | StateEventKind::RoomTopic,
+            ) => EventDefinition {
                 event_class: EventClass::State,
                 state_key_policy: StateKeyPolicy::MustBeEmpty,
             },
-            EventKind::State(StateEventKind::RoomMember)
-            | EventKind::State(StateEventKind::ThirdPartyInvite) => EventDefinition {
-                event_class: EventClass::State,
-                state_key_policy: StateKeyPolicy::Required,
-            },
-            EventKind::State(StateEventKind::Custom(_)) => EventDefinition {
+            EventKind::State(
+                StateEventKind::RoomMember
+                | StateEventKind::ThirdPartyInvite
+                | StateEventKind::Custom(_),
+            ) => EventDefinition {
                 event_class: EventClass::State,
                 state_key_policy: StateKeyPolicy::Required,
             },

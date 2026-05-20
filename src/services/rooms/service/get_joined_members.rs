@@ -19,7 +19,7 @@ impl<'a, Repository> GetJoinedMembersUseCase<'a, Repository>
 where
     Repository: RoomJoinedMembersRepository + ?Sized,
 {
-    pub fn new(
+    pub const fn new(
         room_repository: &'a Repository,
         authorization_service: &'a AuthorizationService,
     ) -> Self {
@@ -32,14 +32,14 @@ where
     pub fn execute(
         &self,
         access_session: &AccessSessionStorageUnit,
-        room_id: String,
+        room_id: &str,
     ) -> Result<JoinedMembers, RoomsApplicationError> {
-        require_room_identifier(&room_id)?;
+        require_room_identifier(room_id)?;
 
         let mut member_profiles = None;
         let can_view_members = self
             .room_repository
-            .fetch_join_context(&room_id, access_session.user_identifier().as_str())
+            .fetch_join_context(room_id, access_session.user_identifier().as_str())
             .map_err(|_| RoomsApplicationError::Internal)?
             .and_then(|value| value.membership_state)
             .as_deref()
@@ -48,7 +48,7 @@ where
         if !can_view_members {
             let joined_member_profiles = self
                 .room_repository
-                .fetch_joined_members_profiles(&room_id)
+                .fetch_joined_members_profiles(room_id)
                 .map_err(|_| RoomsApplicationError::Internal)?;
 
             let mut access_allowed = false;
@@ -75,7 +75,7 @@ where
             Some(member_profiles) => member_profiles,
             None => self
                 .room_repository
-                .fetch_joined_members_profiles(&room_id)
+                .fetch_joined_members_profiles(room_id)
                 .map_err(|_| RoomsApplicationError::Internal)?,
         };
 

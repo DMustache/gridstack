@@ -40,7 +40,10 @@ where
     KeyGenerator: IdentityEphemeralKeyGenerator,
 {
     #[must_use]
-    pub fn new(invitation_repository: Repository, ephemeral_key_generator: KeyGenerator) -> Self {
+    pub const fn new(
+        invitation_repository: Repository,
+        ephemeral_key_generator: KeyGenerator,
+    ) -> Self {
         Self {
             invitation_repository,
             ephemeral_key_generator,

@@ -20,13 +20,17 @@ impl<'a, Repository> LeaveRoomUseCase<'a, Repository>
 where
     Repository: RoomMembershipRepository + ?Sized,
 {
-    pub fn new(room_repository: &'a Repository, events_service: &'a EventsService) -> Self {
+    pub const fn new(room_repository: &'a Repository, events_service: &'a EventsService) -> Self {
         Self {
             room_repository,
             events_service,
         }
     }
 
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "owned at service boundary to align with command DTO ownership"
+    )]
     pub fn execute(
         &self,
         left_user_id: &AuthorizedUserIdentifier,
@@ -58,7 +62,7 @@ where
         append_membership_change_for_target(
             self.room_repository,
             self.events_service,
-            room_id,
+            &room_id,
             room_version,
             left_user_id.as_str(),
             left_user_id.as_str(),

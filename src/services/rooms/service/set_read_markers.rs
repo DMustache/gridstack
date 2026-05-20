@@ -17,40 +17,35 @@ impl<'a, Repository> SetReadMarkersUseCase<'a, Repository>
 where
     Repository: RoomReceiptRepository + ?Sized,
 {
-    pub fn new(room_repository: &'a Repository) -> Self {
+    pub const fn new(room_repository: &'a Repository) -> Self {
         Self { room_repository }
     }
 
     pub fn execute(
         &self,
         user_id: &AuthorizedUserIdentifier,
-        room_id: String,
-        command: SetReadMarkersCommand,
+        room_id: &str,
+        command: &SetReadMarkersCommand,
     ) -> Result<(), RoomsApplicationError> {
-        require_room_identifier(&room_id)?;
+        require_room_identifier(room_id)?;
 
         let requesting_user_id = user_id.as_existing_user_identifier();
-        require_joined_membership(self.room_repository, &room_id, requesting_user_id)?;
+        require_joined_membership(self.room_repository, room_id, requesting_user_id)?;
 
         let fully_read_event_id = command.fully_read_event_id.as_deref().map(str::trim);
         let read_event_id = command.read_event_id.as_deref().map(str::trim);
         let private_read_event_id = command.private_read_event_id.as_deref().map(str::trim);
 
         if let Some(fully_read_event_id) = fully_read_event_id {
-            require_receipt_target_event(
-                self.room_repository,
-                &room_id,
-                fully_read_event_id,
-                None,
-            )?;
+            require_receipt_target_event(self.room_repository, room_id, fully_read_event_id, None)?;
         }
         if let Some(read_event_id) = read_event_id {
-            require_receipt_target_event(self.room_repository, &room_id, read_event_id, None)?;
+            require_receipt_target_event(self.room_repository, room_id, read_event_id, None)?;
         }
         if let Some(private_read_event_id) = private_read_event_id {
             require_receipt_target_event(
                 self.room_repository,
-                &room_id,
+                room_id,
                 private_read_event_id,
                 None,
             )?;
@@ -59,7 +54,7 @@ where
         if let Some(fully_read_event_id) = fully_read_event_id {
             self.room_repository
                 .append_room_fully_read_marker(
-                    &room_id,
+                    room_id,
                     requesting_user_id.as_str(),
                     fully_read_event_id,
                 )
@@ -69,7 +64,7 @@ where
         if let Some(read_event_id) = read_event_id {
             self.room_repository
                 .append_room_receipt(
-                    &room_id,
+                    room_id,
                     requesting_user_id.as_str(),
                     RoomReceiptType::Read.as_str(),
                     read_event_id,
@@ -81,7 +76,7 @@ where
         if let Some(private_read_event_id) = private_read_event_id {
             self.room_repository
                 .append_room_receipt(
-                    &room_id,
+                    room_id,
                     requesting_user_id.as_str(),
                     RoomReceiptType::ReadPrivate.as_str(),
                     private_read_event_id,

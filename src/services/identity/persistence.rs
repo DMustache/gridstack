@@ -368,7 +368,7 @@ fn redacted_display_name(address: &str) -> String {
     };
 
     let redacted_domain = if domain.is_empty() {
-        "".to_owned()
+        String::new()
     } else if domain.len() <= 1 {
         "...".to_owned()
     } else {
@@ -398,6 +398,10 @@ fn long_term_key_from_columns(
     })
 }
 
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "generic helper normalizes external error ownership"
+)]
 fn connection_error_to_identity_error<E>(error: E) -> IdentityServiceError
 where
     E: ToString,
@@ -405,6 +409,10 @@ where
     IdentityServiceError::Internal(anyhow::anyhow!(error.to_string()))
 }
 
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "diesel error is consumed into internal error context"
+)]
 fn database_error_to_identity_error(error: diesel::result::Error) -> IdentityServiceError {
     IdentityServiceError::Internal(anyhow::anyhow!(error.to_string()))
 }

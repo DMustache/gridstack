@@ -46,12 +46,10 @@ impl IntoResponse for IdentityServiceError {
         }
 
         let status_code = match self {
-            Self::NotFound => StatusCode::NOT_FOUND,
-            Self::PublicKeyNotFound => StatusCode::NOT_FOUND,
+            Self::NotFound | Self::PublicKeyNotFound => StatusCode::NOT_FOUND,
             Self::AuthenticationRequired => StatusCode::UNAUTHORIZED,
             Self::Forbidden => StatusCode::FORBIDDEN,
-            Self::InvalidRequest(_) => StatusCode::BAD_REQUEST,
-            Self::MissingParameters(_) => StatusCode::BAD_REQUEST,
+            Self::InvalidRequest(_) | Self::MissingParameters(_) => StatusCode::BAD_REQUEST,
             Self::NotImplemented => StatusCode::NOT_IMPLEMENTED,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };

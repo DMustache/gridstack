@@ -19,18 +19,22 @@ impl<'a, Repository> SendRoomMessageEventUseCase<'a, Repository>
 where
     Repository: RoomMessageWriteRepository + ?Sized,
 {
-    pub fn new(room_repository: &'a Repository, events_service: &'a EventsService) -> Self {
+    pub const fn new(room_repository: &'a Repository, events_service: &'a EventsService) -> Self {
         Self {
             room_repository,
             events_service,
         }
     }
 
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "owned at service boundary to align with command DTO ownership"
+    )]
     pub fn execute(
         &self,
         user_id: &AuthorizedUserIdentifier,
         room_id: String,
-        event_type: String,
+        event_type: &str,
         transaction_id: String,
         content: serde_json::Value,
     ) -> Result<String, RoomsApplicationError> {
@@ -53,7 +57,7 @@ where
             .fetch_room_event_id_by_transaction_id(
                 &room_id,
                 &sender_user_id,
-                &event_type,
+                event_type,
                 &transaction_id,
             )
             .map_err(|_| RoomsApplicationError::Internal)?
@@ -68,8 +72,8 @@ where
             user_id.as_existing_user_identifier(),
         )?;
         let (message_event_kind, event_content) =
-            parse_room_message_event_content(event_type.as_str(), content)
-                .map_err(|_| RoomsApplicationError::InvalidRoomState)?;
+            parse_room_message_event_content(event_type, content)
+                .map_err(|()| RoomsApplicationError::InvalidRoomState)?;
 
         let event_write_contract = self
             .events_service
@@ -91,7 +95,7 @@ where
 
         self.room_repository
             .append_room_event(&event_write_contract)
-            .map_err(|error| super::map_room_persistence_error(error, room_id))?;
+            .map_err(|error| super::map_room_persistence_error(error, &room_id))?;
 
         Ok(event_id)
     }

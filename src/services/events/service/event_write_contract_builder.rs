@@ -17,7 +17,7 @@ pub(super) struct EventWriteContractBuilder<'a> {
 }
 
 impl<'a> EventWriteContractBuilder<'a> {
-    pub(super) fn new(
+    pub(super) const fn new(
         event_intent: &'a EventIntent,
         persisted_event: &'a PersistedEvent,
         prev_events: Vec<String>,

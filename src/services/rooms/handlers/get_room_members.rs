@@ -31,12 +31,11 @@ impl TryFrom<GetRoomMembersQuery> for GetRoomMembersCommand {
 fn parse_membership_filter(
     value: Option<&str>,
 ) -> Result<Option<RoomMembershipFilter>, RoomsApplicationError> {
-    match value {
-        Some(raw_value) => RoomMembershipFilter::parse(raw_value)
+    value.map_or(Ok(None), |raw_value| {
+        RoomMembershipFilter::parse(raw_value)
             .map(Some)
-            .ok_or(RoomsApplicationError::InvalidParameter),
-        None => Ok(None),
-    }
+            .ok_or(RoomsApplicationError::InvalidParameter)
+    })
 }
 
 #[derive(Clone, Debug, Serialize)]

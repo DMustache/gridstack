@@ -18,19 +18,19 @@ impl<'a, Repository> GetRoomMessagesUseCase<'a, Repository>
 where
     Repository: RoomTimelineQueryRepository + RoomMembershipRepository + ?Sized,
 {
-    pub fn new(room_repository: &'a Repository) -> Self {
+    pub const fn new(room_repository: &'a Repository) -> Self {
         Self { room_repository }
     }
 
     pub fn execute(
         &self,
         user_id: &AuthorizedUserIdentifier,
-        room_id: String,
+        room_id: &str,
         command: GetRoomMessagesCommand,
     ) -> Result<RoomMessagesPage, RoomsApplicationError> {
         require_room_state_read_access(
             self.room_repository,
-            &room_id,
+            room_id,
             user_id.as_existing_user_identifier(),
         )?;
 
@@ -52,7 +52,7 @@ where
         let page = self
             .room_repository
             .fetch_room_timeline_events(
-                &room_id,
+                room_id,
                 from_stream_position,
                 to_stream_position,
                 command.limit,
