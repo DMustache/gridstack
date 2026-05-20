@@ -1,13 +1,14 @@
 use diesel::{
-    OptionalExtension, QueryableByName, RunQueryDsl,
+    BoolExpressionMethods, ExpressionMethods, JoinOnDsl, NullableExpressionMethods,
+    OptionalExtension, QueryDsl, RunQueryDsl,
+    dsl::{max, min},
+    insert_into,
     pg::PgConnection,
     r2d2::{self, ConnectionManager},
-    sql_query,
-    sql_types::{BigInt, Jsonb, Nullable, Text},
 };
 use serde_json::Value;
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fs,
     fs::OpenOptions,
     io::{BufRead, BufReader, Write},
@@ -15,7 +16,7 @@ use std::{
     sync::RwLock,
 };
 
-use crate::services::errors::DomainError;
+use crate::{infrastructure::schema, services::errors::DomainError};
 
 pub trait FilterRepository: Send + Sync {
     fn create_filter(
@@ -155,116 +156,29 @@ impl SyncronizationPersistence {
     }
 }
 
-#[derive(QueryableByName)]
-struct CreatedFilterRecord {
-    #[diesel(sql_type = BigInt)]
-    id: i64,
-}
-
-#[derive(QueryableByName)]
-struct StoredFilterRecord {
-    #[diesel(sql_type = Jsonb)]
-    filter_json: Value,
-}
-
-#[derive(QueryableByName)]
-struct CurrentSyncStreamPositionRecord {
-    #[diesel(sql_type = Nullable<BigInt>)]
-    stream_position: Option<i64>,
-}
-
-#[derive(QueryableByName)]
-struct UserRoomMembershipSqlRecord {
-    #[diesel(sql_type = Text)]
-    room_id: String,
-    #[diesel(sql_type = Text)]
-    membership: String,
-}
-
-#[derive(QueryableByName)]
-struct TimelineEventSqlRecord {
-    #[diesel(sql_type = Text)]
-    event_id: String,
-    #[diesel(sql_type = Text)]
-    event_type: String,
-    #[diesel(sql_type = Text)]
-    sender_user_id: String,
-    #[diesel(sql_type = Nullable<Text>)]
-    state_key: Option<String>,
-    #[diesel(sql_type = BigInt)]
-    origin_server_ts: i64,
-    #[diesel(sql_type = Jsonb)]
-    content_json: Value,
-    #[diesel(sql_type = Nullable<Jsonb>)]
-    unsigned_json: Option<Value>,
-    #[diesel(sql_type = BigInt)]
-    stream_position: i64,
-}
-
-#[derive(QueryableByName)]
-struct StateEventSqlRecord {
-    #[diesel(sql_type = Text)]
-    event_id: String,
-    #[diesel(sql_type = Text)]
-    event_type: String,
-    #[diesel(sql_type = Text)]
-    sender_user_id: String,
-    #[diesel(sql_type = Nullable<Text>)]
-    state_key: Option<String>,
-    #[diesel(sql_type = BigInt)]
-    origin_server_ts: i64,
-    #[diesel(sql_type = Jsonb)]
-    content_json: Value,
-    #[diesel(sql_type = Nullable<Jsonb>)]
-    unsigned_json: Option<Value>,
-}
-
-#[derive(QueryableByName)]
-struct PrevBatchSqlRecord {
-    #[diesel(sql_type = Nullable<BigInt>)]
-    stream_position: Option<i64>,
-}
-
-#[derive(QueryableByName)]
-struct ReceiptEphemeralSqlRecord {
-    #[diesel(sql_type = Text)]
-    event_id: String,
-    #[diesel(sql_type = Text)]
-    receipt_type: String,
-    #[diesel(sql_type = Text)]
-    user_id: String,
-    #[diesel(sql_type = Text)]
-    thread_id: String,
-    #[diesel(sql_type = BigInt)]
-    receipt_ts: i64,
-}
-
-#[derive(QueryableByName)]
-struct FullyReadMarkerSqlRecord {
-    #[diesel(sql_type = Text)]
-    fully_read_event_id: String,
-}
-
 impl FilterRepository for SyncronizationPersistence {
     fn create_filter(
         &self,
         user_identifier: &str,
         filter_payload: Value,
     ) -> Result<String, DomainError> {
+        use schema::user_filters;
+
         let mut connection = self
             .connection_pool
             .get()
             .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
 
-        let created = sql_query(
-            "INSERT INTO public.user_filters (user_id, filter_json) VALUES ($1, $2) RETURNING id",
-        )
-        .bind::<Text, _>(user_identifier)
-        .bind::<Jsonb, _>(filter_payload)
-        .get_result::<CreatedFilterRecord>(&mut connection)
-        .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+        let created = insert_into(user_filters::table)
+            .values((
+                user_filters::user_id.eq(user_identifier),
+                user_filters::filter_json.eq(filter_payload),
+            ))
+            .returning(user_filters::id)
+            .get_result::<i64>(&mut connection)
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
 
-        Ok(created.id.to_string())
+        Ok(created.to_string())
     }
 
     fn fetch_filter(
@@ -272,6 +186,8 @@ impl FilterRepository for SyncronizationPersistence {
         user_identifier: &str,
         filter_identifier: &str,
     ) -> Result<Option<Value>, DomainError> {
+        use schema::user_filters;
+
         let filter_identifier_number = match filter_identifier.parse::<i64>() {
             Ok(value) => value,
             Err(_) => return Ok(None),
@@ -282,49 +198,54 @@ impl FilterRepository for SyncronizationPersistence {
             .get()
             .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
 
-        let stored =
-            sql_query("SELECT filter_json FROM public.user_filters WHERE user_id = $1 AND id = $2")
-                .bind::<Text, _>(user_identifier)
-                .bind::<BigInt, _>(filter_identifier_number)
-                .get_result::<StoredFilterRecord>(&mut connection)
-                .optional()
-                .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
-
-        Ok(stored.map(|record| record.filter_json))
+        user_filters::table
+            .filter(user_filters::user_id.eq(user_identifier))
+            .filter(user_filters::id.eq(filter_identifier_number))
+            .select(user_filters::filter_json)
+            .first::<Value>(&mut connection)
+            .optional()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))
     }
 
     fn fetch_current_sync_stream_position(&self) -> Result<i64, DomainError> {
+        use schema::room_sync_stream;
+
         let mut connection = self
             .connection_pool
             .get()
             .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
-        let row = sql_query(
-            "SELECT MAX(stream_position) AS stream_position FROM public.room_sync_stream",
-        )
-        .get_result::<CurrentSyncStreamPositionRecord>(&mut connection)
-        .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
-        Ok(row.stream_position.unwrap_or(0))
+        let stream_position = room_sync_stream::table
+            .select(max(room_sync_stream::stream_position))
+            .first::<Option<i64>>(&mut connection)
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+        Ok(stream_position.unwrap_or(0))
     }
 
     fn fetch_user_room_memberships(
         &self,
         user_identifier: &str,
     ) -> Result<Vec<UserRoomMembershipRecord>, DomainError> {
+        use schema::room_membership_projection;
+
         let mut connection = self
             .connection_pool
             .get()
             .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
-        let rows = sql_query(
-            "SELECT room_id, membership FROM public.room_membership_projection WHERE user_id = $1",
-        )
-        .bind::<Text, _>(user_identifier)
-        .load::<UserRoomMembershipSqlRecord>(&mut connection)
-        .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        let rows = room_membership_projection::table
+            .filter(room_membership_projection::user_id.eq(user_identifier))
+            .select((
+                room_membership_projection::room_id,
+                room_membership_projection::membership,
+            ))
+            .load::<(String, String)>(&mut connection)
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
         Ok(rows
             .into_iter()
-            .map(|row| UserRoomMembershipRecord {
-                room_id: row.room_id,
-                membership: row.membership,
+            .map(|(room_id, membership)| UserRoomMembershipRecord {
+                room_id,
+                membership,
             })
             .collect())
     }
@@ -335,35 +256,65 @@ impl FilterRepository for SyncronizationPersistence {
         since_stream_position: i64,
         limit: usize,
     ) -> Result<Vec<TimelineEventRecord>, DomainError> {
+        use schema::{room_events, room_sync_stream};
+
         let mut connection = self
             .connection_pool
             .get()
             .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
-        let rows = sql_query(
-            "SELECT e.event_id, e.event_type, e.sender_user_id, e.state_key, e.origin_server_ts, e.content_json, e.unsigned_json, s.stream_position
-            FROM public.room_sync_stream s
-            INNER JOIN public.room_events e ON e.event_id = s.event_id
-            WHERE s.room_id = $1 AND s.stream_position > $2
-            ORDER BY s.stream_position ASC
-            LIMIT $3",
-        )
-        .bind::<Text, _>(room_identifier)
-        .bind::<BigInt, _>(since_stream_position)
-        .bind::<BigInt, _>(i64::try_from(limit).unwrap_or(i64::MAX))
-        .load::<TimelineEventSqlRecord>(&mut connection)
-        .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+
+        let rows = room_sync_stream::table
+            .inner_join(room_events::table.on(room_events::event_id.eq(room_sync_stream::event_id)))
+            .filter(room_sync_stream::room_id.eq(room_identifier))
+            .filter(room_sync_stream::stream_position.gt(since_stream_position))
+            .order(room_sync_stream::stream_position.asc())
+            .limit(limit)
+            .select((
+                room_events::event_id,
+                room_events::event_type,
+                room_events::sender_user_id,
+                room_events::state_key.nullable(),
+                room_events::origin_server_ts,
+                room_events::content_json,
+                room_events::unsigned_json,
+                room_sync_stream::stream_position,
+            ))
+            .load::<(
+                String,
+                String,
+                String,
+                Option<String>,
+                i64,
+                Value,
+                Option<Value>,
+                i64,
+            )>(&mut connection)
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
 
         Ok(rows
             .into_iter()
-            .map(|row| TimelineEventRecord {
-                event_id: row.event_id,
-                event_type: row.event_type,
-                sender_user_id: row.sender_user_id,
-                state_key: row.state_key,
-                origin_server_ts: row.origin_server_ts,
-                content_json: row.content_json,
-                unsigned_json: row.unsigned_json,
-                stream_position: row.stream_position,
+            .map(|row| {
+                let (
+                    event_id,
+                    event_type,
+                    sender_user_id,
+                    state_key,
+                    origin_server_ts,
+                    content_json,
+                    unsigned_json,
+                    stream_position,
+                ) = row;
+                TimelineEventRecord {
+                    event_id,
+                    event_type,
+                    sender_user_id,
+                    state_key,
+                    origin_server_ts,
+                    content_json,
+                    unsigned_json,
+                    stream_position,
+                }
             })
             .collect())
     }
@@ -373,66 +324,127 @@ impl FilterRepository for SyncronizationPersistence {
         room_identifier: &str,
         since_stream_position: i64,
     ) -> Result<Vec<StateEventRecord>, DomainError> {
+        use schema::{room_events, room_sync_stream};
+
         let mut connection = self
             .connection_pool
             .get()
             .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
-        let rows = sql_query(
-            "SELECT DISTINCT ON (e.event_type, COALESCE(e.state_key, ''))
-                e.event_id, e.event_type, e.sender_user_id, e.state_key, e.origin_server_ts, e.content_json, e.unsigned_json
-            FROM public.room_sync_stream s
-            INNER JOIN public.room_events e ON e.event_id = s.event_id
-            WHERE s.room_id = $1 AND s.stream_position > $2 AND e.state_key IS NOT NULL
-            ORDER BY e.event_type, COALESCE(e.state_key, ''), s.stream_position DESC",
-        )
-        .bind::<Text, _>(room_identifier)
-        .bind::<BigInt, _>(since_stream_position)
-        .load::<StateEventSqlRecord>(&mut connection)
-        .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+        let rows = room_sync_stream::table
+            .inner_join(room_events::table.on(room_events::event_id.eq(room_sync_stream::event_id)))
+            .filter(room_sync_stream::room_id.eq(room_identifier))
+            .filter(room_sync_stream::stream_position.gt(since_stream_position))
+            .filter(room_events::state_key.is_not_null())
+            .order(room_sync_stream::stream_position.asc())
+            .select((
+                room_events::event_id,
+                room_events::event_type,
+                room_events::sender_user_id,
+                room_events::state_key.nullable(),
+                room_events::origin_server_ts,
+                room_events::content_json,
+                room_events::unsigned_json,
+                room_sync_stream::stream_position,
+            ))
+            .load::<(
+                String,
+                String,
+                String,
+                Option<String>,
+                i64,
+                Value,
+                Option<Value>,
+                i64,
+            )>(&mut connection)
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
 
-        Ok(rows
-            .into_iter()
-            .map(|row| StateEventRecord {
-                event_id: row.event_id,
-                event_type: row.event_type,
-                sender_user_id: row.sender_user_id,
-                state_key: row.state_key,
-                origin_server_ts: row.origin_server_ts,
-                content_json: row.content_json,
-                unsigned_json: row.unsigned_json,
-            })
-            .collect())
+        let mut latest_by_state_key = BTreeMap::<(String, String), StateEventRecord>::new();
+        for (
+            event_id,
+            event_type,
+            sender_user_id,
+            state_key,
+            origin_server_ts,
+            content_json,
+            unsigned_json,
+            _stream_position,
+        ) in rows
+        {
+            let state_key_value = state_key.unwrap_or_default();
+            latest_by_state_key.insert(
+                (event_type.clone(), state_key_value.clone()),
+                StateEventRecord {
+                    event_id,
+                    event_type,
+                    sender_user_id,
+                    state_key: Some(state_key_value),
+                    origin_server_ts,
+                    content_json,
+                    unsigned_json,
+                },
+            );
+        }
+
+        Ok(latest_by_state_key.into_values().collect())
     }
 
     fn fetch_room_current_state_events(
         &self,
         room_identifier: &str,
     ) -> Result<Vec<StateEventRecord>, DomainError> {
+        use schema::{room_current_state, room_events};
+
         let mut connection = self
             .connection_pool
             .get()
             .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
-        let rows = sql_query(
-            "SELECT e.event_id, e.event_type, e.sender_user_id, e.state_key, e.origin_server_ts, e.content_json, e.unsigned_json
-            FROM public.room_current_state cs
-            INNER JOIN public.room_events e ON e.event_id = cs.event_id
-            WHERE cs.room_id = $1
-            ORDER BY e.event_type ASC, e.state_key ASC",
-        )
-        .bind::<Text, _>(room_identifier)
-        .load::<StateEventSqlRecord>(&mut connection)
-        .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+        let rows = room_current_state::table
+            .inner_join(
+                room_events::table.on(room_events::event_id.eq(room_current_state::event_id)),
+            )
+            .filter(room_current_state::room_id.eq(room_identifier))
+            .order((room_events::event_type.asc(), room_events::state_key.asc()))
+            .select((
+                room_events::event_id,
+                room_events::event_type,
+                room_events::sender_user_id,
+                room_events::state_key.nullable(),
+                room_events::origin_server_ts,
+                room_events::content_json,
+                room_events::unsigned_json,
+            ))
+            .load::<(
+                String,
+                String,
+                String,
+                Option<String>,
+                i64,
+                Value,
+                Option<Value>,
+            )>(&mut connection)
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
 
         Ok(rows
             .into_iter()
-            .map(|row| StateEventRecord {
-                event_id: row.event_id,
-                event_type: row.event_type,
-                sender_user_id: row.sender_user_id,
-                state_key: row.state_key,
-                origin_server_ts: row.origin_server_ts,
-                content_json: row.content_json,
-                unsigned_json: row.unsigned_json,
+            .map(|row| {
+                let (
+                    event_id,
+                    event_type,
+                    sender_user_id,
+                    state_key,
+                    origin_server_ts,
+                    content_json,
+                    unsigned_json,
+                ) = row;
+                StateEventRecord {
+                    event_id,
+                    event_type,
+                    sender_user_id,
+                    state_key,
+                    origin_server_ts,
+                    content_json,
+                    unsigned_json,
+                }
             })
             .collect())
     }
@@ -442,21 +454,19 @@ impl FilterRepository for SyncronizationPersistence {
         room_identifier: &str,
         since_stream_position: i64,
     ) -> Result<i64, DomainError> {
+        use schema::room_sync_stream;
+
         let mut connection = self
             .connection_pool
             .get()
             .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
-        let row = sql_query(
-            "SELECT MIN(stream_position) AS stream_position
-            FROM public.room_sync_stream
-            WHERE room_id = $1 AND stream_position > $2",
-        )
-        .bind::<Text, _>(room_identifier)
-        .bind::<BigInt, _>(since_stream_position)
-        .get_result::<PrevBatchSqlRecord>(&mut connection)
-        .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
-        Ok(row
-            .stream_position
+        let min_position = room_sync_stream::table
+            .filter(room_sync_stream::room_id.eq(room_identifier))
+            .filter(room_sync_stream::stream_position.gt(since_stream_position))
+            .select(min(room_sync_stream::stream_position))
+            .first::<Option<i64>>(&mut connection)
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+        Ok(min_position
             .unwrap_or(since_stream_position)
             .saturating_sub(1))
     }
@@ -467,39 +477,48 @@ impl FilterRepository for SyncronizationPersistence {
         user_identifier: &str,
         since_stream_position: i64,
     ) -> Result<Vec<Value>, DomainError> {
+        use schema::room_receipts;
+
         let mut connection = self
             .connection_pool
             .get()
             .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
-        let rows = sql_query(
-            "SELECT event_id, receipt_type, user_id, thread_id, receipt_ts
-            FROM public.room_receipts
-            WHERE room_id = $1
-              AND stream_position > $2
-              AND (receipt_type = 'm.read' OR (receipt_type = 'm.read.private' AND user_id = $3))
-            ORDER BY stream_position ASC",
-        )
-        .bind::<Text, _>(room_identifier)
-        .bind::<BigInt, _>(since_stream_position)
-        .bind::<Text, _>(user_identifier)
-        .load::<ReceiptEphemeralSqlRecord>(&mut connection)
-        .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+        let rows = room_receipts::table
+            .filter(room_receipts::room_id.eq(room_identifier))
+            .filter(room_receipts::stream_position.gt(since_stream_position))
+            .filter(
+                room_receipts::receipt_type
+                    .eq("m.read")
+                    .or(room_receipts::receipt_type
+                        .eq("m.read.private")
+                        .and(room_receipts::user_id.eq(user_identifier))),
+            )
+            .order(room_receipts::stream_position.asc())
+            .select((
+                room_receipts::event_id,
+                room_receipts::receipt_type,
+                room_receipts::user_id,
+                room_receipts::thread_id,
+                room_receipts::receipt_ts,
+            ))
+            .load::<(String, String, String, String, i64)>(&mut connection)
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
 
         Ok(rows
             .into_iter()
-            .map(|row| {
+            .map(|(event_id, receipt_type, user_id, thread_id, receipt_ts)| {
                 let mut receipt_content = serde_json::Map::new();
-                receipt_content.insert("ts".to_owned(), Value::Number(row.receipt_ts.into()));
-                if !row.thread_id.is_empty() {
-                    receipt_content.insert("thread_id".to_owned(), Value::String(row.thread_id));
+                receipt_content.insert("ts".to_owned(), Value::Number(receipt_ts.into()));
+                if !thread_id.is_empty() {
+                    receipt_content.insert("thread_id".to_owned(), Value::String(thread_id));
                 }
 
                 serde_json::json!({
                     "type": "m.receipt",
                     "content": {
-                        row.event_id: {
-                            row.receipt_type: {
-                                row.user_id: receipt_content
+                        event_id: {
+                            receipt_type: {
+                                user_id: receipt_content
                             }
                         }
                     }
@@ -515,43 +534,42 @@ impl FilterRepository for SyncronizationPersistence {
         since_stream_position: i64,
         full_state: bool,
     ) -> Result<Vec<Value>, DomainError> {
+        use schema::room_read_markers;
+
         let mut connection = self
             .connection_pool
             .get()
             .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
 
-        let rows = if full_state {
-            sql_query(
-                "SELECT DISTINCT ON (room_id, user_id) fully_read_event_id
-                 FROM public.room_read_markers
-                 WHERE room_id = $1 AND user_id = $2
-                 ORDER BY room_id, user_id, stream_position DESC",
-            )
-            .bind::<Text, _>(room_identifier)
-            .bind::<Text, _>(user_identifier)
-            .load::<FullyReadMarkerSqlRecord>(&mut connection)
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?
+        let event_ids = if full_state {
+            room_read_markers::table
+                .filter(room_read_markers::room_id.eq(room_identifier))
+                .filter(room_read_markers::user_id.eq(user_identifier))
+                .order(room_read_markers::stream_position.desc())
+                .select(room_read_markers::fully_read_event_id)
+                .first::<String>(&mut connection)
+                .optional()
+                .map_err(|error| DomainError::InvalidRequest(error.to_string()))?
+                .into_iter()
+                .collect::<Vec<_>>()
         } else {
-            sql_query(
-                "SELECT fully_read_event_id
-                 FROM public.room_read_markers
-                 WHERE room_id = $1 AND user_id = $2 AND stream_position > $3
-                 ORDER BY stream_position ASC",
-            )
-            .bind::<Text, _>(room_identifier)
-            .bind::<Text, _>(user_identifier)
-            .bind::<BigInt, _>(since_stream_position)
-            .load::<FullyReadMarkerSqlRecord>(&mut connection)
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?
+            room_read_markers::table
+                .filter(room_read_markers::room_id.eq(room_identifier))
+                .filter(room_read_markers::user_id.eq(user_identifier))
+                .filter(room_read_markers::stream_position.gt(since_stream_position))
+                .order(room_read_markers::stream_position.asc())
+                .select(room_read_markers::fully_read_event_id)
+                .load::<String>(&mut connection)
+                .map_err(|error| DomainError::InvalidRequest(error.to_string()))?
         };
 
-        Ok(rows
+        Ok(event_ids
             .into_iter()
-            .map(|row| {
+            .map(|fully_read_event_id| {
                 serde_json::json!({
                     "type": "m.fully_read",
                     "content": {
-                        "event_id": row.fully_read_event_id
+                        "event_id": fully_read_event_id
                     }
                 })
             })

@@ -1,16 +1,17 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration, Utc};
 use diesel::{
-    Connection, OptionalExtension, QueryableByName, RunQueryDsl,
+    BoolExpressionMethods, Connection, ExpressionMethods, OptionalExtension, QueryDsl, RunQueryDsl,
+    dsl::{exists, select},
+    insert_into,
     pg::PgConnection,
     r2d2::{self, ConnectionManager},
-    sql_query,
-    sql_types::{Bool, Nullable, Text},
+    upsert::excluded,
 };
 use uuid::Uuid;
 
 use crate::{
-    infrastructure::configuration::IdentityConfiguration,
+    infrastructure::{configuration::IdentityConfiguration, schema},
     services::identity::{
         entities::{
             EncodedPublicKey, IdentitySigningAlgorithm, IdentitySigningKey, IdentitySigningKeyId,
@@ -23,20 +24,6 @@ use crate::{
         },
     },
 };
-
-#[derive(QueryableByName)]
-struct LongTermKeyRow {
-    #[diesel(sql_type = Text)]
-    key_id: String,
-    #[diesel(sql_type = Text)]
-    public_key: String,
-}
-
-#[derive(QueryableByName)]
-struct ExistsRow {
-    #[diesel(sql_type = Bool)]
-    is_present: bool,
-}
 
 #[derive(Clone, Debug)]
 struct ConfiguredLongTermKeyMaterial {
@@ -101,24 +88,31 @@ impl IdentityPersistence {
     fn fetch_latest_long_term_key(
         &self,
     ) -> Result<Option<IdentitySigningKey>, IdentityServiceError> {
+        use schema::identity_signing_keys;
+
         let mut connection = self
             .connection_pool
             .get()
             .map_err(connection_error_to_identity_error)?;
+        let now = Utc::now();
 
-        let row = sql_query(
-            "SELECT key_id, public_key
-             FROM public.identity_signing_keys
-             WHERE usage = 'long_term'
-               AND (expires_at IS NULL OR expires_at > NOW())
-             ORDER BY created_at DESC
-             LIMIT 1",
-        )
-        .get_result::<LongTermKeyRow>(&mut connection)
-        .optional()
-        .map_err(database_error_to_identity_error)?;
+        let row = identity_signing_keys::table
+            .select((
+                identity_signing_keys::key_id,
+                identity_signing_keys::public_key,
+            ))
+            .filter(identity_signing_keys::usage.eq("long_term"))
+            .filter(
+                identity_signing_keys::expires_at
+                    .is_null()
+                    .or(identity_signing_keys::expires_at.gt(now)),
+            )
+            .order(identity_signing_keys::created_at.desc())
+            .first::<(Option<String>, String)>(&mut connection)
+            .optional()
+            .map_err(database_error_to_identity_error)?;
 
-        row.map(long_term_key_from_row).transpose()
+        row.map(long_term_key_from_columns).transpose()
     }
 
     fn fetch_active_long_term_key(&self) -> Result<IdentitySigningKey, IdentityServiceError> {
@@ -133,28 +127,32 @@ impl IdentityPersistence {
         &self,
         key_material: &ConfiguredLongTermKeyMaterial,
     ) -> Result<(), IdentityServiceError> {
+        use schema::identity_signing_keys;
+
         let mut connection = self
             .connection_pool
             .get()
             .map_err(connection_error_to_identity_error)?;
 
-        sql_query(
-            "INSERT INTO public.identity_signing_keys
-             (usage, key_id, public_key, private_key, expires_at)
-             VALUES ('long_term', $1, $2, $3, NULL)
-             ON CONFLICT (key_id)
-             DO UPDATE
-                SET usage = EXCLUDED.usage,
-                    public_key = EXCLUDED.public_key,
-                    private_key = EXCLUDED.private_key,
-                    expires_at = NULL,
-                    updated_at = NOW()",
-        )
-        .bind::<Text, _>(key_material.key_id.as_str())
-        .bind::<Text, _>(key_material.public_key.as_str())
-        .bind::<Text, _>(key_material.private_key.as_str())
-        .execute(&mut connection)
-        .map_err(database_error_to_identity_error)?;
+        insert_into(identity_signing_keys::table)
+            .values((
+                identity_signing_keys::usage.eq("long_term"),
+                identity_signing_keys::key_id.eq(Some(key_material.key_id.as_str())),
+                identity_signing_keys::public_key.eq(key_material.public_key.as_str()),
+                identity_signing_keys::private_key.eq(Some(key_material.private_key.as_str())),
+                identity_signing_keys::expires_at.eq::<Option<chrono::DateTime<Utc>>>(None),
+            ))
+            .on_conflict(identity_signing_keys::key_id)
+            .do_update()
+            .set((
+                identity_signing_keys::usage.eq(excluded(identity_signing_keys::usage)),
+                identity_signing_keys::public_key.eq(excluded(identity_signing_keys::public_key)),
+                identity_signing_keys::private_key.eq(excluded(identity_signing_keys::private_key)),
+                identity_signing_keys::expires_at.eq::<Option<chrono::DateTime<Utc>>>(None),
+                identity_signing_keys::updated_at.eq(Utc::now()),
+            ))
+            .execute(&mut connection)
+            .map_err(database_error_to_identity_error)?;
 
         Ok(())
     }
@@ -181,75 +179,83 @@ impl IdentitySigningKeyRepository for IdentityPersistence {
         &self,
         key_id: &IdentitySigningKeyId,
     ) -> Result<Option<IdentitySigningKey>, IdentityServiceError> {
+        use schema::identity_signing_keys;
+
         let mut connection = self
             .connection_pool
             .get()
             .map_err(connection_error_to_identity_error)?;
+        let now = Utc::now();
 
-        let row = sql_query(
-            "SELECT key_id, public_key
-             FROM public.identity_signing_keys
-             WHERE usage = 'long_term'
-               AND key_id = $1
-               AND (expires_at IS NULL OR expires_at > NOW())
-             LIMIT 1",
-        )
-        .bind::<Text, _>(key_id.as_str())
-        .get_result::<LongTermKeyRow>(&mut connection)
-        .optional()
-        .map_err(database_error_to_identity_error)?;
+        let row = identity_signing_keys::table
+            .select((
+                identity_signing_keys::key_id,
+                identity_signing_keys::public_key,
+            ))
+            .filter(identity_signing_keys::usage.eq("long_term"))
+            .filter(identity_signing_keys::key_id.eq(Some(key_id.as_str())))
+            .filter(
+                identity_signing_keys::expires_at
+                    .is_null()
+                    .or(identity_signing_keys::expires_at.gt(now)),
+            )
+            .first::<(Option<String>, String)>(&mut connection)
+            .optional()
+            .map_err(database_error_to_identity_error)?;
 
-        row.map(long_term_key_from_row).transpose()
+        row.map(long_term_key_from_columns).transpose()
     }
 
     fn is_long_term_public_key_valid(
         &self,
         public_key: &EncodedPublicKey,
     ) -> Result<bool, IdentityServiceError> {
+        use schema::identity_signing_keys;
+
         let mut connection = self
             .connection_pool
             .get()
             .map_err(connection_error_to_identity_error)?;
+        let now = Utc::now();
 
-        let row = sql_query(
-            "SELECT EXISTS (
-                SELECT 1
-                FROM public.identity_signing_keys
-                WHERE usage = 'long_term'
-                  AND public_key = $1
-                  AND (expires_at IS NULL OR expires_at > NOW())
-            ) AS is_present",
-        )
-        .bind::<Text, _>(public_key.as_str())
-        .get_result::<ExistsRow>(&mut connection)
-        .map_err(database_error_to_identity_error)?;
-
-        Ok(row.is_present)
+        select(exists(
+            identity_signing_keys::table
+                .filter(identity_signing_keys::usage.eq("long_term"))
+                .filter(identity_signing_keys::public_key.eq(public_key.as_str()))
+                .filter(
+                    identity_signing_keys::expires_at
+                        .is_null()
+                        .or(identity_signing_keys::expires_at.gt(now)),
+                ),
+        ))
+        .get_result::<bool>(&mut connection)
+        .map_err(database_error_to_identity_error)
     }
 
     fn is_ephemeral_public_key_valid(
         &self,
         public_key: &EncodedPublicKey,
     ) -> Result<bool, IdentityServiceError> {
+        use schema::identity_signing_keys;
+
         let mut connection = self
             .connection_pool
             .get()
             .map_err(connection_error_to_identity_error)?;
+        let now = Utc::now();
 
-        let row = sql_query(
-            "SELECT EXISTS (
-                SELECT 1
-                FROM public.identity_signing_keys
-                WHERE usage = 'ephemeral_invite'
-                  AND public_key = $1
-                  AND (expires_at IS NULL OR expires_at > NOW())
-            ) AS is_present",
-        )
-        .bind::<Text, _>(public_key.as_str())
-        .get_result::<ExistsRow>(&mut connection)
-        .map_err(database_error_to_identity_error)?;
-
-        Ok(row.is_present)
+        select(exists(
+            identity_signing_keys::table
+                .filter(identity_signing_keys::usage.eq("ephemeral_invite"))
+                .filter(identity_signing_keys::public_key.eq(public_key.as_str()))
+                .filter(
+                    identity_signing_keys::expires_at
+                        .is_null()
+                        .or(identity_signing_keys::expires_at.gt(now)),
+                ),
+        ))
+        .get_result::<bool>(&mut connection)
+        .map_err(database_error_to_identity_error)
     }
 }
 
@@ -259,6 +265,8 @@ impl IdentityInvitationRepository for IdentityPersistence {
         command: &StoreThirdPartyInviteCommand,
         public_keys: Vec<IdentitySigningKey>,
     ) -> Result<StoredThirdPartyInvite, IdentityServiceError> {
+        use schema::{identity_signing_keys, identity_third_party_invites};
+
         let long_term_key = self.fetch_active_long_term_key()?;
         let token = Uuid::new_v4().to_string();
         let display_name = redacted_display_name(command.address.as_str());
@@ -271,30 +279,28 @@ impl IdentityInvitationRepository for IdentityPersistence {
 
         connection
             .transaction(|connection| {
-                sql_query(
-                    "INSERT INTO public.identity_third_party_invites
-                     (token, medium, address, room_id, sender, display_name, expires_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7)",
-                )
-                .bind::<Text, _>(token.as_str())
-                .bind::<Text, _>(command.medium.as_str())
-                .bind::<Text, _>(command.address.as_str())
-                .bind::<Text, _>(command.room_id.as_str())
-                .bind::<Text, _>(command.sender.as_str())
-                .bind::<Text, _>(display_name.as_str())
-                .bind::<Nullable<diesel::sql_types::Timestamptz>, _>(Some(expires_at))
-                .execute(connection)?;
-
-                for public_key in &public_keys {
-                    sql_query(
-                        "INSERT INTO public.identity_signing_keys
-                         (usage, key_id, public_key, private_key, expires_at)
-                         VALUES ('ephemeral_invite', $1, $2, NULL, $3)",
-                    )
-                    .bind::<Nullable<Text>, _>(Some(public_key.key_id.as_str()))
-                    .bind::<Text, _>(public_key.public_key.as_str())
-                    .bind::<Nullable<diesel::sql_types::Timestamptz>, _>(Some(expires_at))
+                insert_into(identity_third_party_invites::table)
+                    .values((
+                        identity_third_party_invites::token.eq(token.as_str()),
+                        identity_third_party_invites::medium.eq(command.medium.as_str()),
+                        identity_third_party_invites::address.eq(command.address.as_str()),
+                        identity_third_party_invites::room_id.eq(command.room_id.as_str()),
+                        identity_third_party_invites::sender.eq(command.sender.as_str()),
+                        identity_third_party_invites::display_name.eq(display_name.as_str()),
+                        identity_third_party_invites::expires_at.eq(Some(expires_at)),
+                    ))
                     .execute(connection)?;
+
+                for invite_key in &public_keys {
+                    insert_into(identity_signing_keys::table)
+                        .values((
+                            identity_signing_keys::usage.eq("ephemeral_invite"),
+                            identity_signing_keys::key_id.eq(Some(invite_key.key_id.as_str())),
+                            identity_signing_keys::public_key.eq(invite_key.public_key.as_str()),
+                            identity_signing_keys::private_key.eq::<Option<&str>>(None),
+                            identity_signing_keys::expires_at.eq(Some(expires_at)),
+                        ))
+                        .execute(connection)?;
                 }
 
                 Ok::<(), diesel::result::Error>(())
@@ -376,10 +382,18 @@ fn redacted_display_name(address: &str) -> String {
     }
 }
 
-fn long_term_key_from_row(row: LongTermKeyRow) -> Result<IdentitySigningKey, IdentityServiceError> {
+fn long_term_key_from_columns(
+    (key_id, public_key): (Option<String>, String),
+) -> Result<IdentitySigningKey, IdentityServiceError> {
+    let key_id = key_id.ok_or_else(|| {
+        IdentityServiceError::Internal(anyhow::anyhow!(
+            "identity long-term signing key is missing key_id"
+        ))
+    })?;
+
     Ok(IdentitySigningKey {
-        key_id: IdentitySigningKeyId::parse(row.key_id)?,
-        public_key: EncodedPublicKey::parse(row.public_key)?,
+        key_id: IdentitySigningKeyId::parse(key_id)?,
+        public_key: EncodedPublicKey::parse(public_key)?,
         usage: IdentitySigningKeyUsage::LongTerm,
     })
 }
