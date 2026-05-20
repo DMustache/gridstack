@@ -6,7 +6,15 @@ use crate::domain::{
         LoginUserInfo, LoginUserView, LogoutUserView, RegisterUserInfo, RegisterUserView,
         ServerCredentials, SessionRecord, UiaaResponseView, WhoAmIView,
     },
-    rooms::{CreateRoomInfo, CreateRoomView, RoomListItem},
+    rooms::{
+        CreateRoomInfo, CreateRoomView, GetRoomEventView, GetRoomMembersQuery,
+        GetRoomMembersView, GetRoomMessagesQuery, GetRoomMessagesView, InviteUserInfo,
+        InviteUserView, JoinRoomInfo, JoinRoomView, JoinedMembersView, JoinedRoomsView,
+        LeaveRoomInfo, LeaveRoomView, RoomListItem, RoomStateEventView, SendReceiptInfo,
+        SendReceiptView, SendRoomEventView, SetReadMarkersInfo, SetReadMarkersView,
+        SetRoomStateWithKeyView,
+    },
+    synchronization::{DefineFilterInfo, DefineFilterView, SyncQuery, SyncResponseView},
     error::ClientError,
 };
 
@@ -50,11 +58,123 @@ pub trait RoomsApi: Send + Sync {
         access_token: &str,
         request: &CreateRoomInfo,
     ) -> Result<CreateRoomView, ClientError>;
+    async fn join_room_by_id(
+        &self,
+        access_token: &str,
+        room_id: &str,
+        request: &JoinRoomInfo,
+    ) -> Result<JoinRoomView, ClientError>;
+    async fn leave_room_by_id(
+        &self,
+        access_token: &str,
+        room_id: &str,
+        request: &LeaveRoomInfo,
+    ) -> Result<LeaveRoomView, ClientError>;
+    async fn get_room_state(
+        &self,
+        access_token: &str,
+        room_id: &str,
+    ) -> Result<Vec<RoomStateEventView>, ClientError>;
+    async fn get_room_messages(
+        &self,
+        access_token: &str,
+        room_id: &str,
+        query: &GetRoomMessagesQuery,
+    ) -> Result<GetRoomMessagesView, ClientError>;
+    async fn get_joined_rooms(&self, access_token: &str) -> Result<JoinedRoomsView, ClientError>;
+    async fn send_room_message_event(
+        &self,
+        access_token: &str,
+        room_id: &str,
+        event_type: &str,
+        transaction_id: &str,
+        content: &serde_json::Value,
+    ) -> Result<SendRoomEventView, ClientError>;
+    async fn get_joined_members(
+        &self,
+        access_token: &str,
+        room_id: &str,
+    ) -> Result<JoinedMembersView, ClientError>;
+    async fn get_room_members(
+        &self,
+        access_token: &str,
+        room_id: &str,
+        query: &GetRoomMembersQuery,
+    ) -> Result<GetRoomMembersView, ClientError>;
+    async fn invite_user_to_room(
+        &self,
+        access_token: &str,
+        room_id: &str,
+        request: &InviteUserInfo,
+    ) -> Result<InviteUserView, ClientError>;
+    async fn get_room_event(
+        &self,
+        access_token: &str,
+        room_id: &str,
+        event_id: &str,
+    ) -> Result<GetRoomEventView, ClientError>;
+    async fn get_room_state_with_key(
+        &self,
+        access_token: &str,
+        room_id: &str,
+        event_type: &str,
+        state_key: Option<&str>,
+        request_full_event: bool,
+    ) -> Result<serde_json::Value, ClientError>;
+    async fn set_room_state_with_key(
+        &self,
+        access_token: &str,
+        room_id: &str,
+        event_type: &str,
+        state_key: &str,
+        content: &serde_json::Value,
+    ) -> Result<SetRoomStateWithKeyView, ClientError>;
+    async fn send_room_receipt(
+        &self,
+        access_token: &str,
+        room_id: &str,
+        receipt_type: &str,
+        event_id: &str,
+        request: &SendReceiptInfo,
+    ) -> Result<SendReceiptView, ClientError>;
+    async fn set_room_read_markers(
+        &self,
+        access_token: &str,
+        room_id: &str,
+        request: &SetReadMarkersInfo,
+    ) -> Result<SetReadMarkersView, ClientError>;
+}
+
+#[async_trait]
+pub trait SynchronizationApi: Send + Sync {
+    async fn define_filter(
+        &self,
+        access_token: &str,
+        user_id: &str,
+        request: &DefineFilterInfo,
+    ) -> Result<DefineFilterView, ClientError>;
+    async fn get_filter(
+        &self,
+        access_token: &str,
+        user_id: &str,
+        filter_id: &str,
+    ) -> Result<serde_json::Value, ClientError>;
+    async fn sync(
+        &self,
+        access_token: &str,
+        query: &SyncQuery,
+    ) -> Result<SyncResponseView, ClientError>;
 }
 
 #[async_trait]
 pub trait RoomRepository: Send + Sync {
     async fn add_room(&self, room: &RoomListItem) -> Result<(), ClientError>;
+    async fn remove_room(
+        &self,
+        server_url: &str,
+        user_id: &str,
+        room_id: &str,
+    ) -> Result<(), ClientError>;
     async fn list_rooms_by_server_user(
         &self,
         server_url: &str,
@@ -78,4 +198,8 @@ pub trait ServerProfileRepository: Send + Sync {
         server_url: &str,
         username: &str,
     ) -> Result<Option<ServerCredentials>, ClientError>;
+
+    async fn set_preference(&self, key: &str, value: &str) -> Result<(), ClientError>;
+
+    async fn get_preference(&self, key: &str) -> Result<Option<String>, ClientError>;
 }
