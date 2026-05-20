@@ -155,6 +155,14 @@ impl EventsService {
 
         let mut event_write_contracts = Vec::with_capacity(room_event_flow.intents.len());
         let mut compilation_state = CompilationState::new();
+        let is_room_bootstrap_flow = room_event_flow
+            .intents
+            .first()
+            .map(|event_intent| {
+                event_intent.event_type() == "m.room.create"
+                    && event_intent.state_key.as_deref() == Some("")
+            })
+            .unwrap_or(false);
 
         for (event_index, event_intent) in room_event_flow.intents.iter().enumerate() {
             validate_event_intent(event_intent)
@@ -185,7 +193,12 @@ impl EventsService {
                 redacts: None,
             };
 
-            Self::authorize_event(event_index, &event_draft, &compilation_state)?;
+            Self::authorize_event(
+                event_index,
+                &event_draft,
+                &compilation_state,
+                is_room_bootstrap_flow,
+            )?;
 
             let persisted_event = self.persist_event(event_draft, room_event_flow.room_version);
             let event_write_contract = Self::plan_event_write_contract(
@@ -257,7 +270,12 @@ impl EventsService {
         event_index: usize,
         event_draft: &EventDraft,
         compilation_state: &CompilationState,
+        is_room_bootstrap_flow: bool,
     ) -> Result<(), EventCompilationError> {
+        if event_index == 0 && !is_room_bootstrap_flow {
+            return Ok(());
+        }
+
         if event_index == 0 {
             if event_draft.event_type != "m.room.create"
                 || event_draft.state_key.as_deref() != Some("")
@@ -267,7 +285,7 @@ impl EventsService {
             return Ok(());
         }
 
-        if event_index == 1 {
+        if event_index == 1 && is_room_bootstrap_flow {
             if event_draft.event_type != "m.room.member"
                 || event_draft.state_key.as_deref() != Some(event_draft.sender.as_str())
             {

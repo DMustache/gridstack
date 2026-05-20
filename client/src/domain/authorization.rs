@@ -180,6 +180,7 @@ pub struct LogoutUserView {}
 #[derive(Clone, Debug)]
 pub struct SessionRecord {
     pub server_url: String,
+    pub username: String,
     pub access_token: String,
     pub user_id: String,
     pub device_id: Option<String>,
