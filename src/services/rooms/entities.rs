@@ -952,6 +952,35 @@ pub struct JoinedRooms {
     pub room_ids: Vec<String>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct GetPublicRoomsCommand {
+    pub limit: usize,
+    pub since: Option<String>,
+    pub server: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PublicRoomsChunk {
+    pub room_id: String,
+    pub num_joined_members: i64,
+    pub world_readable: bool,
+    pub guest_can_join: bool,
+    pub canonical_alias: Option<String>,
+    pub name: Option<String>,
+    pub topic: Option<String>,
+    pub avatar_url: Option<String>,
+    pub join_rule: Option<String>,
+    pub room_type: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PublicRoomsPage {
+    pub chunk: Vec<PublicRoomsChunk>,
+    pub next_batch: Option<String>,
+    pub prev_batch: Option<String>,
+    pub total_room_count_estimate: Option<i64>,
+}
+
 #[derive(Clone, Debug)]
 pub struct JoinedRoomMember {
     pub display_name: Option<String>,
@@ -990,6 +1019,37 @@ pub struct JoinRoomView {
 #[derive(Clone, Debug, Serialize)]
 pub struct JoinedRoomsView {
     pub joined_rooms: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PublicRoomsChunkView {
+    pub guest_can_join: bool,
+    pub num_joined_members: i64,
+    pub room_id: String,
+    pub world_readable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub canonical_alias: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub join_rule: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub room_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub topic: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PublicRoomsView {
+    pub chunk: Vec<PublicRoomsChunkView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_batch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prev_batch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_room_count_estimate: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1038,6 +1098,38 @@ impl From<JoinedRoomMember> for JoinedRoomMemberView {
         Self {
             display_name: value.display_name,
             avatar_url: value.avatar_url,
+        }
+    }
+}
+
+impl From<PublicRoomsChunk> for PublicRoomsChunkView {
+    fn from(value: PublicRoomsChunk) -> Self {
+        Self {
+            guest_can_join: value.guest_can_join,
+            num_joined_members: value.num_joined_members,
+            room_id: value.room_id,
+            world_readable: value.world_readable,
+            avatar_url: value.avatar_url,
+            canonical_alias: value.canonical_alias,
+            join_rule: value.join_rule,
+            name: value.name,
+            room_type: value.room_type,
+            topic: value.topic,
+        }
+    }
+}
+
+impl From<PublicRoomsPage> for PublicRoomsView {
+    fn from(value: PublicRoomsPage) -> Self {
+        Self {
+            chunk: value
+                .chunk
+                .into_iter()
+                .map(PublicRoomsChunkView::from)
+                .collect(),
+            next_batch: value.next_batch,
+            prev_batch: value.prev_batch,
+            total_room_count_estimate: value.total_room_count_estimate,
         }
     }
 }

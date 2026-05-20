@@ -1,9 +1,13 @@
 use std::collections::BTreeMap;
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use eframe::egui;
 use tokio::runtime::Runtime;
+use tracing::{error, info, warn};
 
 use crate::{
     application::{
@@ -12,6 +16,7 @@ use crate::{
             RegisterUserResult, RoomRepository, ServerProfileRepository, SessionRepository,
         },
         rooms_client::RoomsClientService,
+        synchronization_client::SynchronizationClientService,
     },
     domain::{
         authorization::{
@@ -19,12 +24,18 @@ use crate::{
             ServerCredentials, WhoAmIView,
         },
         rooms::{
-            CreateRoomInfo, GetRoomMessagesQuery, JoinRoomInfo, LeaveRoomInfo, RoomListItem,
-            RoomMessageDirection, RoomStateEventView, RoomTimelineEventView,
+            CreateRoomInfo, GetRoomEventView, GetRoomMembersQuery, GetRoomMessagesQuery,
+            InviteUserInfo, JoinRoomInfo, LeaveRoomInfo, RoomListItem, RoomMessageDirection,
+            RoomStateEventView, RoomTimelineEventView, SendReceiptInfo, SetReadMarkersInfo,
         },
+        synchronization::SyncQuery,
+        synchronization::DefineFilterInfo,
     },
     infrastructure::{
-        http::{hyper_authorization_api::HyperAuthorizationApi, hyper_rooms_api::HyperRoomsApi},
+        http::{
+            hyper_authorization_api::HyperAuthorizationApi, hyper_rooms_api::HyperRoomsApi,
+            hyper_synchronization_api::HyperSynchronizationApi,
+        },
         persistence::sqlite_session_repository::SqliteSessionRepository,
     },
 };
@@ -64,6 +75,23 @@ enum LoadState {
     Error(String),
 }
 
+#[derive(Clone, Debug)]
+struct JoinedMemberView {
+    user_id: String,
+    display_name: Option<String>,
+    avatar_url: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct RoomPolicyProfile {
+    visibility: String,
+    preset: String,
+    is_direct: bool,
+    owner_user_id: Option<String>,
+    can_invite: bool,
+    can_rename_name: bool,
+}
+
 pub struct ClientDesktopApplication {
     runtime: Runtime,
     session_repository: Arc<dyn SessionRepository>,
@@ -96,11 +124,39 @@ pub struct ClientDesktopApplication {
     new_room_is_direct: bool,
     room_state_events: Vec<RoomStateEventView>,
     room_messages: Vec<RoomTimelineEventView>,
+    room_members: Vec<JoinedMemberView>,
+    room_members_status: LoadState,
+    room_members_timeline_events: Vec<RoomStateEventView>,
+    room_members_timeline_status: LoadState,
     room_state_status: LoadState,
     room_messages_status: LoadState,
     next_messages_from_token: Option<String>,
+    room_policy_profiles: BTreeMap<String, RoomPolicyProfile>,
+    sync_enabled: bool,
+    sync_interval_seconds: f32,
+    sync_timeout_milliseconds: u64,
+    next_sync_batch_token: Option<String>,
+    last_sync_poll_started_at: Option<Instant>,
+    sync_filter_definition_input: String,
+    sync_filter_id_input: String,
+    sync_filter_lookup_output: Option<serde_json::Value>,
     composer_input: String,
+    invite_user_id_input: String,
+    invite_reason_input: String,
+    room_membership_filter_input: String,
+    room_not_membership_filter_input: String,
+    room_members_at_token_input: String,
+    receipt_event_id_input: String,
+    receipt_thread_id_input: String,
+    receipt_type_index: usize,
+    event_lookup_input: String,
+    looked_up_event: Option<GetRoomEventView>,
+    state_event_type_input: String,
+    state_key_input: String,
+    state_content_input: String,
+    looked_up_state_value: Option<serde_json::Value>,
     next_transaction_counter: u64,
+    last_logged_status_message: String,
 }
 
 impl ClientDesktopApplication {
@@ -142,15 +198,78 @@ impl ClientDesktopApplication {
             new_room_is_direct: false,
             room_state_events: Vec::new(),
             room_messages: Vec::new(),
+            room_members: Vec::new(),
+            room_members_status: LoadState::Idle,
+            room_members_timeline_events: Vec::new(),
+            room_members_timeline_status: LoadState::Idle,
             room_state_status: LoadState::Idle,
             room_messages_status: LoadState::Idle,
             next_messages_from_token: None,
+            room_policy_profiles: BTreeMap::new(),
+            sync_enabled: true,
+            sync_interval_seconds: 2.0,
+            sync_timeout_milliseconds: 1500,
+            next_sync_batch_token: None,
+            last_sync_poll_started_at: None,
+            sync_filter_definition_input: format!(
+                "{}",
+                serde_json::json!({
+                    "room": {
+                        "timeline": {
+                            "limit": MESSAGE_PAGE_SIZE
+                        }
+                    }
+                })
+            ),
+            sync_filter_id_input: String::new(),
+            sync_filter_lookup_output: None,
             composer_input: String::new(),
+            invite_user_id_input: String::new(),
+            invite_reason_input: String::new(),
+            room_membership_filter_input: String::new(),
+            room_not_membership_filter_input: String::new(),
+            room_members_at_token_input: String::new(),
+            receipt_event_id_input: String::new(),
+            receipt_thread_id_input: String::new(),
+            receipt_type_index: 0,
+            event_lookup_input: String::new(),
+            looked_up_event: None,
+            state_event_type_input: "m.room.name".to_owned(),
+            state_key_input: String::new(),
+            state_content_input: "{\n  \"name\": \"New Room Name\"\n}".to_owned(),
+            looked_up_state_value: None,
             next_transaction_counter: 0,
+            last_logged_status_message: String::new(),
         };
 
         application.reload_servers();
+        application.log_status_message_if_changed();
         Ok(application)
+    }
+
+    fn log_status_message_if_changed(&mut self) {
+        if self.status_message == self.last_logged_status_message {
+            return;
+        }
+
+        append_status_message_to_log_file(&self.status_message);
+
+        let status_lowercase = self.status_message.to_ascii_lowercase();
+        if status_lowercase.contains("failed")
+            || status_lowercase.contains("error")
+            || status_lowercase.contains("invalid")
+        {
+            error!(status_message = %self.status_message, "ui status updated");
+        } else if status_lowercase.contains("required")
+            || status_lowercase.contains("select")
+            || status_lowercase.contains("no ")
+        {
+            warn!(status_message = %self.status_message, "ui status updated");
+        } else {
+            info!(status_message = %self.status_message, "ui status updated");
+        }
+
+        self.last_logged_status_message = self.status_message.clone();
     }
 
     fn normalized_server_url(&self) -> String {
@@ -191,6 +310,19 @@ impl ClientDesktopApplication {
             rooms_api,
             Arc::clone(&self.session_repository),
             Arc::clone(&self.room_repository),
+        )
+    }
+
+    fn build_synchronization_service(&self) -> SynchronizationClientService {
+        let server_url = self
+            .selected_server()
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.normalized_server_url());
+        let synchronization_api = Arc::new(HyperSynchronizationApi::new(server_url.clone()));
+        SynchronizationClientService::new(
+            server_url,
+            synchronization_api,
+            Arc::clone(&self.session_repository),
         )
     }
 
@@ -441,6 +573,13 @@ impl ClientDesktopApplication {
                 let previously_selected_room_id =
                     self.selected_room().map(|room| room.room_id.clone());
                 self.rooms = items;
+                let current_room_ids = self
+                    .rooms
+                    .iter()
+                    .map(|room| room.room_id.clone())
+                    .collect::<Vec<_>>();
+                self.room_policy_profiles
+                    .retain(|room_id, _| current_room_ids.iter().any(|current_id| current_id == room_id));
 
                 self.selected_room_index = previously_selected_room_id
                     .and_then(|room_id| self.rooms.iter().position(|room| room.room_id == room_id))
@@ -675,8 +814,10 @@ impl ClientDesktopApplication {
                 self.load_rooms();
                 self.room_state_events.clear();
                 self.room_messages.clear();
+                self.room_members_timeline_events.clear();
                 self.room_state_status = LoadState::Idle;
                 self.room_messages_status = LoadState::Idle;
+                self.room_members_timeline_status = LoadState::Idle;
                 self.next_messages_from_token = None;
             }
             Err(error) => self.status_message = format!("Leave room failed: {error}"),
@@ -685,6 +826,12 @@ impl ClientDesktopApplication {
 
     fn select_room_by_id(&mut self, room_id: &str) {
         if self.set_selected_room_index_by_id(room_id) {
+            self.looked_up_event = None;
+            self.looked_up_state_value = None;
+            self.room_members.clear();
+            self.room_members_status = LoadState::Idle;
+            self.room_members_timeline_events.clear();
+            self.room_members_timeline_status = LoadState::Idle;
             self.load_selected_room_details();
         }
     }
@@ -714,6 +861,8 @@ impl ClientDesktopApplication {
             Ok(events) => {
                 self.room_state_events = events;
                 self.room_state_status = LoadState::Loaded;
+                let room_state_events_snapshot = self.room_state_events.clone();
+                self.update_room_policy_profile_from_state(&room_id, &room_state_events_snapshot);
 
                 let (name, topic) = extract_room_name_and_topic(&self.room_state_events);
                 if name.is_some() || topic.is_some() {
@@ -731,6 +880,21 @@ impl ClientDesktopApplication {
                 self.room_state_status = LoadState::Error(error.to_string());
             }
         }
+    }
+
+    fn update_room_policy_profile_from_state(
+        &mut self,
+        room_id: &str,
+        room_state_events: &[RoomStateEventView],
+    ) {
+        let whoami_user_id = self.whoami.as_ref().map(|value| value.user_id.as_str());
+        let profile = derive_room_policy_profile(room_state_events, whoami_user_id);
+        self.room_policy_profiles.insert(room_id.to_owned(), profile);
+    }
+
+    fn selected_room_policy_profile(&self) -> Option<&RoomPolicyProfile> {
+        self.selected_room()
+            .and_then(|room| self.room_policy_profiles.get(&room.room_id))
     }
 
     fn load_selected_room_messages(&mut self, from_token: Option<String>, replace: bool) {
@@ -759,12 +923,23 @@ impl ClientDesktopApplication {
                 } else {
                     self.room_messages.extend(page.chunk);
                 }
+                self.sort_room_messages_for_chat();
                 self.room_messages_status = LoadState::Loaded;
             }
             Err(error) => {
                 self.room_messages_status = LoadState::Error(error.to_string());
             }
         }
+    }
+
+    fn sort_room_messages_for_chat(&mut self) {
+        self.room_messages.sort_by(|left, right| {
+            left.origin_server_ts
+                .cmp(&right.origin_server_ts)
+                .then_with(|| left.event_id.cmp(&right.event_id))
+        });
+        self.room_messages
+            .dedup_by(|left, right| left.event_id == right.event_id);
     }
 
     fn load_older_messages(&mut self) {
@@ -809,6 +984,456 @@ impl ClientDesktopApplication {
                 self.status_message = format!("Send message failed: {error}");
             }
         }
+    }
+
+    fn invite_user_to_selected_room(&mut self) {
+        let Some(room_id) = self.selected_room().map(|room| room.room_id.clone()) else {
+            self.status_message = "Select a room before inviting users".to_owned();
+            return;
+        };
+        if let Some(policy_profile) = self.selected_room_policy_profile()
+            && !policy_profile.can_invite
+        {
+            self.status_message = format!(
+                "Invite blocked by room policy: only `{}` can invite in this private room",
+                policy_profile
+                    .owner_user_id
+                    .as_deref()
+                    .unwrap_or("room owner")
+            );
+            return;
+        }
+        let invited_user_id = self.invite_user_id_input.trim().to_owned();
+        if invited_user_id.is_empty() {
+            self.status_message = "Invite user id is required".to_owned();
+            return;
+        }
+
+        let request = InviteUserInfo {
+            user_id: Some(invited_user_id),
+            reason: (!self.invite_reason_input.trim().is_empty())
+                .then(|| self.invite_reason_input.trim().to_owned()),
+            id_server: None,
+            id_access_token: None,
+            medium: None,
+            address: None,
+        };
+        let rooms_service = self.build_rooms_service();
+        match self
+            .runtime
+            .block_on(rooms_service.invite_user_to_room(&room_id, &request))
+        {
+            Ok(_) => {
+                self.status_message = "Invite request accepted".to_owned();
+                self.invite_user_id_input.clear();
+                self.invite_reason_input.clear();
+            }
+            Err(error) => {
+                self.status_message = format!("Invite failed: {error}");
+            }
+        }
+    }
+
+    fn load_selected_room_members(&mut self) {
+        let Some(room_id) = self.selected_room().map(|room| room.room_id.clone()) else {
+            self.room_members_status = LoadState::Idle;
+            return;
+        };
+        self.room_members_status = LoadState::Loading;
+        let rooms_service = self.build_rooms_service();
+
+        match self.runtime.block_on(rooms_service.get_joined_members(&room_id)) {
+            Ok(view) => {
+                self.room_members = view
+                    .joined
+                    .into_iter()
+                    .map(|(user_id, member)| JoinedMemberView {
+                        user_id,
+                        display_name: member.display_name,
+                        avatar_url: member.avatar_url,
+                    })
+                    .collect();
+                self.room_members.sort_by(|a, b| a.user_id.cmp(&b.user_id));
+                self.room_members_status = LoadState::Loaded;
+            }
+            Err(error) => {
+                self.room_members.clear();
+                self.room_members_status = LoadState::Error(error.to_string());
+            }
+        }
+    }
+
+    fn load_selected_room_members_with_filter(&mut self) {
+        let Some(room_id) = self.selected_room().map(|room| room.room_id.clone()) else {
+            self.room_members_timeline_status = LoadState::Idle;
+            return;
+        };
+        self.room_members_timeline_status = LoadState::Loading;
+        let query = GetRoomMembersQuery {
+            at_token: (!self.room_members_at_token_input.trim().is_empty())
+                .then(|| self.room_members_at_token_input.trim().to_owned()),
+            membership: (!self.room_membership_filter_input.trim().is_empty())
+                .then(|| self.room_membership_filter_input.trim().to_owned()),
+            not_membership: (!self.room_not_membership_filter_input.trim().is_empty())
+                .then(|| self.room_not_membership_filter_input.trim().to_owned()),
+        };
+        let rooms_service = self.build_rooms_service();
+        match self
+            .runtime
+            .block_on(rooms_service.get_room_members(&room_id, &query))
+        {
+            Ok(view) => {
+                self.room_members_timeline_events = view.chunk;
+                self.room_members_timeline_events.sort_by(|left, right| {
+                    left.origin_server_ts
+                        .cmp(&right.origin_server_ts)
+                        .then_with(|| left.event_id.cmp(&right.event_id))
+                });
+                self.room_members_timeline_status = LoadState::Loaded;
+            }
+            Err(error) => {
+                self.room_members_timeline_events.clear();
+                self.room_members_timeline_status = LoadState::Error(error.to_string());
+            }
+        }
+    }
+
+    fn lookup_room_event(&mut self) {
+        let Some(room_id) = self.selected_room().map(|room| room.room_id.clone()) else {
+            self.status_message = "Select a room before looking up events".to_owned();
+            return;
+        };
+        let event_id = self.event_lookup_input.trim().to_owned();
+        if event_id.is_empty() {
+            self.status_message = "Event id is required".to_owned();
+            return;
+        }
+
+        let rooms_service = self.build_rooms_service();
+        match self
+            .runtime
+            .block_on(rooms_service.get_room_event(&room_id, &event_id))
+        {
+            Ok(view) => {
+                self.looked_up_event = Some(view);
+                self.status_message = "Event fetched".to_owned();
+            }
+            Err(error) => {
+                self.looked_up_event = None;
+                self.status_message = format!("Event lookup failed: {error}");
+            }
+        }
+    }
+
+    fn lookup_state_with_key(&mut self, request_full_event: bool) {
+        let Some(room_id) = self.selected_room().map(|room| room.room_id.clone()) else {
+            self.status_message = "Select a room before reading state".to_owned();
+            return;
+        };
+        let event_type = self.state_event_type_input.trim().to_owned();
+        if event_type.is_empty() {
+            self.status_message = "State event type is required".to_owned();
+            return;
+        }
+        let state_key = self.state_key_input.trim();
+        let state_key_option = if state_key.is_empty() {
+            None
+        } else {
+            Some(state_key)
+        };
+
+        let rooms_service = self.build_rooms_service();
+        match self.runtime.block_on(rooms_service.get_room_state_with_key(
+            &room_id,
+            &event_type,
+            state_key_option,
+            request_full_event,
+        )) {
+            Ok(value) => {
+                self.looked_up_state_value = Some(value);
+                self.status_message = "Room state fetched".to_owned();
+            }
+            Err(error) => {
+                self.looked_up_state_value = None;
+                self.status_message = format!("Room state lookup failed: {error}");
+            }
+        }
+    }
+
+    fn set_state_with_key(&mut self) {
+        let Some(room_id) = self.selected_room().map(|room| room.room_id.clone()) else {
+            self.status_message = "Select a room before setting state".to_owned();
+            return;
+        };
+        let event_type = self.state_event_type_input.trim().to_owned();
+        let state_key = self.state_key_input.trim().to_owned();
+        if event_type == "m.room.name"
+            && let Some(policy_profile) = self.selected_room_policy_profile()
+            && !policy_profile.can_rename_name
+        {
+            self.status_message = format!(
+                "Rename blocked by room policy for preset `{}`",
+                policy_profile.preset
+            );
+            return;
+        }
+        if event_type.is_empty() || state_key.is_empty() {
+            self.status_message = "State event type and non-empty state key are required".to_owned();
+            return;
+        }
+
+        let content: serde_json::Value = match serde_json::from_str(&self.state_content_input) {
+            Ok(content) => content,
+            Err(error) => {
+                self.status_message = format!("Invalid JSON for state content: {error}");
+                return;
+            }
+        };
+        let rooms_service = self.build_rooms_service();
+        match self.runtime.block_on(rooms_service.set_room_state_with_key(
+            &room_id,
+            &event_type,
+            &state_key,
+            &content,
+        )) {
+            Ok(response) => {
+                self.status_message = format!("State updated ({})", response.event_id);
+                self.load_selected_room_state();
+            }
+            Err(error) => {
+                self.status_message = format!("Set state failed: {error}");
+            }
+        }
+    }
+
+    fn mark_selected_room_as_read(&mut self) {
+        let Some(room_id) = self.selected_room().map(|room| room.room_id.clone()) else {
+            self.status_message = "Select a room before marking as read".to_owned();
+            return;
+        };
+        let Some(latest_event_id) = self
+            .room_messages
+            .iter()
+            .max_by_key(|event| event.origin_server_ts)
+            .map(|event| event.event_id.clone())
+        else {
+            self.status_message = "No message event available to mark read".to_owned();
+            return;
+        };
+
+        let request = SetReadMarkersInfo {
+            fully_read_event_id: Some(latest_event_id.clone()),
+            read_event_id: Some(latest_event_id),
+            private_read_event_id: None,
+        };
+        let rooms_service = self.build_rooms_service();
+        match self
+            .runtime
+            .block_on(rooms_service.set_room_read_markers(&room_id, &request))
+        {
+            Ok(_) => {
+                self.status_message = "Read markers updated".to_owned();
+            }
+            Err(error) => {
+                self.status_message = format!("Failed to set read markers: {error}");
+            }
+        }
+    }
+
+    fn send_receipt_for_selected_room(&mut self) {
+        let Some(room_id) = self.selected_room().map(|room| room.room_id.clone()) else {
+            self.status_message = "Select a room before sending receipt".to_owned();
+            return;
+        };
+        let resolved_event_id = if !self.receipt_event_id_input.trim().is_empty() {
+            self.receipt_event_id_input.trim().to_owned()
+        } else if let Some(event_id) = self
+            .room_messages
+            .iter()
+            .max_by_key(|event| event.origin_server_ts)
+            .map(|event| event.event_id.clone())
+        {
+            event_id
+        } else {
+            self.status_message = "Receipt event id is required (or load messages first)".to_owned();
+            return;
+        };
+        let receipt_type = Self::receipt_type_options()
+            .get(self.receipt_type_index)
+            .copied()
+            .unwrap_or("m.read");
+        let request = SendReceiptInfo {
+            thread_id: (!self.receipt_thread_id_input.trim().is_empty())
+                .then(|| self.receipt_thread_id_input.trim().to_owned()),
+        };
+        let rooms_service = self.build_rooms_service();
+        match self.runtime.block_on(rooms_service.send_room_receipt(
+            &room_id,
+            receipt_type,
+            &resolved_event_id,
+            &request,
+        )) {
+            Ok(_) => {
+                self.status_message = format!(
+                    "Receipt sent: type={receipt_type}, event={resolved_event_id}"
+                );
+            }
+            Err(error) => {
+                self.status_message = format!("Send receipt failed: {error}");
+            }
+        }
+    }
+
+    fn run_periodic_sync_if_due(&mut self) {
+        if self.screen != Screen::Workspace || !self.sync_enabled {
+            return;
+        }
+        let sync_every = Duration::from_secs_f32(self.sync_interval_seconds.max(0.5));
+        if let Some(last_poll_started_at) = self.last_sync_poll_started_at
+            && last_poll_started_at.elapsed() < sync_every
+        {
+            return;
+        }
+        self.last_sync_poll_started_at = Some(Instant::now());
+        self.run_single_sync_poll();
+    }
+
+    fn run_single_sync_poll(&mut self) {
+        let synchronization_service = self.build_synchronization_service();
+        let sync_query = SyncQuery {
+            filter: Some(
+                serde_json::json!({
+                    "room": {
+                        "timeline": {
+                            "limit": MESSAGE_PAGE_SIZE
+                        }
+                    }
+                })
+                .to_string(),
+            ),
+            since: self.next_sync_batch_token.clone(),
+            full_state: false,
+            set_presence: Some("online".to_owned()),
+            timeout_milliseconds: Some(self.sync_timeout_milliseconds),
+            use_state_after: false,
+        };
+        match self.runtime.block_on(synchronization_service.sync(&sync_query)) {
+            Ok(sync_response) => {
+                self.next_sync_batch_token = Some(sync_response.next_batch.clone());
+                self.apply_sync_response(sync_response);
+            }
+            Err(error) => {
+                self.status_message = format!("Sync failed: {error}");
+            }
+        }
+    }
+
+    fn define_sync_filter(&mut self) {
+        let filter_payload: serde_json::Value =
+            match serde_json::from_str(&self.sync_filter_definition_input) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    self.status_message = format!("Invalid sync filter JSON: {error}");
+                    return;
+                }
+            };
+        let synchronization_service = self.build_synchronization_service();
+        match self
+            .runtime
+            .block_on(synchronization_service.define_filter(&DefineFilterInfo {
+                payload: filter_payload,
+            })) {
+            Ok(view) => {
+                self.sync_filter_id_input = view.filter_id.clone();
+                self.status_message = format!("Sync filter created: {}", view.filter_id);
+            }
+            Err(error) => {
+                self.status_message = format!("Define sync filter failed: {error}");
+            }
+        }
+    }
+
+    fn fetch_sync_filter(&mut self) {
+        let filter_id = self.sync_filter_id_input.trim().to_owned();
+        if filter_id.is_empty() {
+            self.status_message = "Filter id is required".to_owned();
+            return;
+        }
+        let synchronization_service = self.build_synchronization_service();
+        match self
+            .runtime
+            .block_on(synchronization_service.get_filter(&filter_id))
+        {
+            Ok(value) => {
+                self.sync_filter_lookup_output = Some(value);
+                self.status_message = "Sync filter fetched".to_owned();
+            }
+            Err(error) => {
+                self.sync_filter_lookup_output = None;
+                self.status_message = format!("Get sync filter failed: {error}");
+            }
+        }
+    }
+
+    fn apply_sync_response(&mut self, sync_response: crate::domain::synchronization::SyncResponseView) {
+        let rooms_service = self.build_rooms_service();
+        for (room_id, join_entry) in &sync_response.rooms.join {
+            let _ = self
+                .runtime
+                .block_on(rooms_service.upsert_cached_room(room_id, None, None));
+            if !join_entry.state.events.is_empty() {
+                self.update_room_policy_profile_from_state(room_id, &join_entry.state.events);
+            }
+        }
+        if !sync_response.rooms.join.is_empty() {
+            self.load_rooms();
+        }
+
+        let selected_room_id = self.selected_room().map(|room| room.room_id.clone());
+        if let Some(selected_room_id) = selected_room_id
+            && let Some(join_entry) = sync_response.rooms.join.get(&selected_room_id)
+        {
+            if !join_entry.state.events.is_empty() {
+                self.apply_state_delta_to_selected_room(&selected_room_id, &join_entry.state.events);
+                let (name, topic) = extract_room_name_and_topic(&self.room_state_events);
+                if name.is_some() || topic.is_some() {
+                    let _ = self.runtime.block_on(
+                        rooms_service.upsert_cached_room(&selected_room_id, name, topic),
+                    );
+                    self.load_rooms();
+                    let _ = self.set_selected_room_index_by_id(&selected_room_id);
+                }
+            }
+            if !join_entry.timeline.events.is_empty() {
+                self.room_messages.extend(join_entry.timeline.events.clone());
+                self.sort_room_messages_for_chat();
+                self.room_messages_status = LoadState::Loaded;
+            }
+        }
+    }
+
+    fn apply_state_delta_to_selected_room(
+        &mut self,
+        room_id: &str,
+        state_events: &[RoomStateEventView],
+    ) {
+        for state_event in state_events {
+            if let Some(existing_index) = self.room_state_events.iter().position(|existing| {
+                existing.event_type == state_event.event_type && existing.state_key == state_event.state_key
+            }) {
+                self.room_state_events[existing_index] = state_event.clone();
+            } else {
+                self.room_state_events.push(state_event.clone());
+            }
+        }
+        self.room_state_events.sort_by(|left, right| {
+            left.event_type
+                .cmp(&right.event_type)
+                .then_with(|| left.state_key.cmp(&right.state_key))
+        });
+        let room_state_events_snapshot = self.room_state_events.clone();
+        self.update_room_policy_profile_from_state(room_id, &room_state_events_snapshot);
+        self.room_state_status = LoadState::Loaded;
     }
 
     fn build_transaction_id(&mut self) -> String {
@@ -1148,6 +1773,37 @@ impl ClientDesktopApplication {
                         if ui.button("Refresh cached rooms").clicked() {
                             self.load_rooms();
                         }
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("Sync interval (s)").color(TEXT_MUTED));
+                            ui.add(
+                                egui::DragValue::new(&mut self.sync_interval_seconds)
+                                    .range(0.5..=30.0)
+                                    .speed(0.2),
+                            );
+                        });
+                        ui.collapsing("Sync filter", |ui| {
+                            ui.add(
+                                egui::TextEdit::multiline(&mut self.sync_filter_definition_input)
+                                    .desired_rows(3)
+                                    .hint_text("{\"room\":{\"timeline\":{\"limit\":30}}}"),
+                            );
+                            ui.horizontal(|ui| {
+                                if ui.button("Define filter").clicked() {
+                                    self.define_sync_filter();
+                                }
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.sync_filter_id_input)
+                                        .hint_text("filter id"),
+                                );
+                                if ui.button("Get filter").clicked() {
+                                    self.fetch_sync_filter();
+                                }
+                            });
+                            if let Some(sync_filter_lookup_output) = self.sync_filter_lookup_output.as_ref()
+                            {
+                                ui.monospace(pretty_json(sync_filter_lookup_output));
+                            }
+                        });
                     });
 
                 ui.add_space(12.0);
@@ -1248,6 +1904,8 @@ impl ClientDesktopApplication {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     for index in 0..self.rooms.len() {
                         let room = &self.rooms[index];
+                        let room_id_for_click = room.room_id.clone();
+                        let room_policy_profile = self.room_policy_profiles.get(&room.room_id);
                         let room_title = room.name.clone().unwrap_or_else(|| room.room_id.clone());
                         let topic = room.topic.clone().unwrap_or_else(|| room.room_id.clone());
                         let selected = self.selected_room_index == Some(index);
@@ -1265,6 +1923,35 @@ impl ClientDesktopApplication {
                                     avatar(ui, room_title.chars().next().unwrap_or('#'), selected);
                                     ui.vertical(|ui| {
                                         ui.label(egui::RichText::new(room_title).strong());
+                                        if let Some(room_policy_profile) = room_policy_profile {
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.label(
+                                                    egui::RichText::new(room_policy_profile.visibility.clone())
+                                                        .size(10.0)
+                                                        .color(ACCENT_STRONG),
+                                                );
+                                                ui.label(
+                                                    egui::RichText::new(room_policy_profile.preset.clone())
+                                                        .size(10.0)
+                                                        .color(TEXT_MUTED),
+                                                );
+                                                ui.label(
+                                                    egui::RichText::new(if room_policy_profile.is_direct {
+                                                        "direct"
+                                                    } else {
+                                                        "group"
+                                                    })
+                                                    .size(10.0)
+                                                    .color(TEXT_MUTED),
+                                                );
+                                            });
+                                        } else {
+                                            ui.label(
+                                                egui::RichText::new("policy unknown")
+                                                    .size(10.0)
+                                                    .color(TEXT_MUTED),
+                                            );
+                                        }
                                         ui.label(
                                             egui::RichText::new(compact_text(&topic, 38))
                                                 .size(11.0)
@@ -1275,8 +1962,7 @@ impl ClientDesktopApplication {
                             })
                             .response;
                         if response.interact(egui::Sense::click()).clicked() {
-                            self.selected_room_index = Some(index);
-                            self.load_selected_room_details();
+                            self.select_room_by_id(&room_id_for_click);
                         }
                         ui.add_space(6.0);
                     }
@@ -1295,6 +1981,7 @@ impl ClientDesktopApplication {
                 .selected_room()
                 .and_then(|room| room.name.clone())
                 .unwrap_or_else(|| selected_room_id.clone().unwrap_or_else(|| "-".to_owned()));
+            let selected_room_policy_profile = self.selected_room_policy_profile().cloned();
 
             egui::Frame::default()
                 .fill(PANEL)
@@ -1308,6 +1995,29 @@ impl ClientDesktopApplication {
                                     .size(20.0)
                                     .strong(),
                             );
+                            if let Some(selected_room_policy_profile) = selected_room_policy_profile.as_ref() {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(selected_room_policy_profile.visibility.clone())
+                                            .size(11.0)
+                                            .color(ACCENT_STRONG),
+                                    );
+                                    ui.label(
+                                        egui::RichText::new(selected_room_policy_profile.preset.clone())
+                                            .size(11.0)
+                                            .color(TEXT_MUTED),
+                                    );
+                                    ui.label(
+                                        egui::RichText::new(if selected_room_policy_profile.is_direct {
+                                            "direct"
+                                        } else {
+                                            "group"
+                                        })
+                                        .size(11.0)
+                                        .color(TEXT_MUTED),
+                                    );
+                                });
+                            }
                             if let Some(room_id) = selected_room_id.as_ref() {
                                 ui.label(
                                     egui::RichText::new(compact_text(room_id, 84))
@@ -1319,6 +2029,19 @@ impl ClientDesktopApplication {
                             }
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.checkbox(&mut self.sync_enabled, "Auto sync");
+                            if ui.button("Sync now").clicked() {
+                                self.run_single_sync_poll();
+                            }
+                            if ui.button("Mark read").clicked() {
+                                self.mark_selected_room_as_read();
+                            }
+                            if ui.button("Members").clicked() {
+                                self.load_selected_room_members();
+                            }
+                            if ui.button("Member events").clicked() {
+                                self.load_selected_room_members_with_filter();
+                            }
                             if ui
                                 .add_enabled(
                                     self.next_messages_from_token.is_some(),
@@ -1344,6 +2067,128 @@ impl ClientDesktopApplication {
                 .corner_radius(egui::CornerRadius::same(16))
                 .inner_margin(egui::Margin::symmetric(16, 12))
                 .show(ui, |ui| {
+                    ui.collapsing("Room tools", |ui| {
+                        ui.label(egui::RichText::new("Invite user").color(TEXT_MUTED));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.invite_user_id_input)
+                                .hint_text("@user:server"),
+                        );
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.invite_reason_input)
+                                .hint_text("Reason, optional"),
+                        );
+                        if ui.button("Invite").clicked() {
+                            self.invite_user_to_selected_room();
+                        }
+                        if let Some(policy_profile) = self.selected_room_policy_profile() {
+                            if policy_profile.visibility == "private" && !policy_profile.can_invite {
+                                ui.label(
+                                    egui::RichText::new("Private room policy: only owner may invite.")
+                                        .size(10.0)
+                                        .color(TEXT_MUTED),
+                                );
+                            }
+                        }
+                        ui.separator();
+
+                        ui.label(egui::RichText::new("Send receipt").color(TEXT_MUTED));
+                        ui.horizontal(|ui| {
+                            egui::ComboBox::from_id_salt("receipt_type")
+                                .selected_text(
+                                    Self::receipt_type_options()
+                                        .get(self.receipt_type_index)
+                                        .copied()
+                                        .unwrap_or("m.read"),
+                                )
+                                .show_ui(ui, |ui| {
+                                    for (index, receipt_type) in
+                                        Self::receipt_type_options().iter().enumerate()
+                                    {
+                                        ui.selectable_value(
+                                            &mut self.receipt_type_index,
+                                            index,
+                                            *receipt_type,
+                                        );
+                                    }
+                                });
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.receipt_event_id_input)
+                                    .hint_text("$event_id (optional: latest loaded)"),
+                            );
+                        });
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.receipt_thread_id_input)
+                                .hint_text("thread_id optional"),
+                        );
+                        if ui.button("Send receipt").clicked() {
+                            self.send_receipt_for_selected_room();
+                        }
+                        ui.separator();
+
+                        ui.label(egui::RichText::new("Fetch event by id").color(TEXT_MUTED));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.event_lookup_input)
+                                .hint_text("$event_id"),
+                        );
+                        if ui.button("Fetch event").clicked() {
+                            self.lookup_room_event();
+                        }
+                        if let Some(event) = self.looked_up_event.as_ref() {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{} by {}",
+                                    event.event_type, event.sender
+                                ))
+                                .color(ACCENT_STRONG),
+                            );
+                            ui.monospace(pretty_json(&event.content));
+                        }
+                        ui.separator();
+
+                        ui.label(egui::RichText::new("State by type/key").color(TEXT_MUTED));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.state_event_type_input)
+                                .hint_text("m.room.name"),
+                        );
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.state_key_input)
+                                .hint_text("state key (empty allowed for read)"),
+                        );
+                        ui.horizontal(|ui| {
+                            if ui.button("Get content").clicked() {
+                                self.lookup_state_with_key(false);
+                            }
+                            if ui.button("Get full event").clicked() {
+                                self.lookup_state_with_key(true);
+                            }
+                        });
+                        ui.add(
+                            egui::TextEdit::multiline(&mut self.state_content_input)
+                                .hint_text("{\"name\":\"Room\"}")
+                                .desired_rows(4),
+                        );
+                        if ui.button("Set state with key").clicked() {
+                            self.set_state_with_key();
+                        }
+                        if let Some(policy_profile) = self.selected_room_policy_profile() {
+                            if policy_profile.preset == "private_chat" && !policy_profile.can_rename_name
+                            {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "private_chat policy: only owner may rename room name.",
+                                    )
+                                    .size(10.0)
+                                    .color(TEXT_MUTED),
+                                );
+                            }
+                        }
+                        if let Some(state_value) = self.looked_up_state_value.as_ref() {
+                            ui.label(egui::RichText::new("Fetched state value").color(ACCENT_STRONG));
+                            ui.monospace(pretty_json(state_value));
+                        }
+                    });
+
+                    ui.separator();
             ui.collapsing("Room state", |ui| match &self.room_state_status {
                 LoadState::Idle => {
                     ui.label(egui::RichText::new("No room selected.").color(TEXT_MUTED));
@@ -1376,6 +2221,112 @@ impl ClientDesktopApplication {
                     }
                 }
             });
+                });
+
+            ui.add_space(8.0);
+            egui::Frame::default()
+                .fill(PANEL_SOFT)
+                .corner_radius(egui::CornerRadius::same(12))
+                .inner_margin(egui::Margin::symmetric(12, 10))
+                .show(ui, |ui| {
+                ui.label(egui::RichText::new("Joined members").color(TEXT_MUTED).strong());
+                    match &self.room_members_status {
+                        LoadState::Idle => {
+                            ui.label(egui::RichText::new("Use Members button to load.").color(TEXT_MUTED));
+                        }
+                        LoadState::Loading => {
+                            ui.label(egui::RichText::new("Loading members...").color(TEXT_MUTED));
+                        }
+                        LoadState::Error(error) => {
+                            ui.colored_label(DANGER, format!("Failed to load members: {error}"));
+                        }
+                        LoadState::Loaded => {
+                            if self.room_members.is_empty() {
+                                ui.label(egui::RichText::new("No joined members returned.").color(TEXT_MUTED));
+                            } else {
+                                egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
+                                    for member in &self.room_members {
+                                        let display_name = member
+                                            .display_name
+                                            .clone()
+                                            .unwrap_or_else(|| member.user_id.clone());
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new(display_name).color(ACCENT_STRONG));
+                                            ui.label(egui::RichText::new(&member.user_id).color(TEXT_MUTED));
+                                            if let Some(avatar_url) = member.avatar_url.as_ref() {
+                                                ui.label(egui::RichText::new(avatar_url).color(TEXT_MUTED));
+                                            }
+                                        });
+                                    }
+                                });
+                            }
+                        }
+                    }
+                });
+
+            ui.add_space(8.0);
+            egui::Frame::default()
+                .fill(PANEL_SOFT)
+                .corner_radius(egui::CornerRadius::same(12))
+                .inner_margin(egui::Margin::symmetric(12, 10))
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new("Member events").color(TEXT_MUTED).strong());
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.room_membership_filter_input)
+                                .hint_text("membership filter: join/invite/leave/ban/knock"),
+                        );
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.room_not_membership_filter_input)
+                                .hint_text("not_membership"),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.room_members_at_token_input)
+                                .hint_text("at token"),
+                        );
+                        if ui.button("Load member events").clicked() {
+                            self.load_selected_room_members_with_filter();
+                        }
+                    });
+                    match &self.room_members_timeline_status {
+                        LoadState::Idle => {
+                            ui.label(
+                                egui::RichText::new("Load `/rooms/{roomId}/members` with filters.")
+                                    .color(TEXT_MUTED),
+                            );
+                        }
+                        LoadState::Loading => {
+                            ui.label(egui::RichText::new("Loading member events...").color(TEXT_MUTED));
+                        }
+                        LoadState::Error(error) => {
+                            ui.colored_label(DANGER, format!("Failed to load member events: {error}"));
+                        }
+                        LoadState::Loaded => {
+                            if self.room_members_timeline_events.is_empty() {
+                                ui.label(
+                                    egui::RichText::new("No member events returned.").color(TEXT_MUTED),
+                                );
+                            } else {
+                                egui::ScrollArea::vertical().max_height(150.0).show(ui, |ui| {
+                                    for event in &self.room_members_timeline_events {
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "{} [{}]",
+                                                event.event_type, event.state_key
+                                            ))
+                                            .color(ACCENT_STRONG)
+                                            .strong(),
+                                        );
+                                        ui.label(egui::RichText::new(&event.sender).color(TEXT_MUTED));
+                                        ui.monospace(pretty_json(&event.content));
+                                        ui.separator();
+                                    }
+                                });
+                            }
+                        }
+                    }
                 });
 
             ui.add_space(12.0);
@@ -1450,6 +2401,10 @@ impl ClientDesktopApplication {
         &["private", "public"]
     }
 
+    fn receipt_type_options() -> &'static [&'static str] {
+        &["m.read", "m.read.private", "m.fully_read"]
+    }
+
     fn available_presets_for_visibility(visibility: &str) -> &'static [&'static str] {
         match visibility {
             "public" => &["public_chat"],
@@ -1484,6 +2439,8 @@ impl ClientDesktopApplication {
 
 impl eframe::App for ClientDesktopApplication {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+        self.log_status_message_if_changed();
+        self.run_periodic_sync_if_due();
         apply_visual_theme(context);
 
         match self.screen {
@@ -1557,6 +2514,22 @@ fn render_timeline_event(
     event: &RoomTimelineEventView,
     whoami: Option<&WhoAmIView>,
 ) {
+    if event.event_type != "m.room.message" {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                egui::RichText::new(format!(
+                    "[event] {} {} {}",
+                    event.event_type,
+                    compact_text(&event.sender, 42),
+                    message_body(event)
+                ))
+                .size(11.0)
+                .color(TEXT_MUTED),
+            );
+        });
+        return;
+    }
+
     let sent_by_me = whoami
         .map(|view| view.user_id == event.sender)
         .unwrap_or(false);
@@ -1624,6 +2597,130 @@ fn extract_room_name_and_topic(events: &[RoomStateEventView]) -> (Option<String>
     (room_name, room_topic)
 }
 
+fn derive_room_policy_profile(
+    events: &[RoomStateEventView],
+    whoami_user_id: Option<&str>,
+) -> RoomPolicyProfile {
+    let mut owner_user_id: Option<String> = None;
+    let mut visibility = "private".to_owned();
+    let mut is_direct = false;
+    let mut users_default_level = 0_i64;
+    let mut invite_required_level = 0_i64;
+    let mut room_name_required_level = 50_i64;
+    let mut user_levels: BTreeMap<String, i64> = BTreeMap::new();
+
+    for event in events {
+        if event.event_type == "m.room.create" && event.state_key.is_empty() {
+            owner_user_id = event
+                .content
+                .get("creator")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+        } else if event.event_type == "m.room.join_rules" && event.state_key.is_empty() {
+            visibility = if event
+                .content
+                .get("join_rule")
+                .and_then(serde_json::Value::as_str)
+                == Some("public")
+            {
+                "public".to_owned()
+            } else {
+                "private".to_owned()
+            };
+        } else if event.event_type == "m.room.power_levels" && event.state_key.is_empty() {
+            users_default_level = event
+                .content
+                .get("users_default")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0);
+            invite_required_level = event
+                .content
+                .get("invite")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0);
+            let state_default_level = event
+                .content
+                .get("state_default")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(50);
+
+            if let Some(events_map) = event.content.get("events").and_then(serde_json::Value::as_object)
+            {
+                room_name_required_level = events_map
+                    .get("m.room.name")
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(state_default_level);
+            } else {
+                room_name_required_level = state_default_level;
+            }
+
+            if let Some(users_map) = event.content.get("users").and_then(serde_json::Value::as_object) {
+                for (user_id, level) in users_map {
+                    if let Some(level) = level.as_i64() {
+                        user_levels.insert(user_id.clone(), level);
+                    }
+                }
+            }
+        } else if event.event_type == "m.room.member"
+            && whoami_user_id.is_some()
+            && event.state_key == whoami_user_id.unwrap_or_default()
+        {
+            is_direct = event
+                .content
+                .get("is_direct")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+        }
+    }
+
+    let mut preset = if visibility == "public" {
+        "public_chat".to_owned()
+    } else {
+        "private_chat".to_owned()
+    };
+
+    if visibility == "private"
+        && owner_user_id.is_some()
+        && user_levels
+            .iter()
+            .any(|(user_id, level)| Some(user_id.as_str()) != owner_user_id.as_deref() && *level >= 100)
+    {
+        preset = "trusted_private_chat".to_owned();
+    }
+
+    let current_user_level = whoami_user_id
+        .and_then(|user_id| user_levels.get(user_id).copied())
+        .unwrap_or(users_default_level);
+    let mut can_invite = current_user_level >= invite_required_level;
+    let mut can_rename_name = current_user_level >= room_name_required_level;
+
+    if visibility == "private"
+        && let (Some(owner_user_id), Some(whoami_user_id)) =
+            (owner_user_id.as_deref(), whoami_user_id)
+        && owner_user_id != whoami_user_id
+    {
+        can_invite = false;
+    }
+
+    if preset == "private_chat" {
+        can_rename_name = matches!(
+            (owner_user_id.as_deref(), whoami_user_id),
+            (Some(owner_user_id), Some(whoami_user_id)) if owner_user_id == whoami_user_id
+        );
+    } else if preset == "trusted_private_chat" {
+        can_rename_name = whoami_user_id.is_some();
+    }
+
+    RoomPolicyProfile {
+        visibility,
+        preset,
+        is_direct,
+        owner_user_id,
+        can_invite,
+        can_rename_name,
+    }
+}
+
 fn pretty_json(value: &serde_json::Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
 }
@@ -1673,4 +2770,52 @@ fn compact_text(value: &str, maximum_characters: usize) -> String {
         .collect::<String>();
     shortened.push_str("...");
     shortened
+}
+
+fn append_status_message_to_log_file(status_message: &str) {
+    let log_file_path = resolve_client_log_file_path();
+    if let Some(parent_directory) = log_file_path.parent() {
+        let _ = fs::create_dir_all(parent_directory);
+    }
+
+    if let Ok(mut file) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_file_path)
+    {
+        let unix_timestamp_seconds = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(file, "[{unix_timestamp_seconds}] UI status: {status_message}");
+    }
+}
+
+fn resolve_client_log_file_path() -> PathBuf {
+    if cfg!(target_os = "windows") {
+        if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+            return Path::new(&local_app_data)
+                .join("GridstackClient")
+                .join("logs")
+                .join("client.log");
+        }
+
+        if let Ok(user_profile) = std::env::var("USERPROFILE") {
+            return Path::new(&user_profile)
+                .join("AppData")
+                .join("Local")
+                .join("GridstackClient")
+                .join("logs")
+                .join("client.log");
+        }
+    }
+
+    if let Ok(current_directory) = std::env::current_dir() {
+        return current_directory
+            .join("generated")
+            .join("logs")
+            .join("client-app.log");
+    }
+
+    PathBuf::from("client.log")
 }

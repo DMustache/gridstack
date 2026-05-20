@@ -14,14 +14,15 @@ use crate::{
         events::{entities::SupportedRoomVersion, service::EventsService},
         rooms::{
             entities::{
-                CreateRoomCommand, CreatedRoom, GetRoomMembersCommand, GetRoomMessagesCommand,
-                InviteUserCommand, InvitedUser, JoinRoomCommand, JoinedMembers, JoinedRoom,
-                JoinedRooms, LeaveRoomCommand, LeftRoom, RoomMembersChunk, RoomMembershipFilter,
+                CreateRoomCommand, CreatedRoom, GetPublicRoomsCommand, GetRoomMembersCommand,
+                GetRoomMessagesCommand, InviteUserCommand, InvitedUser, JoinRoomCommand,
+                JoinedMembers, JoinedRoom, JoinedRooms, LeaveRoomCommand, LeftRoom,
+                PublicRoomsChunk, PublicRoomsPage, RoomMembersChunk, RoomMembershipFilter,
                 RoomMessagesPage, RoomStateEvent, RoomTimelineEvent, SendReceiptCommand,
                 SetReadMarkersCommand,
             },
             errors::RoomsApplicationError,
-            persistence::RoomRepository,
+            persistence::{PublicRoomRosterEntry, RoomRepository},
             service::{
                 create_room::CreateRoomUseCase, get_joined_members::GetJoinedMembersUseCase,
                 get_room_event::GetRoomEventUseCase, get_room_members::GetRoomMembersUseCase,
@@ -113,6 +114,66 @@ impl RoomsService {
             .map_err(|_| RoomsApplicationError::Internal)?;
 
         Ok(JoinedRooms { room_ids })
+    }
+
+    pub fn get_public_rooms(
+        &self,
+        command: GetPublicRoomsCommand,
+    ) -> Result<PublicRoomsPage, RoomsApplicationError> {
+        if let Some(server) = command.server.as_deref() {
+            if server.trim().is_empty() || server != self.server_name.as_str() {
+                return Err(RoomsApplicationError::InvalidParameter);
+            }
+        }
+
+        let since_offset = parse_public_rooms_offset(command.since.as_deref())?;
+
+        let total_room_count = self
+            .room_repository
+            .fetch_public_room_count()
+            .map_err(|_| RoomsApplicationError::Internal)?;
+
+        let offset =
+            i64::try_from(since_offset).map_err(|_| RoomsApplicationError::InvalidParameter)?;
+        let limit =
+            i64::try_from(command.limit).map_err(|_| RoomsApplicationError::InvalidParameter)?;
+
+        let public_rooms = self
+            .room_repository
+            .fetch_public_room_roster_page(offset, limit)
+            .map_err(|_| RoomsApplicationError::Internal)?;
+
+        let mut chunk = Vec::with_capacity(public_rooms.len());
+        for public_room in public_rooms {
+            let state_events = self
+                .room_repository
+                .fetch_room_state_events(&public_room.room_id)
+                .map_err(|_| RoomsApplicationError::Internal)?;
+
+            chunk.push(map_public_room_chunk(public_room, state_events));
+        }
+
+        let total_room_count_usize = usize::try_from(total_room_count).ok();
+        let next_offset = since_offset.saturating_add(chunk.len());
+        let next_batch = if command.limit > 0
+            && total_room_count_usize.is_some_and(|value| next_offset < value)
+        {
+            Some(next_offset.to_string())
+        } else {
+            None
+        };
+        let prev_batch = if command.limit > 0 && since_offset > 0 {
+            Some(since_offset.saturating_sub(command.limit).to_string())
+        } else {
+            None
+        };
+
+        Ok(PublicRoomsPage {
+            chunk,
+            next_batch,
+            prev_batch,
+            total_room_count_estimate: Some(total_room_count),
+        })
     }
 
     pub fn get_joined_members(
@@ -286,6 +347,66 @@ fn history_visibility_from_timeline_event(event: &RoomTimelineEvent) -> Option<S
     event
         .content
         .get("history_visibility")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
+
+fn parse_public_rooms_offset(value: Option<&str>) -> Result<usize, RoomsApplicationError> {
+    let token = match value {
+        Some(value) => value.trim(),
+        None => return Ok(0),
+    };
+    if token.is_empty() {
+        return Err(RoomsApplicationError::InvalidParameter);
+    }
+
+    token
+        .parse::<usize>()
+        .map_err(|_| RoomsApplicationError::InvalidParameter)
+}
+
+fn map_public_room_chunk(
+    public_room: PublicRoomRosterEntry,
+    state_events: Vec<RoomStateEvent>,
+) -> PublicRoomsChunk {
+    let create_content = room_state_content(&state_events, "m.room.create");
+    let join_rules_content = room_state_content(&state_events, "m.room.join_rules");
+    let history_visibility_content = room_state_content(&state_events, "m.room.history_visibility");
+    let guest_access_content = room_state_content(&state_events, "m.room.guest_access");
+    let canonical_alias_content = room_state_content(&state_events, "m.room.canonical_alias");
+    let name_content = room_state_content(&state_events, "m.room.name");
+    let topic_content = room_state_content(&state_events, "m.room.topic");
+    let avatar_content = room_state_content(&state_events, "m.room.avatar");
+
+    PublicRoomsChunk {
+        room_id: public_room.room_id,
+        num_joined_members: public_room.num_joined_members,
+        world_readable: json_string_field(history_visibility_content, "history_visibility")
+            .is_some_and(|value| value == "world_readable"),
+        guest_can_join: json_string_field(guest_access_content, "guest_access")
+            .is_some_and(|value| value == "can_join"),
+        canonical_alias: json_string_field(canonical_alias_content, "alias"),
+        name: json_string_field(name_content, "name").or(public_room.fallback_name),
+        topic: json_string_field(topic_content, "topic").or(public_room.fallback_topic),
+        avatar_url: json_string_field(avatar_content, "url"),
+        join_rule: json_string_field(join_rules_content, "join_rule"),
+        room_type: json_string_field(create_content, "type"),
+    }
+}
+
+fn room_state_content<'a>(
+    state_events: &'a [RoomStateEvent],
+    event_type: &str,
+) -> Option<&'a serde_json::Value> {
+    state_events
+        .iter()
+        .find(|event| event.event_type == event_type && event.state_key.is_empty())
+        .map(|event| &event.content)
+}
+
+fn json_string_field(value: Option<&serde_json::Value>, field: &str) -> Option<String> {
+    value
+        .and_then(|value| value.get(field))
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
 }
