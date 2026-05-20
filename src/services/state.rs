@@ -19,6 +19,10 @@ use crate::{
         },
         errors::set_rate_limit_retry_after_ms,
         events::service::EventsService,
+        identity::{
+            persistence::IdentityPersistence,
+            service::{InvitationStorageService, KeyManagementService},
+        },
         repositories::{SessionRepository, UserRepository},
         rooms::{
             persistence::{RoomPersistence, RoomRepository},
@@ -38,6 +42,9 @@ pub struct ApplicationState {
     pub authorization_service: Arc<AuthorizationService>,
     pub rooms_service: Arc<RoomsService>,
     pub syncronization_service: Arc<SyncronizationService>,
+    pub identity_key_management_service: Arc<KeyManagementService<IdentityPersistence>>,
+    pub identity_invitation_storage_service:
+        Arc<InvitationStorageService<IdentityPersistence, IdentityPersistence>>,
     pub session_repository: Arc<dyn SessionRepository>,
     pub server_name: ServerName,
     pub allow_registration: bool,
@@ -105,6 +112,19 @@ impl ApplicationState {
             filter_repository,
             Arc::clone(&authorization_service),
         ));
+        let identity_persistence = IdentityPersistence::new(
+            &application_configuration.database.url,
+            &application_configuration.identity,
+        );
+        if let Err(error) = identity_persistence.ensure_long_term_key_material() {
+            panic!("failed to initialize identity long-term key material: {error}");
+        }
+        let identity_key_management_service =
+            Arc::new(KeyManagementService::new(identity_persistence.clone()));
+        let identity_invitation_storage_service = Arc::new(InvitationStorageService::new(
+            identity_persistence.clone(),
+            identity_persistence,
+        ));
         let rate_limiter = Arc::new(RateLimiterState::new(Duration::from_mins(1), 120));
         info!("application state initialized");
 
@@ -112,6 +132,8 @@ impl ApplicationState {
             authorization_service,
             rooms_service,
             syncronization_service,
+            identity_key_management_service,
+            identity_invitation_storage_service,
             session_repository,
             server_name,
             allow_registration: application_configuration.authenification.allow_registration,

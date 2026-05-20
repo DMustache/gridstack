@@ -10,6 +10,8 @@ pub struct ApplicationConfiguration {
     pub server: ServerConfiguration,
     pub database: DatabaseConfiguration,
     pub authenification: AuthenticationConfiguration,
+    #[serde(default)]
+    pub identity: IdentityConfiguration,
     pub rate_limit: RateLimitConfiguration,
 }
 
@@ -59,6 +61,35 @@ pub struct AppserviceConfiguration {
 #[derive(Clone, Debug, Deserialize)]
 pub struct RateLimitConfiguration {
     pub retry_after_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct IdentityConfiguration {
+    #[serde(default = "default_long_term_key_id")]
+    pub long_term_key_id: String,
+    pub long_term_public_key: Option<String>,
+    pub long_term_private_key: Option<String>,
+    #[serde(default = "default_ephemeral_key_validity_seconds")]
+    pub ephemeral_key_validity_seconds: u64,
+}
+
+impl Default for IdentityConfiguration {
+    fn default() -> Self {
+        Self {
+            long_term_key_id: default_long_term_key_id(),
+            long_term_public_key: None,
+            long_term_private_key: None,
+            ephemeral_key_validity_seconds: default_ephemeral_key_validity_seconds(),
+        }
+    }
+}
+
+fn default_long_term_key_id() -> String {
+    "ed25519:0".to_owned()
+}
+
+const fn default_ephemeral_key_validity_seconds() -> u64 {
+    60 * 60 * 24 * 7
 }
 
 impl ApplicationConfiguration {
