@@ -151,7 +151,7 @@ impl ClientDesktopApplication {
     }
 
     fn normalized_server_url(&self) -> String {
-        self.server_url_input.trim().trim_end_matches('/').to_owned()
+        normalize_server_url_input(&self.server_url_input).unwrap_or_default()
     }
 
     fn selected_server(&self) -> Option<&str> {
@@ -304,7 +304,13 @@ impl ClientDesktopApplication {
     }
 
     fn add_server(&mut self) {
-        let server_url = self.new_server_url_input.trim().trim_end_matches('/').to_owned();
+        let server_url = match normalize_server_url_input(&self.new_server_url_input) {
+            Ok(url) => url,
+            Err(message) => {
+                self.status_message = message;
+                return;
+            }
+        };
         if server_url.is_empty() {
             self.status_message = "Server URL required".to_owned();
             return;
@@ -829,7 +835,7 @@ impl ClientDesktopApplication {
                             ui.label("Add server");
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.new_server_url_input)
-                                    .hint_text("http://127.0.0.1:8080"),
+                                    .hint_text("100.x.y.z:3000 or http://100.x.y.z:3000"),
                             );
                             ui.horizontal(|ui| {
                                 if ui.button("Save").clicked() {
@@ -1541,6 +1547,31 @@ fn extract_room_name_and_topic(events: &[RoomStateEventView]) -> (Option<String>
 
 fn pretty_json(value: &serde_json::Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+}
+
+fn normalize_server_url_input(input: &str) -> Result<String, String> {
+    let trimmed = input.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Err("Server URL required".to_owned());
+    }
+
+    let with_scheme = if trimmed.contains("://") {
+        trimmed.to_owned()
+    } else {
+        format!("http://{trimmed}")
+    };
+
+    match with_scheme.parse::<http::Uri>() {
+        Ok(uri) => {
+            if uri.scheme_str().is_none() || uri.authority().is_none() {
+                return Err(
+                    "Invalid server URL. Use format like http://100.x.y.z:3000".to_owned(),
+                );
+            }
+            Ok(with_scheme)
+        }
+        Err(_) => Err("Invalid server URL. Use format like http://100.x.y.z:3000".to_owned()),
+    }
 }
 
 fn message_body(event: &RoomTimelineEventView) -> String {
