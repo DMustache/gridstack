@@ -585,13 +585,18 @@ pub async fn send_room_message_event(
     Extension(access_session): Extension<AccessSessionStorageUnit>,
     Json(content): Json<serde_json::Value>,
 ) -> SendRoomEventResponse {
+    let sender = access_session
+        .user_identifier()
+        .as_existing_user_identifier()
+        .as_str()
+        .to_owned();
     match application_state
         .rooms_service
         .send_room_message_event(
             access_session.user_identifier(),
-            room_id,
-            event_type,
-            transaction_id,
+            room_id.clone(),
+            event_type.clone(),
+            transaction_id.clone(),
             content,
         )
         .map(|event_id| SendRoomEventView { event_id })
@@ -599,9 +604,22 @@ pub async fn send_room_message_event(
         Ok(view) => SendRoomEventResponse::Ok(Json(view)),
         Err(error_kind) => {
             if matches!(error_kind, RoomsApplicationError::Internal) {
-                error!("send room event failed with internal error");
+                error!(
+                    room_id = %room_id,
+                    event_type = %event_type,
+                    transaction_id = %transaction_id,
+                    sender = %sender,
+                    "send room event failed with internal error"
+                );
             } else {
-                info!(error = %error_kind, "send room event rejected");
+                info!(
+                    room_id = %room_id,
+                    event_type = %event_type,
+                    transaction_id = %transaction_id,
+                    sender = %sender,
+                    error = %error_kind,
+                    "send room event rejected"
+                );
             }
             SendRoomEventResponse::from_mapped_error(error_kind)
         }
