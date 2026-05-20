@@ -4,9 +4,7 @@ use axum_extra::routing::TypedPath;
 use crate::services::{
     identity::{
         contracts::{StoreInviteRequest, StoreInviteResponse, ThirdPartyInvitePublicKey},
-        endpoints::{
-            IdentityV2PublicKeyEphemeralIsValidPath, IdentityV2PublicKeyIsValidPath,
-        },
+        endpoints::{IdentityV2PublicKeyEphemeralIsValidPath, IdentityV2PublicKeyIsValidPath},
         entities::{
             MatrixUserIdentifier, RoomIdentifier, ThirdPartyIdentifierAddress,
             ThirdPartyIdentifierMedium,
