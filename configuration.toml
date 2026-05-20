@@ -25,3 +25,25 @@ password_pepper = "45590a614fff689504f123c3add6ad36"
 
 [rate_limit]
 retry_after_ms = 2000
+
+[identity]
+# Primary long-term key material for identity endpoints.
+# If either public/private key is missing, bootstrap falls back to loading from DB
+# and generates once only when DB has no long-term key yet.
+# Recommended generation (URL-safe unpadded base64, 32 bytes entropy each):
+#   ID_PUBLIC_KEY="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
+#   ID_PRIVATE_KEY="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
+# Then set:
+#   long_term_public_key = "$ID_PUBLIC_KEY"
+#   long_term_private_key = "$ID_PRIVATE_KEY"
+#
+# Operational guidance:
+# - Generate once and keep stable across restarts/deployments.
+# - Store in secret management, not in git.
+# - Rotate intentionally (do not auto-regenerate on startup).
+long_term_key_id = "ed25519:0"
+long_term_public_key = "VXuGitF39UH5iRfvbIknlvlAVKgD1BsLDMvBf0pmp7c"
+long_term_private_key = "dGhpc19pc19hX3BsYWNlaG9sZGVyX2tleV9mb3JfZGV2X29ubHk"
+
+# Ephemeral invite key validity window in seconds (default: 7 days).
+ephemeral_key_validity_seconds = 604800

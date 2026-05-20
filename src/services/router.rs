@@ -3,12 +3,14 @@ use tower_http::trace::TraceLayer;
 use tracing::info;
 
 use crate::services::{
-    authorization, rooms, shared::MatrixErrorResponse, state::ApplicationState, syncronization,
+    authorization, identity, rooms, shared::MatrixErrorResponse, state::ApplicationState,
+    syncronization,
 };
 
 pub fn build_router(application_state: ApplicationState) -> Router {
     Router::new()
         .merge(authorization::routes::routes(&application_state))
+        .merge(identity::routes::routes(&application_state))
         .merge(rooms::routes::routes(&application_state))
         .merge(syncronization::routes::routes(&application_state))
         .layer(TraceLayer::new_for_http())

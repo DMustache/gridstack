@@ -9,6 +9,32 @@ diesel::table! {
 }
 
 diesel::table! {
+    identity_signing_keys (id) {
+        id -> Uuid,
+        usage -> Varchar,
+        key_id -> Nullable<Varchar>,
+        public_key -> Varchar,
+        private_key -> Nullable<Varchar>,
+        expires_at -> Nullable<Timestamptz>,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    identity_third_party_invites (token) {
+        token -> Varchar,
+        medium -> Varchar,
+        address -> Varchar,
+        room_id -> Varchar,
+        sender -> Varchar,
+        display_name -> Varchar,
+        created_at -> Timestamptz,
+        expires_at -> Nullable<Timestamptz>,
+    }
+}
+
+diesel::table! {
     room_aliases (alias_localpart) {
         alias_localpart -> Varchar,
         room_id -> Varchar,
@@ -258,6 +284,8 @@ diesel::joinable!(users -> accounts (account_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     accounts,
+    identity_signing_keys,
+    identity_third_party_invites,
     room_aliases,
     room_current_state,
     room_event_auth_edges,
