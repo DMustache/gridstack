@@ -8,7 +8,8 @@ use crate::domain::{
     },
     rooms::{
         CreateRoomInfo, CreateRoomView, GetRoomMessagesQuery, GetRoomMessagesView, JoinRoomInfo,
-        JoinRoomView, LeaveRoomInfo, LeaveRoomView, RoomListItem, RoomStateEventView,
+        JoinRoomView, JoinedRoomsView, LeaveRoomInfo, LeaveRoomView, RoomListItem,
+        RoomStateEventView, SendRoomEventView,
     },
     error::ClientError,
 };
@@ -76,6 +77,15 @@ pub trait RoomsApi: Send + Sync {
         room_id: &str,
         query: &GetRoomMessagesQuery,
     ) -> Result<GetRoomMessagesView, ClientError>;
+    async fn get_joined_rooms(&self, access_token: &str) -> Result<JoinedRoomsView, ClientError>;
+    async fn send_room_message_event(
+        &self,
+        access_token: &str,
+        room_id: &str,
+        event_type: &str,
+        transaction_id: &str,
+        content: &serde_json::Value,
+    ) -> Result<SendRoomEventView, ClientError>;
 }
 
 #[async_trait]

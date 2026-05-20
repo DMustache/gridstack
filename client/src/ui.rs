@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use eframe::egui;
 use tokio::runtime::Runtime;
@@ -99,6 +100,7 @@ pub struct ClientDesktopApplication {
     room_messages_status: LoadState,
     next_messages_from_token: Option<String>,
     composer_input: String,
+    next_transaction_counter: u64,
 }
 
 impl ClientDesktopApplication {
@@ -144,6 +146,7 @@ impl ClientDesktopApplication {
             room_messages_status: LoadState::Idle,
             next_messages_from_token: None,
             composer_input: String::new(),
+            next_transaction_counter: 0,
         };
 
         application.reload_servers();
@@ -418,6 +421,21 @@ impl ClientDesktopApplication {
 
     fn load_rooms(&mut self) {
         let rooms_service = self.build_rooms_service();
+        match self.runtime.block_on(rooms_service.get_joined_rooms()) {
+            Ok(joined_rooms) => {
+                for room_id in joined_rooms.joined_rooms {
+                    let _ = self
+                        .runtime
+                        .block_on(rooms_service.upsert_cached_room(&room_id, None, None));
+                }
+            }
+            Err(error) => {
+                self.status_message = format!(
+                    "Failed to refresh joined rooms from server. Showing cached rooms: {error}"
+                );
+            }
+        }
+
         match self.runtime.block_on(rooms_service.list_cached_rooms()) {
             Ok(items) => {
                 let previously_selected_room_id =
@@ -755,6 +773,54 @@ impl ClientDesktopApplication {
             return;
         };
         self.load_selected_room_messages(Some(token), false);
+    }
+
+    fn send_message(&mut self) {
+        let Some(room_id) = self.selected_room().map(|room| room.room_id.clone()) else {
+            self.status_message = "Select a room before sending a message".to_owned();
+            return;
+        };
+
+        let message_body = self.composer_input.trim().to_owned();
+        if message_body.is_empty() {
+            self.status_message = "Message text is required".to_owned();
+            return;
+        }
+
+        let transaction_id = self.build_transaction_id();
+        let content = serde_json::json!({
+            "msgtype": "m.text",
+            "body": message_body,
+        });
+        let rooms_service = self.build_rooms_service();
+
+        match self.runtime.block_on(rooms_service.send_room_message_event(
+            &room_id,
+            "m.room.message",
+            &transaction_id,
+            &content,
+        )) {
+            Ok(response) => {
+                self.status_message = format!("Message sent ({})", response.event_id);
+                self.composer_input.clear();
+                self.load_selected_room_messages(None, true);
+            }
+            Err(error) => {
+                self.status_message = format!("Send message failed: {error}");
+            }
+        }
+    }
+
+    fn build_transaction_id(&mut self) -> String {
+        self.next_transaction_counter = self.next_transaction_counter.saturating_add(1);
+        let timestamp_millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or(0);
+        format!(
+            "client-{}-{}",
+            timestamp_millis, self.next_transaction_counter
+        )
     }
 
     fn render_welcome(&mut self, ui: &mut egui::Ui) {
@@ -1348,21 +1414,34 @@ impl ClientDesktopApplication {
                 .fill(PANEL)
                 .inner_margin(egui::Margin::symmetric(16, 12))
                 .show(ui, |ui| {
+                    let can_send = self.selected_room().is_some() && !self.composer_input.trim().is_empty();
                     ui.horizontal(|ui| {
-                        ui.add_enabled(
-                            false,
+                        ui.add(
                             egui::TextEdit::singleline(&mut self.composer_input)
-                                .hint_text("Sending is disabled for this server"),
+                                .hint_text("Write a message"),
                         );
-                        ui.add_enabled(false, egui::Button::new("Send"));
+                        if ui
+                            .add_enabled(can_send, egui::Button::new("Send"))
+                            .clicked()
+                        {
+                            self.send_message();
+                        }
                     });
-                    ui.label(
-                        egui::RichText::new(
-                            "Send message is unavailable: server has no implemented send-event endpoint.",
-                        )
-                        .size(11.0)
-                        .color(TEXT_MUTED),
-                    );
+                    if self.selected_room().is_none() {
+                        ui.label(
+                            egui::RichText::new("Select a room to enable message sending.")
+                                .size(11.0)
+                                .color(TEXT_MUTED),
+                        );
+                    } else {
+                        ui.label(
+                            egui::RichText::new(
+                                "Uses `PUT /rooms/{roomId}/send/m.room.message/{txnId}`.",
+                            )
+                            .size(11.0)
+                            .color(TEXT_MUTED),
+                        );
+                    }
                 });
         });
     }

@@ -30,6 +30,11 @@ pub struct CreateRoomView {
     pub room_id: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct JoinedRoomsView {
+    pub joined_rooms: Vec<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct JoinRoomInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -113,6 +118,11 @@ pub struct GetRoomMessagesView {
     #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub state: Vec<RoomTimelineEventView>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SendRoomEventView {
+    pub event_id: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
