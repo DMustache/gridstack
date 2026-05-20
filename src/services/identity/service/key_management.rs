@@ -45,7 +45,7 @@ where
         self.signing_key_repository
             .find_long_term_key(key_id)?
             .map(|key| key.public_key)
-            .ok_or(IdentityServiceError::NotFound)
+            .ok_or(IdentityServiceError::PublicKeyNotFound)
     }
 
     pub fn is_long_term_public_key_valid(

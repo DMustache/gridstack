@@ -1,8 +1,12 @@
 use axum::{Json, extract::State};
+use axum_extra::routing::TypedPath;
 
 use crate::services::{
     identity::{
         contracts::{StoreInviteRequest, StoreInviteResponse, ThirdPartyInvitePublicKey},
+        endpoints::{
+            IdentityV2PublicKeyEphemeralIsValidPath, IdentityV2PublicKeyIsValidPath,
+        },
         entities::{
             MatrixUserIdentifier, RoomIdentifier, ThirdPartyIdentifierAddress,
             ThirdPartyIdentifierMedium,
@@ -40,14 +44,16 @@ pub async fn store_invite(
             let key_validity_url = match public_key.usage {
                 crate::services::identity::entities::IdentitySigningKeyUsage::LongTerm => {
                     format!(
-                        "https://{}/_matrix/identity/v2/pubkey/isvalid",
-                        application_state.server_name
+                        "https://{}{}",
+                        application_state.server_name,
+                        IdentityV2PublicKeyIsValidPath.to_uri().to_string()
                     )
                 }
                 crate::services::identity::entities::IdentitySigningKeyUsage::EphemeralInvite => {
                     format!(
-                        "https://{}/_matrix/identity/v2/pubkey/ephemeral/isvalid",
-                        application_state.server_name
+                        "https://{}{}",
+                        application_state.server_name,
+                        IdentityV2PublicKeyEphemeralIsValidPath.to_uri().to_string()
                     )
                 }
             };
