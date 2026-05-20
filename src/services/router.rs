@@ -4,7 +4,7 @@ use tracing::info;
 
 use crate::services::{
     authorization, identity, rooms, shared::MatrixErrorResponse, state::ApplicationState,
-    syncronization,
+    synchronization,
 };
 
 pub fn build_router(application_state: ApplicationState) -> Router {
@@ -12,7 +12,7 @@ pub fn build_router(application_state: ApplicationState) -> Router {
         .merge(authorization::routes::routes(&application_state))
         .merge(identity::routes::routes(&application_state))
         .merge(rooms::routes::routes(&application_state))
-        .merge(syncronization::routes::routes(&application_state))
+        .merge(synchronization::routes::routes(&application_state))
         .layer(TraceLayer::new_for_http())
         .with_state(application_state.clone())
         .fallback(any(matrix_fallback))
