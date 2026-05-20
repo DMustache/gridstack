@@ -1,10 +1,11 @@
 use chrono::Utc;
 use diesel::{
     BoolExpressionMethods, Connection, ExpressionMethods, JoinOnDsl, NullableExpressionMethods,
-    OptionalExtension, QueryDsl, QueryableByName, RunQueryDsl, insert_into,
+    OptionalExtension, QueryDsl, RunQueryDsl,
+    dsl::{exists, select},
+    insert_into,
     pg::PgConnection,
     r2d2::{self, ConnectionManager},
-    sql_query,
 };
 use uuid::Uuid;
 
@@ -552,12 +553,6 @@ pub struct RoomPersistence {
     connection_pool: r2d2::Pool<ConnectionManager<PgConnection>>,
 }
 
-#[derive(QueryableByName)]
-struct ThreadMatchSqlRecord {
-    #[diesel(sql_type = diesel::sql_types::Bool)]
-    matches: bool,
-}
-
 impl RoomPersistence {
     #[must_use]
     pub fn new(database_url: &str) -> Self {
@@ -576,7 +571,7 @@ impl RoomRepository for RoomPersistence {
     ) -> Result<(), DomainError> {
         use schema::{
             room_aliases, room_current_state, room_event_auth_edges, room_event_prev_edges,
-            room_events, room_forward_extremities, room_idempotency_records,
+            room_event_relations, room_events, room_forward_extremities, room_idempotency_records,
             room_membership_projection, room_outbox_tasks, room_state_events, room_sync_stream,
             room_timeline_projection, rooms,
         };
@@ -757,16 +752,15 @@ impl RoomRepository for RoomPersistence {
                 if !event_relation_rows.is_empty() {
                     for (room_id, event_id, relation_type, related_event_id) in event_relation_rows
                     {
-                        sql_query(
-                            "INSERT INTO public.room_event_relations (room_id, event_id, rel_type, related_event_id)
-                             VALUES ($1, $2, $3, $4)
-                             ON CONFLICT DO NOTHING",
-                        )
-                        .bind::<diesel::sql_types::Text, _>(room_id)
-                        .bind::<diesel::sql_types::Text, _>(event_id)
-                        .bind::<diesel::sql_types::Text, _>(relation_type)
-                        .bind::<diesel::sql_types::Text, _>(related_event_id)
-                        .execute(connection)?;
+                        insert_into(room_event_relations::table)
+                            .values((
+                                room_event_relations::room_id.eq(room_id),
+                                room_event_relations::event_id.eq(event_id),
+                                room_event_relations::rel_type.eq(relation_type),
+                                room_event_relations::related_event_id.eq(related_event_id),
+                            ))
+                            .on_conflict_do_nothing()
+                            .execute(connection)?;
                     }
                 }
                 if !prev_edge_rows.is_empty() {
@@ -1062,28 +1056,36 @@ impl RoomRepository for RoomPersistence {
         event_id: &str,
         thread_id: Option<&str>,
     ) -> Result<(), DomainError> {
+        use schema::{room_events, room_receipts};
+
         let mut connection = self
             .connection_pool
             .get()
             .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
 
-        let inserted_rows = sql_query(
-            "INSERT INTO public.room_receipts (room_id, user_id, receipt_type, event_id, thread_id, receipt_ts)
-             SELECT $1, $2, $3, e.event_id, $5, (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT
-             FROM public.room_events e
-             WHERE e.room_id = $1 AND e.event_id = $4",
-        )
-        .bind::<diesel::sql_types::Text, _>(room_id)
-        .bind::<diesel::sql_types::Text, _>(user_id)
-        .bind::<diesel::sql_types::Text, _>(receipt_type)
-        .bind::<diesel::sql_types::Text, _>(event_id)
-        .bind::<diesel::sql_types::Text, _>(thread_id.unwrap_or_default())
-        .execute(&mut connection)
+        let event_exists = select(exists(
+            room_events::table
+                .filter(room_events::room_id.eq(room_id))
+                .filter(room_events::event_id.eq(event_id)),
+        ))
+        .get_result::<bool>(&mut connection)
         .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
-
-        if inserted_rows == 0 {
+        if !event_exists {
             return Err(DomainError::NotFound);
         }
+
+        insert_into(room_receipts::table)
+            .values((
+                room_receipts::room_id.eq(room_id),
+                room_receipts::user_id.eq(user_id),
+                room_receipts::receipt_type.eq(receipt_type),
+                room_receipts::event_id.eq(event_id),
+                room_receipts::thread_id.eq(thread_id.unwrap_or_default()),
+                room_receipts::receipt_ts.eq(Utc::now().timestamp_millis()),
+            ))
+            .execute(&mut connection)
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
         Ok(())
     }
 
@@ -1093,26 +1095,34 @@ impl RoomRepository for RoomPersistence {
         user_id: &str,
         event_id: &str,
     ) -> Result<(), DomainError> {
+        use schema::{room_events, room_read_markers};
+
         let mut connection = self
             .connection_pool
             .get()
             .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
 
-        let inserted_rows = sql_query(
-            "INSERT INTO public.room_read_markers (room_id, user_id, fully_read_event_id)
-             SELECT $1, $2, e.event_id
-             FROM public.room_events e
-             WHERE e.room_id = $1 AND e.event_id = $3",
-        )
-        .bind::<diesel::sql_types::Text, _>(room_id)
-        .bind::<diesel::sql_types::Text, _>(user_id)
-        .bind::<diesel::sql_types::Text, _>(event_id)
-        .execute(&mut connection)
+        let event_exists = select(exists(
+            room_events::table
+                .filter(room_events::room_id.eq(room_id))
+                .filter(room_events::event_id.eq(event_id)),
+        ))
+        .get_result::<bool>(&mut connection)
         .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
-
-        if inserted_rows == 0 {
+        if !event_exists {
             return Err(DomainError::NotFound);
         }
+
+        insert_into(room_read_markers::table)
+            .values((
+                room_read_markers::room_id.eq(room_id),
+                room_read_markers::user_id.eq(user_id),
+                room_read_markers::fully_read_event_id.eq(event_id),
+                room_read_markers::updated_at.eq(Utc::now()),
+            ))
+            .execute(&mut connection)
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
         Ok(())
     }
 
@@ -1122,40 +1132,37 @@ impl RoomRepository for RoomPersistence {
         event_id: &str,
         thread_id: &str,
     ) -> Result<bool, DomainError> {
+        use schema::room_event_relations;
+
         let mut connection = self
             .connection_pool
             .get()
             .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+        if thread_id == "main" {
+            let has_thread_relation = select(exists(
+                room_event_relations::table
+                    .filter(room_event_relations::room_id.eq(room_id))
+                    .filter(room_event_relations::event_id.eq(event_id))
+                    .filter(room_event_relations::rel_type.eq("m.thread")),
+            ))
+            .get_result::<bool>(&mut connection)
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            return Ok(!has_thread_relation);
+        }
 
-        let row = sql_query(
-            "SELECT CASE
-                WHEN $3 = 'main' THEN NOT EXISTS (
-                    SELECT 1
-                    FROM public.room_event_relations rel
-                    WHERE rel.room_id = $1
-                      AND rel.event_id = $2
-                      AND rel.rel_type = 'm.thread'
-                )
-                ELSE (
-                    $2 = $3
-                    OR EXISTS (
-                        SELECT 1
-                        FROM public.room_event_relations rel
-                        WHERE rel.room_id = $1
-                          AND rel.event_id = $2
-                          AND rel.rel_type = 'm.thread'
-                          AND rel.related_event_id = $3
-                    )
-                )
-             END AS matches",
-        )
-        .bind::<diesel::sql_types::Text, _>(room_id)
-        .bind::<diesel::sql_types::Text, _>(event_id)
-        .bind::<diesel::sql_types::Text, _>(thread_id)
-        .get_result::<ThreadMatchSqlRecord>(&mut connection)
-        .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+        if event_id == thread_id {
+            return Ok(true);
+        }
 
-        Ok(row.matches)
+        select(exists(
+            room_event_relations::table
+                .filter(room_event_relations::room_id.eq(room_id))
+                .filter(room_event_relations::event_id.eq(event_id))
+                .filter(room_event_relations::rel_type.eq("m.thread"))
+                .filter(room_event_relations::related_event_id.eq(thread_id)),
+        ))
+        .get_result::<bool>(&mut connection)
+        .map_err(|error| DomainError::InvalidRequest(error.to_string()))
     }
 
     fn fetch_room_event_id_by_transaction_id(
@@ -1783,9 +1790,10 @@ fn persist_event_batch(
     event_batch_write_contract: &EventBatchWriteContract,
 ) -> Result<(), DomainError> {
     use schema::{
-        room_current_state, room_event_auth_edges, room_event_prev_edges, room_events,
-        room_forward_extremities, room_idempotency_records, room_membership_projection,
-        room_outbox_tasks, room_state_events, room_sync_stream, room_timeline_projection,
+        room_current_state, room_event_auth_edges, room_event_prev_edges, room_event_relations,
+        room_events, room_forward_extremities, room_idempotency_records,
+        room_membership_projection, room_outbox_tasks, room_state_events, room_sync_stream,
+        room_timeline_projection,
     };
 
     let mut connection = connection_pool
@@ -1933,16 +1941,15 @@ fn persist_event_batch(
             }
             if !event_relation_rows.is_empty() {
                 for (room_id, event_id, relation_type, related_event_id) in event_relation_rows {
-                    sql_query(
-                        "INSERT INTO public.room_event_relations (room_id, event_id, rel_type, related_event_id)
-                         VALUES ($1, $2, $3, $4)
-                         ON CONFLICT DO NOTHING",
-                    )
-                    .bind::<diesel::sql_types::Text, _>(room_id)
-                    .bind::<diesel::sql_types::Text, _>(event_id)
-                    .bind::<diesel::sql_types::Text, _>(relation_type)
-                    .bind::<diesel::sql_types::Text, _>(related_event_id)
-                    .execute(connection)?;
+                    insert_into(room_event_relations::table)
+                        .values((
+                            room_event_relations::room_id.eq(room_id),
+                            room_event_relations::event_id.eq(event_id),
+                            room_event_relations::rel_type.eq(relation_type),
+                            room_event_relations::related_event_id.eq(related_event_id),
+                        ))
+                        .on_conflict_do_nothing()
+                        .execute(connection)?;
                 }
             }
             if !prev_edge_rows.is_empty() {

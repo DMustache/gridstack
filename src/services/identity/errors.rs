@@ -18,6 +18,8 @@ pub enum IdentityServiceError {
     Forbidden,
     #[error("invalid identity request: {0}")]
     InvalidRequest(String),
+    #[error("identity request is missing parameters: {0}")]
+    MissingParameters(String),
     #[error("identity operation is not implemented")]
     NotImplemented,
     #[error("identity internal failure")]
@@ -46,6 +48,7 @@ impl IntoResponse for IdentityServiceError {
             Self::AuthenticationRequired => StatusCode::UNAUTHORIZED,
             Self::Forbidden => StatusCode::FORBIDDEN,
             Self::InvalidRequest(_) => StatusCode::BAD_REQUEST,
+            Self::MissingParameters(_) => StatusCode::BAD_REQUEST,
             Self::NotImplemented => StatusCode::NOT_IMPLEMENTED,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
@@ -61,6 +64,7 @@ impl IntoResponse for IdentityServiceError {
             ),
             Self::Forbidden => ("M_FORBIDDEN".to_owned(), "Forbidden".to_owned()),
             Self::InvalidRequest(message) => ("M_INVALID_PARAM".to_owned(), message),
+            Self::MissingParameters(message) => ("M_MISSING_PARAMS".to_owned(), message),
             Self::NotImplemented => (
                 "M_UNRECOGNIZED".to_owned(),
                 "Identity endpoint is not implemented".to_owned(),

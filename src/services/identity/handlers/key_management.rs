@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::{Path, Query, State},
+    extract::{Path, Query, State, rejection::QueryRejection},
 };
 
 use crate::services::{
@@ -28,7 +28,7 @@ pub async fn get_public_key(
 
 pub async fn is_long_term_public_key_valid(
     State(application_state): State<ApplicationState>,
-    Query(query): Query<PublicKeyValidityQuery>,
+    query: Result<Query<PublicKeyValidityQuery>, QueryRejection>,
 ) -> Result<Json<PublicKeyValidityResponse>, IdentityServiceError> {
     evaluate_public_key_validity(query, |public_key| {
         application_state
@@ -39,7 +39,7 @@ pub async fn is_long_term_public_key_valid(
 
 pub async fn is_ephemeral_public_key_valid(
     State(application_state): State<ApplicationState>,
-    Query(query): Query<PublicKeyValidityQuery>,
+    query: Result<Query<PublicKeyValidityQuery>, QueryRejection>,
 ) -> Result<Json<PublicKeyValidityResponse>, IdentityServiceError> {
     evaluate_public_key_validity(query, |public_key| {
         application_state
@@ -49,14 +49,27 @@ pub async fn is_ephemeral_public_key_valid(
 }
 
 fn evaluate_public_key_validity<F>(
-    query: PublicKeyValidityQuery,
+    query: Result<Query<PublicKeyValidityQuery>, QueryRejection>,
     validator: F,
 ) -> Result<Json<PublicKeyValidityResponse>, IdentityServiceError>
 where
     F: FnOnce(&EncodedPublicKey) -> Result<bool, IdentityServiceError>,
 {
+    let query = query.map_err(map_public_key_query_rejection)?;
+    let Query(query) = query;
     let public_key = EncodedPublicKey::parse(query.public_key)?;
     let valid = validator(&public_key)?;
 
     Ok(Json(PublicKeyValidityResponse { valid }))
+}
+
+fn map_public_key_query_rejection(error: QueryRejection) -> IdentityServiceError {
+    let message = error.body_text();
+    if message.contains("missing field `public_key`") {
+        return IdentityServiceError::MissingParameters(
+            "Missing required query parameter: public_key".to_owned(),
+        );
+    }
+
+    IdentityServiceError::InvalidRequest(message)
 }
