@@ -71,6 +71,16 @@ async fn initialize_schema_with_retry(pool: &SqlitePool) -> Result<(), ClientErr
         preference_key TEXT PRIMARY KEY,
         preference_value TEXT NOT NULL
     )";
+    let create_session_account_table = "CREATE TABLE IF NOT EXISTS client_session_account (
+        server_url TEXT NOT NULL,
+        username TEXT NOT NULL,
+        access_token TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        device_id TEXT,
+        refresh_token TEXT,
+        expires_in_milliseconds INTEGER,
+        PRIMARY KEY (server_url, username)
+    )";
 
     let retry_delays = [100_u64, 300, 700, 1500];
     let mut last_error: Option<String> = None;
@@ -80,15 +90,29 @@ async fn initialize_schema_with_retry(pool: &SqlitePool) -> Result<(), ClientErr
         let profile_result = sqlx::query(create_server_profile_table).execute(pool).await;
         let room_result = sqlx::query(create_room_table).execute(pool).await;
         let preferences_result = sqlx::query(create_preferences_table).execute(pool).await;
-        match (session_result, profile_result, room_result, preferences_result) {
-            (Ok(_), Ok(_), Ok(_), Ok(_)) => return Ok(()),
-            (session_error, profile_error, room_error, preferences_error) => {
+        let session_account_result = sqlx::query(create_session_account_table).execute(pool).await;
+        match (
+            session_result,
+            profile_result,
+            room_result,
+            preferences_result,
+            session_account_result,
+        ) {
+            (Ok(_), Ok(_), Ok(_), Ok(_), Ok(_)) => return Ok(()),
+            (
+                session_error,
+                profile_error,
+                room_error,
+                preferences_error,
+                session_account_error,
+            ) => {
                 last_error = Some(format!(
-                    "session_table={:?}, server_profile_table={:?}, room_table={:?}, preferences_table={:?}",
+                    "session_table={:?}, server_profile_table={:?}, room_table={:?}, preferences_table={:?}, session_account_table={:?}",
                     session_error.err(),
                     profile_error.err(),
                     room_error.err(),
-                    preferences_error.err()
+                    preferences_error.err(),
+                    session_account_error.err()
                 ));
                 sleep(Duration::from_millis(delay_ms)).await;
             }
@@ -174,6 +198,27 @@ impl RoomRepository for SqliteSessionRepository {
 impl SessionRepository for SqliteSessionRepository {
     async fn upsert_session(&self, session: &SessionRecord) -> Result<(), ClientError> {
         sqlx::query(
+            "INSERT INTO client_session_account (server_url, username, access_token, user_id, device_id, refresh_token, expires_in_milliseconds)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(server_url, username) DO UPDATE SET
+                access_token = excluded.access_token,
+                user_id = excluded.user_id,
+                device_id = excluded.device_id,
+                refresh_token = excluded.refresh_token,
+                expires_in_milliseconds = excluded.expires_in_milliseconds",
+        )
+        .bind(&session.server_url)
+        .bind(&session.username)
+        .bind(&session.access_token)
+        .bind(&session.user_id)
+        .bind(&session.device_id)
+        .bind(&session.refresh_token)
+        .bind(session.expires_in_milliseconds.map(|value| value as i64))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| ClientError::Database(error.to_string()))?;
+
+        sqlx::query(
             "INSERT INTO client_session (server_url, access_token, user_id, device_id, refresh_token, expires_in_milliseconds)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(server_url) DO UPDATE SET
@@ -200,6 +245,71 @@ impl SessionRepository for SqliteSessionRepository {
         &self,
         server_url: &str,
     ) -> Result<Option<SessionRecord>, ClientError> {
+        let selected_username_preference_key = format!("selected_account_username:{server_url}");
+        let selected_username = sqlx::query(
+            "SELECT preference_value
+             FROM client_preference
+             WHERE preference_key = ?1",
+        )
+        .bind(&selected_username_preference_key)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| ClientError::Database(error.to_string()))?
+        .map(|row| row.get::<String, _>("preference_value"));
+
+        if let Some(username) = selected_username.as_ref() {
+            let row = sqlx::query(
+                "SELECT server_url, username, access_token, user_id, device_id, refresh_token, expires_in_milliseconds
+                 FROM client_session_account
+                 WHERE server_url = ?1 AND username = ?2",
+            )
+            .bind(server_url)
+            .bind(username)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| ClientError::Database(error.to_string()))?;
+
+            if let Some(row) = row {
+                return Ok(Some(SessionRecord {
+                    server_url: row.get::<String, _>("server_url"),
+                    username: row.get::<String, _>("username"),
+                    access_token: row.get::<String, _>("access_token"),
+                    user_id: row.get::<String, _>("user_id"),
+                    device_id: row.get::<Option<String>, _>("device_id"),
+                    refresh_token: row.get::<Option<String>, _>("refresh_token"),
+                    expires_in_milliseconds: row
+                        .get::<Option<i64>, _>("expires_in_milliseconds")
+                        .map(|value| value as u64),
+                }));
+            }
+        }
+
+        let row = sqlx::query(
+            "SELECT server_url, username, access_token, user_id, device_id, refresh_token, expires_in_milliseconds
+             FROM client_session_account
+             WHERE server_url = ?1
+             ORDER BY username
+             LIMIT 1",
+        )
+        .bind(server_url)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| ClientError::Database(error.to_string()))?;
+
+        if let Some(row) = row {
+            return Ok(Some(SessionRecord {
+                server_url: row.get::<String, _>("server_url"),
+                username: row.get::<String, _>("username"),
+                access_token: row.get::<String, _>("access_token"),
+                user_id: row.get::<String, _>("user_id"),
+                device_id: row.get::<Option<String>, _>("device_id"),
+                refresh_token: row.get::<Option<String>, _>("refresh_token"),
+                expires_in_milliseconds: row
+                    .get::<Option<i64>, _>("expires_in_milliseconds")
+                    .map(|value| value as u64),
+            }));
+        }
+
         let row = sqlx::query(
             "SELECT server_url, access_token, user_id, device_id, refresh_token, expires_in_milliseconds
              FROM client_session
@@ -212,6 +322,7 @@ impl SessionRepository for SqliteSessionRepository {
 
         Ok(row.map(|row| SessionRecord {
             server_url: row.get::<String, _>("server_url"),
+            username: selected_username.unwrap_or_else(|| row.get::<String, _>("user_id")),
             access_token: row.get::<String, _>("access_token"),
             user_id: row.get::<String, _>("user_id"),
             device_id: row.get::<Option<String>, _>("device_id"),
@@ -223,6 +334,36 @@ impl SessionRepository for SqliteSessionRepository {
     }
 
     async fn clear_session_by_server(&self, server_url: &str) -> Result<(), ClientError> {
+        let selected_username_preference_key = format!("selected_account_username:{server_url}");
+        let selected_username = sqlx::query(
+            "SELECT preference_value
+             FROM client_preference
+             WHERE preference_key = ?1",
+        )
+        .bind(&selected_username_preference_key)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| ClientError::Database(error.to_string()))?
+        .map(|row| row.get::<String, _>("preference_value"));
+
+        if let Some(username) = selected_username {
+            sqlx::query(
+                "DELETE FROM client_session_account
+                 WHERE server_url = ?1 AND username = ?2",
+            )
+            .bind(server_url)
+            .bind(username)
+            .execute(&self.pool)
+            .await
+            .map_err(|error| ClientError::Database(error.to_string()))?;
+        } else {
+            sqlx::query("DELETE FROM client_session_account WHERE server_url = ?1")
+                .bind(server_url)
+                .execute(&self.pool)
+                .await
+                .map_err(|error| ClientError::Database(error.to_string()))?;
+        }
+
         sqlx::query("DELETE FROM client_session WHERE server_url = ?1")
             .bind(server_url)
             .execute(&self.pool)

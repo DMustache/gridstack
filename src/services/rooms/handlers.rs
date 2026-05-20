@@ -11,6 +11,7 @@ use crate::services::{
         errors::RoomsApplicationError,
         handlers::{
             create_room::{CreateRoomCommand, CreateRoomInfo, CreateRoomView},
+            get_public_rooms::{GetPublicRoomsQuery, GetPublicRoomsView},
             get_room_event::GetRoomEventView,
             get_room_members::{GetRoomMembersQuery, GetRoomMembersView},
             get_room_messages::{GetRoomMessagesQuery, GetRoomMessagesView},
@@ -32,6 +33,7 @@ use crate::services::{
 };
 
 pub mod create_room;
+pub mod get_public_rooms;
 pub mod get_room_event;
 pub mod get_room_members;
 pub mod get_room_messages;
@@ -81,6 +83,16 @@ pub enum JoinRoomResponse {
 pub enum GetJoinedRoomsResponse {
     #[matrix(status = 200)]
     Ok(Json<JoinedRoomsView>),
+    #[matrix(status = 500, error = [(matrix_error = "M_UNKNOWN", from = RoomsApplicationError::Internal)])]
+    Internal(Json<MatrixErrorResponse>),
+}
+
+#[derive(IntoResponseEnum)]
+pub enum GetPublicRoomsResponse {
+    #[matrix(status = 200)]
+    Ok(Json<GetPublicRoomsView>),
+    #[matrix(status = 400, error = [(matrix_error = "M_INVALID_PARAM", from = RoomsApplicationError::InvalidParameter)])]
+    BadRequest(Json<MatrixErrorResponse>),
     #[matrix(status = 500, error = [(matrix_error = "M_UNKNOWN", from = RoomsApplicationError::Internal)])]
     Internal(Json<MatrixErrorResponse>),
 }
@@ -293,6 +305,32 @@ pub async fn get_joined_rooms(
         Err(error_kind) => {
             error!(error = %error_kind, "get joined rooms failed");
             GetJoinedRoomsResponse::from_mapped_error(error_kind)
+        }
+    }
+}
+
+pub async fn get_public_rooms(
+    Query(query): Query<GetPublicRoomsQuery>,
+    State(application_state): State<ApplicationState>,
+) -> GetPublicRoomsResponse {
+    let command = match query.try_into() {
+        Ok(command) => command,
+        Err(error_kind) => return GetPublicRoomsResponse::from_mapped_error(error_kind),
+    };
+
+    match application_state
+        .rooms_service
+        .get_public_rooms(command)
+        .map(GetPublicRoomsView::from)
+    {
+        Ok(view) => GetPublicRoomsResponse::Ok(Json(view)),
+        Err(error_kind) => {
+            if matches!(error_kind, RoomsApplicationError::Internal) {
+                error!("get public rooms failed with internal error");
+            } else {
+                info!(error = %error_kind, "get public rooms rejected");
+            }
+            GetPublicRoomsResponse::from_mapped_error(error_kind)
         }
     }
 }

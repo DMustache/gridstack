@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct CreateRoomInfo {
@@ -35,6 +36,19 @@ pub struct JoinedRoomsView {
     pub joined_rooms: Vec<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct JoinedRoomMemberView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct JoinedMembersView {
+    pub joined: BTreeMap<String, JoinedRoomMemberView>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct JoinRoomInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -54,6 +68,25 @@ pub struct LeaveRoomInfo {
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct LeaveRoomView {}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct InviteUserInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id_server: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id_access_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub medium: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct InviteUserView {}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RoomStateEventView {
@@ -121,7 +154,61 @@ pub struct GetRoomMessagesView {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GetRoomMembersView {
+    pub chunk: Vec<RoomStateEventView>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct GetRoomMembersQuery {
+    pub at_token: Option<String>,
+    pub membership: Option<String>,
+    pub not_membership: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GetRoomEventView {
+    pub content: Value,
+    pub event_id: String,
+    pub origin_server_ts: i64,
+    pub room_id: String,
+    pub sender: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_key: Option<String>,
+    #[serde(rename = "type")]
+    pub event_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unsigned: Option<Value>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SendRoomEventView {
+    pub event_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct SendReceiptInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct SendReceiptView {}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct SetReadMarkersInfo {
+    #[serde(rename = "m.fully_read", skip_serializing_if = "Option::is_none")]
+    pub fully_read_event_id: Option<String>,
+    #[serde(rename = "m.read", skip_serializing_if = "Option::is_none")]
+    pub read_event_id: Option<String>,
+    #[serde(rename = "m.read.private", skip_serializing_if = "Option::is_none")]
+    pub private_read_event_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct SetReadMarkersView {}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SetRoomStateWithKeyView {
     pub event_id: String,
 }
 

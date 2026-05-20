@@ -17,7 +17,12 @@ pub fn routes(state: &ApplicationState) -> Router<ApplicationState> {
     let rate_limit_layer =
         middleware::from_extractor_with_state::<RateLimitLayer, ApplicationState>(state.clone());
 
-    Router::new()
+    let public_routes = Router::new().route(
+        "/_matrix/client/v3/publicRooms",
+        get(handlers::get_public_rooms),
+    );
+
+    let protected_routes = Router::new()
         .route("/_matrix/client/v3/createRoom", post(handlers::create_room))
         .route(
             "/_matrix/client/v3/rooms/{roomId}/join",
@@ -74,7 +79,11 @@ pub fn routes(state: &ApplicationState) -> Router<ApplicationState> {
         .route(
             "/_matrix/client/v3/rooms/{roomId}/read_markers",
             post(handlers::set_room_read_markers),
-        )
-        .route_layer(authorization_layer)
-        .route_layer(rate_limit_layer)
+        );
+
+    public_routes.route_layer(rate_limit_layer.clone()).merge(
+        protected_routes
+            .route_layer(authorization_layer)
+            .route_layer(rate_limit_layer),
+    )
 }

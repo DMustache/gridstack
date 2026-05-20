@@ -58,8 +58,13 @@ impl AuthorizationClientService {
         if let RegisterUserResult::Registered(registered) = &response
             && let Some(access_token) = &registered.access_token
         {
+            let username = request
+                .username
+                .clone()
+                .unwrap_or_else(|| registered.user_identifier.clone());
             let session = SessionRecord {
                 server_url: self.server_url.clone(),
+                username,
                 access_token: access_token.clone(),
                 user_id: registered.user_identifier.clone(),
                 device_id: registered.device_identifier.clone(),
@@ -74,8 +79,13 @@ impl AuthorizationClientService {
 
     pub async fn login_user(&self, request: &LoginUserInfo) -> Result<LoginUserView, ClientError> {
         let response = self.authorization_api.login_user(request).await?;
+        let username = request
+            .user
+            .clone()
+            .unwrap_or_else(|| response.user_id.clone());
         let session = SessionRecord {
             server_url: self.server_url.clone(),
+            username,
             access_token: response.access_token.clone(),
             user_id: response.user_id.clone(),
             device_id: Some(response.device_id.clone()),

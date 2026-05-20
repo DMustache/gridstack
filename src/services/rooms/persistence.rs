@@ -2,7 +2,7 @@ use chrono::Utc;
 use diesel::{
     BoolExpressionMethods, Connection, ExpressionMethods, JoinOnDsl, NullableExpressionMethods,
     OptionalExtension, QueryDsl, RunQueryDsl,
-    dsl::{exists, max, select},
+    dsl::{count, exists, max, select},
     insert_into,
     pg::PgConnection,
     r2d2::{self, ConnectionManager},
@@ -49,6 +49,14 @@ pub struct JoinedRoomMemberProfile {
     pub user_id: String,
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PublicRoomRosterEntry {
+    pub room_id: String,
+    pub fallback_name: Option<String>,
+    pub fallback_topic: Option<String>,
+    pub num_joined_members: i64,
 }
 
 pub trait RoomCreationRepository: Send + Sync {
@@ -450,6 +458,12 @@ pub trait RoomRepository: Send + Sync {
         &self,
         room_id: &str,
     ) -> Result<Vec<JoinedRoomMemberProfile>, DomainError>;
+    fn fetch_public_room_count(&self) -> Result<i64, DomainError>;
+    fn fetch_public_room_roster_page(
+        &self,
+        offset: i64,
+        limit: i64,
+    ) -> Result<Vec<PublicRoomRosterEntry>, DomainError>;
 
     fn append_room_event(
         &self,
@@ -975,6 +989,70 @@ impl RoomRepository for RoomPersistence {
             .order(room_membership_projection::room_id.asc())
             .load::<String>(&mut connection)
             .map_err(|error| DomainError::InvalidRequest(error.to_string()))
+    }
+
+    fn fetch_public_room_count(&self) -> Result<i64, DomainError> {
+        use schema::rooms;
+
+        let mut connection = self
+            .connection_pool
+            .get()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        rooms::table
+            .filter(rooms::visibility.eq(Some("public".to_owned())))
+            .count()
+            .get_result::<i64>(&mut connection)
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))
+    }
+
+    fn fetch_public_room_roster_page(
+        &self,
+        offset: i64,
+        limit: i64,
+    ) -> Result<Vec<PublicRoomRosterEntry>, DomainError> {
+        use schema::{room_membership_projection, rooms};
+
+        let mut connection = self
+            .connection_pool
+            .get()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        let joined_member_count = count(room_membership_projection::user_id.nullable());
+
+        let rows = rooms::table
+            .left_outer_join(
+                room_membership_projection::table.on(room_membership_projection::room_id
+                    .eq(rooms::room_id)
+                    .and(room_membership_projection::membership.eq("join"))),
+            )
+            .filter(rooms::visibility.eq(Some("public".to_owned())))
+            .group_by((rooms::room_id, rooms::name, rooms::topic))
+            .select((
+                rooms::room_id,
+                rooms::name,
+                rooms::topic,
+                joined_member_count,
+            ))
+            .order_by((joined_member_count.desc(), rooms::room_id.asc()))
+            .offset(offset)
+            .limit(limit)
+            .load::<(String, Option<String>, Option<String>, i64)>(&mut connection)
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(room_id, fallback_name, fallback_topic, num_joined_members)| {
+                    PublicRoomRosterEntry {
+                        room_id,
+                        fallback_name,
+                        fallback_topic,
+                        num_joined_members,
+                    }
+                },
+            )
+            .collect())
     }
 
     fn fetch_joined_members_profiles(
