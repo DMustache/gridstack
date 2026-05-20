@@ -21,11 +21,12 @@ use crate::{
         rooms::{
             entities::{
                 CreateRoomCommand, CreatedRoom, GetRoomMembersCommand, GetRoomMessagesCommand,
-                JoinRoomCommand, JoinedMembers, JoinedRoom, JoinedRoomMember, JoinedRooms,
-                LeaveRoomCommand, LeftRoom, RoomCreationFlow, RoomFactoryEvent, RoomIdentifier,
-                RoomMembersChunk, RoomMembershipFilter, RoomMessageDirection, RoomMessagesPage,
-                RoomReceiptType, RoomStateEvent, RoomTimelineEvent, RoomValidationError,
-                SendReceiptCommand, SetReadMarkersCommand, ValidatedCreateRoomInput,
+                InviteUserCommand, InvitedUser, JoinRoomCommand, JoinedMembers, JoinedRoom,
+                JoinedRoomMember, JoinedRooms, LeaveRoomCommand, LeftRoom, RoomCreationFlow,
+                RoomFactoryEvent, RoomIdentifier, RoomMembersChunk, RoomMembershipFilter,
+                RoomMessageDirection, RoomMessagesPage, RoomReceiptType, RoomStateEvent,
+                RoomTimelineEvent, RoomValidationError, SendReceiptCommand, SetReadMarkersCommand,
+                ValidatedCreateRoomInput,
                 parse_room_message_event_content, parse_room_state_event_content,
             },
             errors::RoomsApplicationError,
@@ -241,6 +242,57 @@ impl RoomsService {
         )?;
 
         Ok(LeftRoom)
+    }
+
+    pub fn invite_user_to_room(
+        &self,
+        inviter_user_id: &AuthorizedUserIdentifier,
+        room_id: String,
+        command: InviteUserCommand,
+    ) -> Result<InvitedUser, RoomsApplicationError> {
+        self.require_room_identifier(&room_id)?;
+
+        let inviter_user_id = inviter_user_id.as_existing_user_identifier();
+        let room_version = self.require_joined_room_version(&room_id, inviter_user_id)?;
+
+        let (invited_user_id, reason) = match command {
+            InviteUserCommand::MatrixUser {
+                invited_user_id,
+                reason,
+            } => {
+                let invited_user_id = self
+                    .authorization_service
+                    .require_existing_user_identifier(invited_user_id)
+                    .map_err(|_| RoomsApplicationError::InvalidParameter)?;
+                (invited_user_id, reason)
+            }
+            InviteUserCommand::ThirdPartyIdentifier(_) => {
+                // Intentional subset: this homeserver currently supports local Matrix ID invites only.
+                return Err(RoomsApplicationError::Forbidden);
+            }
+        };
+        if invited_user_id.as_str() == inviter_user_id.as_str() {
+            return Err(RoomsApplicationError::Forbidden);
+        }
+
+        let invitee_join_context =
+            self.require_room_membership_context(&room_id, &invited_user_id)?;
+
+        match invitee_join_context.membership_state.as_deref() {
+            Some("ban" | "join" | "invite") => return Err(RoomsApplicationError::Forbidden),
+            _ => {}
+        }
+
+        self.append_membership_change_for_target(
+            room_id,
+            room_version,
+            inviter_user_id.as_str(),
+            invited_user_id.as_str(),
+            MembershipContent::Invite,
+            reason,
+        )?;
+
+        Ok(InvitedUser)
     }
 
     pub fn get_room_state(
@@ -819,13 +871,32 @@ impl RoomsService {
         membership_content: MembershipContent,
         reason: Option<String>,
     ) -> Result<(), RoomsApplicationError> {
+        self.append_membership_change_for_target(
+            room_id,
+            room_version,
+            user_identifier,
+            user_identifier,
+            membership_content,
+            reason,
+        )
+    }
+
+    fn append_membership_change_for_target(
+        &self,
+        room_id: String,
+        room_version: SupportedRoomVersion,
+        sender_user_identifier: &str,
+        target_user_identifier: &str,
+        membership_content: MembershipContent,
+        reason: Option<String>,
+    ) -> Result<(), RoomsApplicationError> {
         let event_write_contract = self
             .events_service
             .create_membership_event(
                 room_id.clone(),
                 room_version,
-                user_identifier.to_owned(),
-                user_identifier.to_owned(),
+                sender_user_identifier.to_owned(),
+                target_user_identifier.to_owned(),
                 crate::services::events::entities::MatrixEventContent::RoomMember(
                     RoomMemberContent {
                         membership: membership_content,
@@ -834,7 +905,7 @@ impl RoomsService {
                 ),
                 None,
             )
-            .map_err(RoomsApplicationError::from)?;
+            .map_err(map_membership_compilation_error)?;
 
         let _ = reason;
 
@@ -963,6 +1034,17 @@ fn map_room_persistence_error(error: DomainError, room_id: String) -> RoomsAppli
             }
         }
         DomainError::NotFound | DomainError::InvalidCredentials => RoomsApplicationError::Internal,
+    }
+}
+
+fn map_membership_compilation_error(
+    error: crate::services::events::service::EventCompilationError,
+) -> RoomsApplicationError {
+    match error {
+        crate::services::events::service::EventCompilationError::MissingSenderMembershipForAuth {
+            ..
+        } => RoomsApplicationError::Forbidden,
+        _ => RoomsApplicationError::from(error),
     }
 }
 

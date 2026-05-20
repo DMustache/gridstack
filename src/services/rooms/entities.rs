@@ -10,6 +10,7 @@ use crate::services::authorization::entities::ExistingUserIdentifier;
 use crate::services::events::entities::{
     EventIntent, MatrixEventContent, MessageEventKind, StateEventKind, SupportedRoomVersion,
 };
+use crate::services::rooms::errors::RoomsApplicationError;
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct CreateRoomRequestDto {
@@ -54,6 +55,16 @@ pub struct LeaveRoomRequestDto {
     pub reason: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Default)]
+pub struct InviteUserRequestDto {
+    pub user_id: Option<String>,
+    pub reason: Option<String>,
+    pub id_server: Option<String>,
+    pub id_access_token: Option<String>,
+    pub medium: Option<String>,
+    pub address: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct ThirdPartySignedDto {
     pub sender: String,
@@ -87,6 +98,62 @@ impl From<LeaveRoomRequestDto> for LeaveRoomCommand {
         Self {
             reason: value.reason,
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum InviteUserCommand {
+    MatrixUser {
+        invited_user_id: UserIdentifier,
+        reason: Option<String>,
+    },
+    ThirdPartyIdentifier(ValidatedThirdPartyInvite),
+}
+
+impl TryFrom<InviteUserRequestDto> for InviteUserCommand {
+    type Error = RoomsApplicationError;
+
+    fn try_from(value: InviteUserRequestDto) -> Result<Self, Self::Error> {
+        let InviteUserRequestDto {
+            user_id,
+            reason,
+            id_server,
+            id_access_token,
+            medium,
+            address,
+        } = value;
+
+        let has_third_party_fields = id_server.is_some()
+            || id_access_token.is_some()
+            || medium.is_some()
+            || address.is_some();
+
+        if let Some(invited_user_id) = user_id {
+            if has_third_party_fields {
+                return Err(RoomsApplicationError::InvalidParameter);
+            }
+            let invited_user_id = UserIdentifier::try_from(invited_user_id)
+                .map_err(|_| RoomsApplicationError::InvalidParameter)?;
+            return Ok(Self::MatrixUser {
+                invited_user_id,
+                reason,
+            });
+        }
+
+        let invite_3pid = match (id_server, id_access_token, medium, address, reason) {
+            (Some(id_server), Some(id_access_token), Some(medium), Some(address), None) => {
+                validate_third_party_invite(InviteThirdPartyDto {
+                    id_server,
+                    id_access_token,
+                    medium,
+                    address,
+                })
+                .map_err(RoomsApplicationError::from)?
+            }
+            _ => return Err(RoomsApplicationError::InvalidParameter),
+        };
+
+        Ok(Self::ThirdPartyIdentifier(invite_3pid))
     }
 }
 
@@ -899,6 +966,9 @@ pub struct JoinedMembers {
 #[derive(Clone, Debug)]
 pub struct LeftRoom;
 
+#[derive(Clone, Debug)]
+pub struct InvitedUser;
+
 #[derive(Clone, Debug, Serialize)]
 pub struct CreateRoomView {
     pub room_id: String,
@@ -977,6 +1047,15 @@ pub struct LeaveRoomView {}
 
 impl From<LeftRoom> for LeaveRoomView {
     fn from(_: LeftRoom) -> Self {
+        Self::default()
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Default)]
+pub struct InviteUserView {}
+
+impl From<InvitedUser> for InviteUserView {
+    fn from(_: InvitedUser) -> Self {
         Self::default()
     }
 }

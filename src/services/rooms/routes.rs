@@ -36,6 +36,10 @@ pub fn routes(state: &ApplicationState) -> Router<ApplicationState> {
             post(handlers::leave_room_by_id),
         )
         .route(
+            "/_matrix/client/v3/rooms/{roomId}/invite",
+            post(handlers::invite_user_to_room),
+        )
+        .route(
             "/_matrix/client/v3/rooms/{roomId}/state",
             get(handlers::get_room_state),
         )
