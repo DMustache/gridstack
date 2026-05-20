@@ -16,6 +16,7 @@ use crate::services::{
             get_room_messages::{GetRoomMessagesQuery, GetRoomMessagesView},
             get_room_state::RoomStateEventView,
             get_room_state_with_key::{GetRoomStateWithKeyFormatQuery, room_state_event_to_value},
+            invite_user::{InviteUserCommand, InviteUserInfo, InviteUserView},
             join_room::{JoinRoomCommand, JoinRoomInfo, JoinRoomView},
             joined_members::JoinedMembersView,
             joined_rooms::JoinedRoomsView,
@@ -36,6 +37,7 @@ pub mod get_room_members;
 pub mod get_room_messages;
 pub mod get_room_state;
 pub mod get_room_state_with_key;
+pub mod invite_user;
 pub mod join_room;
 pub mod joined_members;
 pub mod joined_rooms;
@@ -98,6 +100,18 @@ pub enum LeaveRoomResponse {
     #[matrix(status = 200)]
     Ok(Json<LeaveRoomView>),
     #[matrix(status = 403, error = [(matrix_error = "M_FORBIDDEN", from = RoomsApplicationError::Forbidden)])]
+    Forbidden(Json<MatrixErrorResponse>),
+    #[matrix(status = 500, error = [(matrix_error = "M_UNKNOWN", from = RoomsApplicationError::Internal)])]
+    Internal(Json<MatrixErrorResponse>),
+}
+
+#[derive(IntoResponseEnum)]
+pub enum InviteUserResponse {
+    #[matrix(status = 200)]
+    Ok(Json<InviteUserView>),
+    #[matrix(status = 400, error = [(matrix_error = "M_INVALID_PARAM", from = RoomsApplicationError::InvalidParameter)])]
+    BadRequest(Json<MatrixErrorResponse>),
+    #[matrix(status = 403, error = [(matrix_error = "M_FORBIDDEN", from = RoomsApplicationError::Forbidden), (matrix_error = "M_INVITE_BLOCKED", from = RoomsApplicationError::InviteBlocked)])]
     Forbidden(Json<MatrixErrorResponse>),
     #[matrix(status = 500, error = [(matrix_error = "M_UNKNOWN", from = RoomsApplicationError::Internal)])]
     Internal(Json<MatrixErrorResponse>),
@@ -326,6 +340,34 @@ pub async fn leave_room_by_id(
                 info!(error = %error_kind, "leave room rejected");
             }
             LeaveRoomResponse::from_mapped_error(error_kind)
+        }
+    }
+}
+
+pub async fn invite_user_to_room(
+    Path(room_id): Path<String>,
+    State(application_state): State<ApplicationState>,
+    Extension(access_session): Extension<AccessSessionStorageUnit>,
+    Json(request): Json<InviteUserInfo>,
+) -> InviteUserResponse {
+    let command: InviteUserCommand = match request.try_into() {
+        Ok(command) => command,
+        Err(error_kind) => return InviteUserResponse::from_mapped_error(error_kind),
+    };
+
+    match application_state
+        .rooms_service
+        .invite_user_to_room(access_session.user_identifier(), room_id, command)
+        .map(InviteUserView::from)
+    {
+        Ok(view) => InviteUserResponse::Ok(Json(view)),
+        Err(error_kind) => {
+            if matches!(error_kind, RoomsApplicationError::Internal) {
+                error!("invite user failed with internal error");
+            } else {
+                info!(error = %error_kind, "invite user rejected");
+            }
+            InviteUserResponse::from_mapped_error(error_kind)
         }
     }
 }
