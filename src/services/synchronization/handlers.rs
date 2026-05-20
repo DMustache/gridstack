@@ -10,7 +10,7 @@ use crate::services::{
     authorization::persistence::access_session_storage_unit::AccessSessionStorageUnit,
     shared::MatrixErrorResponse,
     state::ApplicationState,
-    syncronization::{
+    synchronization::{
         entities::{SyncBatch, SyncFilterSelection, SyncRequest, SyncSetPresence},
         errors::SyncronizationApplicationError,
     },

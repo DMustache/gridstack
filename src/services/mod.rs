@@ -2,7 +2,7 @@ pub mod authorization;
 pub mod events;
 pub mod identity;
 pub mod rooms;
-pub mod syncronization;
+pub mod synchronization;
 
 pub mod entities;
 pub mod errors;

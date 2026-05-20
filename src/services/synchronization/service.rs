@@ -8,7 +8,7 @@ use crate::{
             persistence::access_session_storage_unit::AccessSessionStorageUnit,
             service::AuthorizationService,
         },
-        syncronization::{
+        synchronization::{
             entities::{
                 SyncBatch, SyncDeviceListsBatch, SyncEventsBatch, SyncFilterSelection, SyncRequest,
                 SyncRoomsBatch,
@@ -354,14 +354,14 @@ impl SyncronizationService {
     fn persist_presence_update(
         &self,
         user_identifier: &str,
-        set_presence: Option<&crate::services::syncronization::entities::SyncSetPresence>,
+        set_presence: Option<&crate::services::synchronization::entities::SyncSetPresence>,
     ) -> Result<(), SyncronizationApplicationError> {
         let presence = match set_presence {
-            Some(crate::services::syncronization::entities::SyncSetPresence::Offline) => "offline",
-            Some(crate::services::syncronization::entities::SyncSetPresence::Unavailable) => {
+            Some(crate::services::synchronization::entities::SyncSetPresence::Offline) => "offline",
+            Some(crate::services::synchronization::entities::SyncSetPresence::Unavailable) => {
                 "unavailable"
             }
-            Some(crate::services::syncronization::entities::SyncSetPresence::Online) | None => {
+            Some(crate::services::synchronization::entities::SyncSetPresence::Online) | None => {
                 "online"
             }
         };
@@ -414,7 +414,7 @@ fn parse_sync_stream_position(sync_token: &str) -> Result<i64, SyncronizationApp
 }
 
 fn timeline_event_to_json(
-    event: crate::services::syncronization::persistence::TimelineEventRecord,
+    event: crate::services::synchronization::persistence::TimelineEventRecord,
 ) -> Value {
     let mut event_object = Map::new();
     event_object.insert("event_id".to_owned(), Value::String(event.event_id));
@@ -435,7 +435,7 @@ fn timeline_event_to_json(
 }
 
 fn state_event_to_json(
-    event: crate::services::syncronization::persistence::StateEventRecord,
+    event: crate::services::synchronization::persistence::StateEventRecord,
 ) -> Value {
     let mut event_object = Map::new();
     event_object.insert("event_id".to_owned(), Value::String(event.event_id));
@@ -502,7 +502,7 @@ impl SyncFilterConstraints {
 
     fn timeline_allows(
         &self,
-        event: &crate::services::syncronization::persistence::TimelineEventRecord,
+        event: &crate::services::synchronization::persistence::TimelineEventRecord,
     ) -> bool {
         self.timeline_filter.allows(
             &event.event_type,
@@ -513,7 +513,7 @@ impl SyncFilterConstraints {
 
     fn state_allows(
         &self,
-        event: &crate::services::syncronization::persistence::StateEventRecord,
+        event: &crate::services::synchronization::persistence::StateEventRecord,
     ) -> bool {
         self.state_filter.allows(
             &event.event_type,

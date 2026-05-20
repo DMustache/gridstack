@@ -6,7 +6,7 @@ use axum::{
 use crate::services::{
     layers::{AuthorizationLayer, RateLimitLayer},
     state::ApplicationState,
-    syncronization::handlers,
+    synchronization::handlers,
 };
 
 pub fn routes(state: &ApplicationState) -> Router<ApplicationState> {

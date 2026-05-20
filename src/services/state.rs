@@ -28,7 +28,7 @@ use crate::{
             persistence::{RoomPersistence, RoomRepository},
             service::RoomsService,
         },
-        syncronization::{
+        synchronization::{
             persistence::{FilterRepository, SyncronizationPersistence},
             service::SyncronizationService,
         },
