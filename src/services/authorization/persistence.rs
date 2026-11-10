@@ -73,7 +73,7 @@ impl UserRepository for AuthorizationPersistence {
         let mut connection = self
             .connection_pool
             .get()
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         connection
             .transaction(|connection| {
@@ -87,7 +87,7 @@ impl UserRepository for AuthorizationPersistence {
 
                 Ok::<(), diesel::result::Error>(())
             })
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         Ok(())
     }
@@ -198,14 +198,12 @@ impl InMemorySessionRepository {
 
     fn flush_pending_records_to_file(&self) -> Result<(), DomainError> {
         if let Some(parent) = self.storage_file_path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            fs::create_dir_all(parent).map_err(|error| DomainError::Unavailable(error.into()))?;
         }
 
-        let mut pending_records_guard = self
-            .pending_records
-            .write()
-            .map_err(|_| DomainError::InvalidRequest("session storage lock failure".to_owned()))?;
+        let mut pending_records_guard = self.pending_records.write().map_err(|_| {
+            DomainError::Unavailable(anyhow::anyhow!("session storage lock failure"))
+        })?;
         if pending_records_guard.is_empty() {
             return Ok(());
         }
@@ -216,7 +214,7 @@ impl InMemorySessionRepository {
             .create(true)
             .append(true)
             .open(&self.storage_file_path)
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
         for record in pending_records {
             match record {
                 SessionStorageMutation::Upsert(session) => writeln!(
@@ -227,13 +225,13 @@ impl InMemorySessionRepository {
                     session.device_id().clone().into_inner(),
                     session.expires_at_seconds()
                 )
-                .map_err(|error| DomainError::InvalidRequest(error.to_string()))?,
+                .map_err(|error| DomainError::Unavailable(error.into()))?,
                 SessionStorageMutation::Delete(access_token) => writeln!(file, "D\t{access_token}")
-                    .map_err(|error| DomainError::InvalidRequest(error.to_string()))?,
+                    .map_err(|error| DomainError::Unavailable(error.into()))?,
             }
         }
         file.flush()
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
         Ok(())
     }
 }
@@ -247,7 +245,7 @@ impl InMemorySessionRepository {
     fn push_pending_record(&self, record: SessionStorageMutation) -> Result<(), DomainError> {
         self.pending_records
             .write()
-            .map_err(|_| DomainError::InvalidRequest("session storage lock failure".to_owned()))?
+            .map_err(|_| DomainError::Unavailable(anyhow::anyhow!("session storage lock failure")))?
             .push(record);
         Ok(())
     }
@@ -257,7 +255,7 @@ impl SessionRepository for InMemorySessionRepository {
     fn create_session(&self, access_session: AccessSessionStorageUnit) -> Result<(), DomainError> {
         self.sessions_by_token
             .write()
-            .map_err(|_| DomainError::InvalidRequest("session storage lock failure".to_owned()))?
+            .map_err(|_| DomainError::Unavailable(anyhow::anyhow!("session storage lock failure")))?
             .insert(
                 access_session.access_token().clone().into_inner(),
                 access_session.clone(),
@@ -290,7 +288,7 @@ impl SessionRepository for InMemorySessionRepository {
     ) -> Result<(), DomainError> {
         self.sessions_by_token
             .write()
-            .map_err(|_| DomainError::InvalidRequest("session storage lock failure".to_owned()))?
+            .map_err(|_| DomainError::Unavailable(anyhow::anyhow!("session storage lock failure")))?
             .remove(access_token.as_str());
         self.push_pending_record(SessionStorageMutation::Delete(
             access_token.as_str().to_owned(),

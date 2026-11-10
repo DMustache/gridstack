@@ -26,6 +26,8 @@ pub enum DomainError {
     InvalidCredentials,
     #[error("invalid request: {0}")]
     InvalidRequest(String),
+    #[error("infrastructure unavailable")]
+    Unavailable(#[source] AnyhowError),
 }
 
 #[derive(Debug, Error)]
@@ -55,6 +57,7 @@ impl From<DomainError> for ApplicationError {
             DomainError::NotFound => Self::NotFound,
             DomainError::InvalidCredentials => Self::AuthenticationFailed,
             DomainError::InvalidRequest(message) => Self::InvalidInput(message),
+            DomainError::Unavailable(source) => Self::Internal(source),
         }
     }
 }
@@ -77,7 +80,7 @@ impl IntoResponse for ApplicationError {
     fn into_response(self) -> Response {
         match &self {
             Self::Internal(internal_error) => {
-                error!(error = %internal_error, "application internal error");
+                error!(error = %format!("{internal_error:#}"), "application internal error");
             }
             _ => {
                 info!(error = %self, "application request failed");
@@ -110,7 +113,7 @@ impl IntoResponse for ApplicationError {
             Self::Forbidden => ("M_FORBIDDEN".to_owned(), "Forbidden".to_owned()),
             Self::NotImplemented(message) => ("M_UNRECOGNIZED".to_owned(), message),
             Self::InvalidInput(message) => ("M_BAD_JSON".to_owned(), message),
-            Self::Internal(error) => ("M_UNKNOWN".to_owned(), error.to_string()),
+            Self::Internal(_) => ("M_UNKNOWN".to_owned(), "Internal server error".to_owned()),
         };
 
         (status_code, Json(MatrixErrorResponse { errcode, error })).into_response()
@@ -191,5 +194,44 @@ impl IntoResponse for RateLimitLayerError {
             )
                 .into_response(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+
+    async fn response_parts(error: DomainError) -> (StatusCode, serde_json::Value) {
+        let response = ApplicationError::from(error).into_response();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn unavailable_maps_to_500_m_unknown() {
+        let (status, body) =
+            response_parts(DomainError::Unavailable(anyhow::anyhow!("db down"))).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["errcode"], "M_UNKNOWN");
+        assert_eq!(body["error"], "Internal server error");
+    }
+
+    #[tokio::test]
+    async fn internal_error_body_does_not_contain_source_text() {
+        let source = anyhow::anyhow!("relation \"accounts\" violates constraint accounts_pkey");
+        let (_, body) = response_parts(DomainError::Unavailable(source)).await;
+        let rendered = body.to_string();
+        assert!(!rendered.contains("accounts_pkey"));
+        assert!(!rendered.contains("relation"));
+    }
+
+    #[tokio::test]
+    async fn invalid_request_still_maps_to_400() {
+        let (status, body) = response_parts(DomainError::InvalidRequest("bad".to_owned())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["errcode"], "M_BAD_JSON");
+        assert_eq!(body["error"], "bad");
     }
 }
