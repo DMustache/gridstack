@@ -606,3 +606,6 @@ fn read_string_array(value: Option<&Value>) -> Option<Vec<String>> {
         })
         .filter(|values| !values.is_empty())
 }
+
+#[cfg(test)]
+mod tests;
