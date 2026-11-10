@@ -606,6 +606,7 @@ dependencies = [
  "response_derive",
  "serde",
  "serde_json",
+ "sha2",
  "strum",
  "syn",
  "thiserror",
