@@ -106,25 +106,14 @@ impl SyncronizationService {
         }
 
         let _ = request.use_state_after;
-        self.persist_presence_update(
-            authorized_user_identifier.as_str(),
-            request.set_presence.as_ref(),
-        )?;
+        if let Some(set_presence) = request.set_presence.as_ref() {
+            self.persist_presence_update(authorized_user_identifier.as_str(), set_presence)?;
+        }
 
         let memberships = self
             .filter_repository
             .fetch_user_room_memberships(authorized_user_identifier.as_str())
             .map_err(Self::map_domain_error)?;
-
-        self.persist_account_data_snapshot(
-            authorized_user_identifier.as_str(),
-            current_stream_position,
-        )?;
-
-        self.persist_to_device_hint_event(
-            authorized_user_identifier.as_str(),
-            current_stream_position,
-        )?;
 
         let presence_events = self
             .filter_repository
@@ -138,6 +127,7 @@ impl SyncronizationService {
             .filter_repository
             .fetch_to_device_events_since(
                 authorized_user_identifier.as_str(),
+                &access_session.device_id().clone().into_inner(),
                 since_stream_position,
             )
             .map_err(Self::map_domain_error)?;
@@ -372,48 +362,17 @@ impl SyncronizationService {
     fn persist_presence_update(
         &self,
         user_identifier: &str,
-        set_presence: Option<&crate::services::synchronization::entities::SyncSetPresence>,
+        set_presence: &crate::services::synchronization::entities::SyncSetPresence,
     ) -> Result<(), SyncronizationApplicationError> {
         let presence = match set_presence {
-            Some(crate::services::synchronization::entities::SyncSetPresence::Offline) => "offline",
-            Some(crate::services::synchronization::entities::SyncSetPresence::Unavailable) => {
+            crate::services::synchronization::entities::SyncSetPresence::Offline => "offline",
+            crate::services::synchronization::entities::SyncSetPresence::Unavailable => {
                 "unavailable"
             }
-            Some(crate::services::synchronization::entities::SyncSetPresence::Online) | None => {
-                "online"
-            }
+            crate::services::synchronization::entities::SyncSetPresence::Online => "online",
         };
         self.filter_repository
             .upsert_presence(user_identifier, presence)
-            .map_err(Self::map_domain_error)
-    }
-
-    fn persist_account_data_snapshot(
-        &self,
-        user_identifier: &str,
-        current_stream_position: i64,
-    ) -> Result<(), SyncronizationApplicationError> {
-        self.filter_repository
-            .upsert_global_account_data_event(
-                user_identifier,
-                "org.matrix.msc3575.sync_stream_position",
-                serde_json::json!({ "stream_position": current_stream_position }),
-            )
-            .map_err(Self::map_domain_error)
-    }
-
-    fn persist_to_device_hint_event(
-        &self,
-        user_identifier: &str,
-        current_stream_position: i64,
-    ) -> Result<(), SyncronizationApplicationError> {
-        self.filter_repository
-            .enqueue_to_device_event(
-                user_identifier,
-                "org.matrix.gridstack.sync.hint",
-                serde_json::json!({ "stream_position": current_stream_position }),
-            )
-            .map(|_| ())
             .map_err(Self::map_domain_error)
     }
 }

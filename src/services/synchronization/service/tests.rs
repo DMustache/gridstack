@@ -35,6 +35,7 @@ use crate::{
 };
 
 const SYNCING_USER: &str = "@alice:localhost";
+const SYNCING_DEVICE: &str = "TESTDEVICE";
 const OTHER_USER: &str = "@bob:localhost";
 const SERVER_INTERNAL_ACCOUNT_DATA_TYPE: &str = "org.matrix.msc3575.sync_stream_position";
 const SERVER_INTERNAL_TO_DEVICE_TYPE: &str = "org.matrix.gridstack.sync.hint";
@@ -43,6 +44,7 @@ const SERVER_INTERNAL_TO_DEVICE_TYPE: &str = "org.matrix.gridstack.sync.hint";
 struct StoredToDeviceEvent {
     stream_position: i64,
     recipient_user_identifier: String,
+    recipient_device_identifier: String,
     sender_user_identifier: String,
     event_type: String,
     content: Value,
@@ -80,6 +82,10 @@ impl RecordingFilterRepository {
             .push(write);
     }
 
+    fn stored_to_device_event_count(&self) -> usize {
+        self.to_device_events.lock().expect("to-device lock").len()
+    }
+
     fn recorded_writes(&self) -> Vec<RecordedWrite> {
         self.recorded_writes
             .lock()
@@ -97,6 +103,7 @@ impl RecordingFilterRepository {
             .push(StoredToDeviceEvent {
                 stream_position,
                 recipient_user_identifier: SYNCING_USER.to_owned(),
+                recipient_device_identifier: SYNCING_DEVICE.to_owned(),
                 sender_user_identifier: OTHER_USER.to_owned(),
                 event_type: event_type.to_owned(),
                 content,
@@ -232,7 +239,9 @@ impl FilterRepository for RecordingFilterRepository {
 
     fn enqueue_to_device_event(
         &self,
-        user_identifier: &str,
+        recipient_user_identifier: &str,
+        recipient_device_identifier: &str,
+        sender_user_identifier: &str,
         event_type: &str,
         content: Value,
     ) -> Result<i64, DomainError> {
@@ -245,8 +254,9 @@ impl FilterRepository for RecordingFilterRepository {
             .expect("to-device lock")
             .push(StoredToDeviceEvent {
                 stream_position,
-                recipient_user_identifier: user_identifier.to_owned(),
-                sender_user_identifier: user_identifier.to_owned(),
+                recipient_user_identifier: recipient_user_identifier.to_owned(),
+                recipient_device_identifier: recipient_device_identifier.to_owned(),
+                sender_user_identifier: sender_user_identifier.to_owned(),
                 event_type: event_type.to_owned(),
                 content,
             });
@@ -255,18 +265,21 @@ impl FilterRepository for RecordingFilterRepository {
 
     fn fetch_to_device_events_since(
         &self,
-        user_identifier: &str,
+        recipient_user_identifier: &str,
+        recipient_device_identifier: &str,
         since_stream_position: i64,
     ) -> Result<Vec<Value>, DomainError> {
-        Ok(self
-            .to_device_events
-            .lock()
-            .expect("to-device lock")
+        let is_for_recipient = |event: &StoredToDeviceEvent| {
+            event.recipient_user_identifier == recipient_user_identifier
+                && event.recipient_device_identifier == recipient_device_identifier
+        };
+        let mut to_device_events = self.to_device_events.lock().expect("to-device lock");
+        to_device_events.retain(|event| {
+            !is_for_recipient(event) || event.stream_position > since_stream_position
+        });
+        Ok(to_device_events
             .iter()
-            .filter(|event| {
-                event.recipient_user_identifier == user_identifier
-                    && event.stream_position > since_stream_position
-            })
+            .filter(|event| is_for_recipient(event))
             .map(|event| {
                 json!({
                     "type": event.event_type,
@@ -315,7 +328,7 @@ impl SyncTestHarness {
         let access_session: AccessSession = serde_json::from_value(json!({
             "access_token": "test-access-token",
             "user_identifier": SYNCING_USER,
-            "device_id": "TESTDEVICE",
+            "device_id": SYNCING_DEVICE,
             "expires_at_seconds": i64::MAX,
         }))
         .expect("valid access session");
@@ -448,5 +461,44 @@ async fn to_device_event_is_delivered_exactly_once() {
         deliveries,
         vec![1, 0, 0],
         "a to-device event must arrive on the first sync and never again"
+    );
+}
+
+#[tokio::test]
+async fn sync_without_set_presence_records_no_writes() {
+    let harness = SyncTestHarness::new();
+
+    harness.sync_repeatedly(3).await;
+
+    assert_eq!(
+        harness.repository.recorded_writes(),
+        Vec::new(),
+        "GET /sync without set_presence must not write anything"
+    );
+}
+
+#[tokio::test]
+async fn acknowledged_to_device_events_are_not_redelivered() {
+    let harness = SyncTestHarness::new();
+    harness
+        .repository
+        .deliver_to_device_event_from_other_user("m.room_key_request", json!({ "action": "x" }));
+
+    let first_batch = harness.sync(None).await;
+    assert_eq!(first_batch.to_device.events.len(), 1);
+    assert_eq!(
+        first_batch.to_device.events[0].get("sender"),
+        Some(&json!(OTHER_USER)),
+        "to-device events report the real sender"
+    );
+    assert_eq!(harness.repository.stored_to_device_event_count(), 1);
+
+    let acknowledging_batch = harness.sync(Some(&first_batch.next_batch)).await;
+
+    assert_eq!(acknowledging_batch.to_device.events, Vec::<Value>::new());
+    assert_eq!(
+        harness.repository.stored_to_device_event_count(),
+        0,
+        "the event is deleted once the client syncs with a later token"
     );
 }
