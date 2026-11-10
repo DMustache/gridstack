@@ -459,6 +459,9 @@ pub trait RoomRepository: Send + Sync {
         room_id: &str,
     ) -> Result<Vec<JoinedRoomMemberProfile>, DomainError>;
     fn fetch_public_room_count(&self) -> Result<i64, DomainError>;
+
+    /// Highest committed position of the room sync stream, or 0 when empty.
+    fn fetch_latest_sync_stream_position(&self) -> Result<i64, DomainError>;
     fn fetch_public_room_roster_page(
         &self,
         offset: i64,
@@ -993,6 +996,21 @@ impl RoomRepository for RoomPersistence {
             .order(room_membership_projection::room_id.asc())
             .load::<String>(&mut connection)
             .map_err(|error| DomainError::Unavailable(error.into()))
+    }
+
+    fn fetch_latest_sync_stream_position(&self) -> Result<i64, DomainError> {
+        use schema::room_sync_stream;
+
+        let mut connection = self
+            .connection_pool
+            .get()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+
+        room_sync_stream::table
+            .select(max(room_sync_stream::stream_position))
+            .first::<Option<i64>>(&mut connection)
+            .map(Option::unwrap_or_default)
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))
     }
 
     fn fetch_public_room_count(&self) -> Result<i64, DomainError> {

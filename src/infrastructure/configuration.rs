@@ -15,6 +15,8 @@ pub struct ApplicationConfiguration {
     #[serde(default)]
     pub identity: IdentityConfiguration,
     pub rate_limit: RateLimitConfiguration,
+    #[serde(default)]
+    pub sync: SyncConfiguration,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -64,6 +66,26 @@ pub struct AppserviceConfiguration {
 #[derive(Clone, Debug, Deserialize)]
 pub struct RateLimitConfiguration {
     pub retry_after_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct SyncConfiguration {
+    /// Upper bound for the `/sync` `timeout` query parameter. Larger requested
+    /// values are clamped to it, not rejected.
+    #[serde(default = "default_maximum_sync_timeout_milliseconds")]
+    pub maximum_timeout_milliseconds: u64,
+}
+
+impl Default for SyncConfiguration {
+    fn default() -> Self {
+        Self {
+            maximum_timeout_milliseconds: default_maximum_sync_timeout_milliseconds(),
+        }
+    }
+}
+
+const fn default_maximum_sync_timeout_milliseconds() -> u64 {
+    30_000
 }
 
 #[derive(Clone, Debug, Deserialize)]

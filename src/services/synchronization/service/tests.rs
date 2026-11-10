@@ -4,15 +4,30 @@
 //! The repository double models the intended contract: one monotonic stream
 //! shared by room and to-device events, and to-device delivery filtered by the
 //! client's `since` token.
+//!
+//! Also covers issue #2: the long-poll wakes on published stream positions and
+//! its `timeout` is clamped to the configured maximum.
 
-use std::sync::{Arc, Mutex};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
+use axum::{
+    Extension,
+    extract::{Query, State},
+    http::{StatusCode, Uri},
+    response::IntoResponse,
+};
 use serde_json::{Value, json};
+use tokio::time::Instant;
 
 use crate::{
     infrastructure::{
-        chrono_clock::ChronoClock, configuration::AuthenticationConfiguration,
-        json_web_token::JsonWebToken, server_name::ServerName,
+        chrono_clock::ChronoClock,
+        configuration::{AuthenticationConfiguration, IdentityConfiguration, SyncConfiguration},
+        json_web_token::JsonWebToken,
+        server_name::ServerName,
     },
     services::{
         authorization::{
@@ -24,12 +39,21 @@ use crate::{
             service::AuthorizationService,
         },
         errors::DomainError,
+        events::service::EventsService,
+        identity::{
+            persistence::IdentityPersistence,
+            service::{InvitationStorageService, KeyManagementService},
+        },
+        rooms::{persistence::RoomPersistence, service::RoomsService},
+        state::{ApplicationState, RateLimiterState},
         synchronization::{
             entities::{SyncBatch, SyncRequest},
+            handlers,
             persistence::{
                 FilterRepository, StateEventRecord, TimelineEventRecord, UserRoomMembershipRecord,
             },
-            service::{SyncronizationService, parse_sync_stream_position},
+            service::{SyncronizationService, clamp_sync_timeout, parse_sync_stream_position},
+            stream_notifier::StreamNotifier,
         },
     },
 };
@@ -39,6 +63,8 @@ const SYNCING_DEVICE: &str = "TESTDEVICE";
 const OTHER_USER: &str = "@bob:localhost";
 const SERVER_INTERNAL_ACCOUNT_DATA_TYPE: &str = "org.matrix.msc3575.sync_stream_position";
 const SERVER_INTERNAL_TO_DEVICE_TYPE: &str = "org.matrix.gridstack.sync.hint";
+const UNUSED_DATABASE_URL: &str = "postgres://unused:unused@127.0.0.1:1/unused";
+const TEST_MAXIMUM_TIMEOUT_MILLISECONDS: u64 = 30_000;
 
 #[derive(Clone, Debug)]
 struct StoredToDeviceEvent {
@@ -299,26 +325,32 @@ impl FilterRepository for RecordingFilterRepository {
 
 struct SyncTestHarness {
     repository: Arc<RecordingFilterRepository>,
-    service: SyncronizationService,
+    service: Arc<SyncronizationService>,
+    stream_notifier: Arc<StreamNotifier>,
+    authorization_service: Arc<AuthorizationService>,
+    session_repository: Arc<InMemorySessionRepository>,
     access_session: AccessSessionStorageUnit,
 }
 
 impl SyncTestHarness {
     fn new() -> Self {
+        Self::with_maximum_timeout_milliseconds(TEST_MAXIMUM_TIMEOUT_MILLISECONDS)
+    }
+
+    fn with_maximum_timeout_milliseconds(maximum_timeout_milliseconds: u64) -> Self {
         let repository = Arc::new(RecordingFilterRepository::default());
         let server_name = ServerName::try_new("localhost").expect("valid server name");
         let session_storage_path = std::env::temp_dir().join(format!(
             "gridstack-sync-test-sessions-{}.tsv",
             uuid::Uuid::new_v4()
         ));
+        let session_repository = Arc::new(InMemorySessionRepository::from_storage_path(
+            session_storage_path,
+        ));
         let authorization_service = Arc::new(AuthorizationService::new(
             // Pool is built unchecked: no connection is opened by these tests.
-            Arc::new(AuthorizationPersistence::new(
-                "postgres://unused:unused@127.0.0.1:1/unused",
-            )),
-            Arc::new(InMemorySessionRepository::from_storage_path(
-                session_storage_path,
-            )),
+            Arc::new(AuthorizationPersistence::new(UNUSED_DATABASE_URL)),
+            Arc::clone(&session_repository) as _,
             Arc::new(JsonWebToken),
             Arc::new(ChronoClock),
             &server_name,
@@ -339,17 +371,30 @@ impl SyncTestHarness {
         }))
         .expect("valid access session");
 
+        let stream_notifier = Arc::new(StreamNotifier::new());
+
         Self {
-            service: SyncronizationService::new(
+            service: Arc::new(SyncronizationService::new(
                 Arc::clone(&repository) as Arc<dyn FilterRepository>,
-                authorization_service,
-            ),
+                Arc::clone(&authorization_service),
+                Arc::clone(&stream_notifier),
+                SyncConfiguration {
+                    maximum_timeout_milliseconds,
+                },
+            )),
             repository,
+            stream_notifier,
+            authorization_service,
+            session_repository,
             access_session: access_session.into(),
         }
     }
 
     async fn sync(&self, since: Option<&str>) -> SyncBatch {
+        self.sync_with_timeout(since, 0).await
+    }
+
+    async fn sync_with_timeout(&self, since: Option<&str>, timeout_milliseconds: u64) -> SyncBatch {
         self.service
             .sync(
                 &self.access_session,
@@ -358,13 +403,58 @@ impl SyncTestHarness {
                     since: since.map(str::to_owned),
                     full_state: false,
                     set_presence: None,
-                    timeout_milliseconds: 0,
+                    timeout_milliseconds,
                     use_state_after: false,
                     timeline_limit: 10,
                 },
             )
             .await
             .expect("sync succeeds")
+    }
+
+    /// Simulates a writer committing new data and publishing its position.
+    fn deliver_and_publish_to_device_event(&self) {
+        self.repository.deliver_to_device_event_from_other_user(
+            "m.room_key_request",
+            json!({ "action": "x" }),
+        );
+        let committed_stream_position = *self
+            .repository
+            .current_stream_position
+            .lock()
+            .expect("stream position lock");
+        self.stream_notifier
+            .publish_stream_position(committed_stream_position);
+    }
+
+    /// Application state whose sync service is backed by the fake repository.
+    /// Other services get unchecked pools and are never called.
+    fn application_state(&self) -> ApplicationState {
+        let server_name = ServerName::try_new("localhost").expect("valid server name");
+        let identity_persistence =
+            IdentityPersistence::new(UNUSED_DATABASE_URL, &IdentityConfiguration::default());
+        ApplicationState {
+            authorization_service: Arc::clone(&self.authorization_service),
+            rooms_service: Arc::new(RoomsService::new(
+                Arc::new(RoomPersistence::new(UNUSED_DATABASE_URL)),
+                Arc::new(EventsService::new(&server_name, Arc::new(ChronoClock))),
+                Arc::clone(&self.authorization_service),
+                &server_name,
+                Arc::clone(&self.stream_notifier),
+            )),
+            syncronization_service: Arc::clone(&self.service),
+            identity_key_management_service: Arc::new(KeyManagementService::new(
+                identity_persistence.clone(),
+            )),
+            identity_invitation_storage_service: Arc::new(InvitationStorageService::new(
+                identity_persistence.clone(),
+                identity_persistence,
+            )),
+            session_repository: Arc::clone(&self.session_repository) as _,
+            server_name,
+            allow_registration: false,
+            rate_limiter: Arc::new(RateLimiterState::new(Duration::from_mins(1), 120)),
+        }
     }
 
     /// Runs `count` syncs, each using the previous `next_batch`, like a client.
@@ -525,5 +615,121 @@ async fn next_batch_never_decreases_after_to_device_acknowledgement() {
     assert!(
         stream_positions.windows(2).all(|pair| pair[1] >= pair[0]),
         "next_batch went backwards after acknowledgement: {stream_positions:?}"
+    );
+}
+
+#[test]
+fn clamp_sync_timeout_bounds_requested_timeout_by_maximum() {
+    assert_eq!(clamp_sync_timeout(0, 30_000), Duration::ZERO);
+    assert_eq!(clamp_sync_timeout(5_000, 30_000), Duration::from_secs(5));
+    assert_eq!(clamp_sync_timeout(30_000, 30_000), Duration::from_secs(30));
+    assert_eq!(
+        clamp_sync_timeout(u64::MAX, 30_000),
+        Duration::from_secs(30)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn long_poll_returns_when_stream_advances() {
+    let harness = Arc::new(SyncTestHarness::new());
+    let initial_batch = harness.sync(None).await;
+
+    let publishing_harness = Arc::clone(&harness);
+    let publisher = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        publishing_harness.deliver_and_publish_to_device_event();
+    });
+
+    let started_at = Instant::now();
+    let woken_batch = harness
+        .sync_with_timeout(Some(&initial_batch.next_batch), 10_000)
+        .await;
+    let elapsed = started_at.elapsed();
+    publisher.await.expect("publisher task completes");
+
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "long-poll should wake on new data, took {elapsed:?}"
+    );
+    assert_eq!(woken_batch.to_device.events.len(), 1);
+    assert_ne!(woken_batch.next_batch, initial_batch.next_batch);
+}
+
+#[tokio::test(start_paused = true)]
+async fn long_poll_without_new_data_returns_after_timeout() {
+    let harness = SyncTestHarness::new();
+    let initial_batch = harness.sync(None).await;
+
+    let started_at = Instant::now();
+    let idle_batch = harness
+        .sync_with_timeout(Some(&initial_batch.next_batch), 10_000)
+        .await;
+
+    assert_eq!(started_at.elapsed(), Duration::from_secs(10));
+    assert_eq!(idle_batch.next_batch, initial_batch.next_batch);
+    assert_eq!(idle_batch.to_device.events, Vec::<Value>::new());
+}
+
+#[tokio::test(start_paused = true)]
+async fn timeout_above_maximum_is_clamped() {
+    let harness = SyncTestHarness::with_maximum_timeout_milliseconds(1_000);
+    let initial_batch = harness.sync(None).await;
+
+    let started_at = Instant::now();
+    harness
+        .sync_with_timeout(Some(&initial_batch.next_batch), 3_600_000)
+        .await;
+
+    assert_eq!(started_at.elapsed(), Duration::from_secs(1));
+}
+
+#[tokio::test(start_paused = true)]
+async fn sync_handler_parses_timeout_query_and_keeps_response_shape() {
+    let harness = SyncTestHarness::new();
+    let initial_batch = harness.sync(None).await;
+    let uri: Uri = format!(
+        "/_matrix/client/v3/sync?since={}&timeout=5000",
+        initial_batch.next_batch
+    )
+    .parse()
+    .expect("valid uri");
+
+    let started_at = Instant::now();
+    let response = handlers::sync(
+        Query::try_from_uri(&uri),
+        State(harness.application_state()),
+        Extension(harness.access_session.clone()),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(
+        started_at.elapsed(),
+        Duration::from_secs(5),
+        "the timeout query parameter drives the long-poll"
+    );
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("readable body");
+    let body: Value = serde_json::from_slice(&body).expect("json body");
+    let mut top_level_keys: Vec<&str> = body
+        .as_object()
+        .expect("json object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    top_level_keys.sort_unstable();
+    assert_eq!(
+        top_level_keys,
+        vec![
+            "account_data",
+            "device_lists",
+            "device_one_time_keys_count",
+            "next_batch",
+            "presence",
+            "rooms",
+            "to_device",
+        ]
     );
 }
