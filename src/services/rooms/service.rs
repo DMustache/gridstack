@@ -124,10 +124,10 @@ impl RoomsService {
         &self,
         command: GetPublicRoomsCommand,
     ) -> Result<PublicRoomsPage, RoomsApplicationError> {
-        if let Some(server) = command.server.as_deref() {
-            if server.trim().is_empty() || server != self.server_name.as_str() {
-                return Err(RoomsApplicationError::InvalidParameter);
-            }
+        if let Some(server) = command.server.as_deref()
+            && (server.trim().is_empty() || server != self.server_name.as_str())
+        {
+            return Err(RoomsApplicationError::InvalidParameter);
         }
 
         let since_offset = parse_public_rooms_offset(command.since.as_deref())?;
@@ -154,7 +154,7 @@ impl RoomsService {
                 .fetch_room_state_events(&public_room.room_id)
                 .map_err(|_| RoomsApplicationError::Internal)?;
 
-            chunk.push(map_public_room_chunk(public_room, state_events));
+            chunk.push(map_public_room_chunk(public_room, &state_events));
         }
 
         let total_room_count_usize = usize::try_from(total_room_count).ok();
@@ -362,16 +362,16 @@ fn parse_public_rooms_offset(value: Option<&str>) -> Result<usize, RoomsApplicat
 
 fn map_public_room_chunk(
     public_room: PublicRoomRosterEntry,
-    state_events: Vec<RoomStateEvent>,
+    state_events: &[RoomStateEvent],
 ) -> PublicRoomsChunk {
-    let create_content = room_state_content(&state_events, "m.room.create");
-    let join_rules_content = room_state_content(&state_events, "m.room.join_rules");
-    let history_visibility_content = room_state_content(&state_events, "m.room.history_visibility");
-    let guest_access_content = room_state_content(&state_events, "m.room.guest_access");
-    let canonical_alias_content = room_state_content(&state_events, "m.room.canonical_alias");
-    let name_content = room_state_content(&state_events, "m.room.name");
-    let topic_content = room_state_content(&state_events, "m.room.topic");
-    let avatar_content = room_state_content(&state_events, "m.room.avatar");
+    let create_content = room_state_content(state_events, "m.room.create");
+    let join_rules_content = room_state_content(state_events, "m.room.join_rules");
+    let history_visibility_content = room_state_content(state_events, "m.room.history_visibility");
+    let guest_access_content = room_state_content(state_events, "m.room.guest_access");
+    let canonical_alias_content = room_state_content(state_events, "m.room.canonical_alias");
+    let name_content = room_state_content(state_events, "m.room.name");
+    let topic_content = room_state_content(state_events, "m.room.topic");
+    let avatar_content = room_state_content(state_events, "m.room.avatar");
 
     PublicRoomsChunk {
         room_id: public_room.room_id,
