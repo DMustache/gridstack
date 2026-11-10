@@ -168,5 +168,55 @@
     "reveal": "always",
     "hide": "never",
     "show_command": false
+  },
+  {
+    "label": "Agents: Bootstrap GitHub",
+    "command": "./scripts/agents/bootstrap_github.sh",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "save": "all",
+    "reveal": "no_focus",
+    "hide": "on_success",
+    "show_command": false
+  },
+  {
+    "label": "Agents: Project State",
+    "command": "./scripts/agents/project_state.sh",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "save": "all",
+    "reveal": "no_focus",
+    "hide": "on_success",
+    "show_command": false
+  },
+  {
+    "label": "Agents: Repo Map",
+    "command": "./scripts/agents/repo_map.sh",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "save": "all",
+    "reveal": "no_focus",
+    "hide": "on_success",
+    "show_command": false
+  },
+  {
+    "label": "Agents: Spec Coverage",
+    "command": "python3 ./scripts/agents/spec_coverage.py",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "save": "all",
+    "reveal": "no_focus",
+    "hide": "on_success",
+    "show_command": false
+  },
+  {
+    "label": "QA: Gate",
+    "command": "./scripts/agents/qa_gate.sh",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "save": "all",
+    "reveal": "no_focus",
+    "hide": "on_success",
+    "show_command": false
   }
 ]

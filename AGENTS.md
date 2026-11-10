@@ -132,3 +132,13 @@ Use this format:
 ## Notes
 - ...
 ```
+
+## Multi-Agent Workflow
+
+Autonomous development is run by the `/lead` skill (`.claude/skills/lead/SKILL.md`) with `worker` subagents (`.claude/agents/worker.md`).
+
+- Lifecycle, roles, task states, review checklist: `docs/process/LIFECYCLE.md`
+- Test requirements by change type: `docs/process/QA.md`
+- Milestones: `docs/process/ROADMAP.md`
+- Sprint reports: `docs/sprints/`
+- Task and blocker contracts: `.github/ISSUE_TEMPLATE/`
