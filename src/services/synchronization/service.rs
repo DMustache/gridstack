@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use crate::{
-    infrastructure::user_identifier::UserIdentifier,
+    infrastructure::{configuration::SyncConfiguration, user_identifier::UserIdentifier},
     services::{
         authorization::{
             entities::AuthorizedUserIdentifier,
@@ -16,6 +16,7 @@ use crate::{
             errors::SyncronizationApplicationError,
             handlers::DefineFilterView,
             persistence::{FilterRepository, UserRoomMembershipRecord},
+            stream_notifier::StreamNotifier,
         },
     },
 };
@@ -24,16 +25,32 @@ use serde_json::{Map, Value, json};
 pub struct SyncronizationService {
     filter_repository: Arc<dyn FilterRepository>,
     authorization_service: Arc<AuthorizationService>,
+    stream_notifier: Arc<StreamNotifier>,
+    sync_configuration: SyncConfiguration,
+}
+
+/// Bounds the client-requested `/sync` long-poll timeout by the configured
+/// maximum.
+#[must_use]
+pub fn clamp_sync_timeout(
+    requested_timeout_milliseconds: u64,
+    maximum_timeout_milliseconds: u64,
+) -> Duration {
+    Duration::from_millis(requested_timeout_milliseconds.min(maximum_timeout_milliseconds))
 }
 
 impl SyncronizationService {
     pub fn new(
         filter_repository: Arc<dyn FilterRepository>,
         authorization_service: Arc<AuthorizationService>,
+        stream_notifier: Arc<StreamNotifier>,
+        sync_configuration: SyncConfiguration,
     ) -> Self {
         Self {
             filter_repository,
             authorization_service,
+            stream_notifier,
+            sync_configuration,
         }
     }
 
@@ -94,11 +111,22 @@ impl SyncronizationService {
             .fetch_current_sync_stream_position()
             .map_err(Self::map_domain_error)?;
 
+        let long_poll_timeout = clamp_sync_timeout(
+            request.timeout_milliseconds,
+            self.sync_configuration.maximum_timeout_milliseconds,
+        );
         if !request.full_state
-            && request.timeout_milliseconds > 0
+            && !long_poll_timeout.is_zero()
             && current_stream_position <= since_stream_position
         {
-            tokio::time::sleep(Duration::from_millis(request.timeout_milliseconds)).await;
+            let mut stream_position_receiver = self.stream_notifier.subscribe();
+            // Elapsed timeout and closed channel both mean "respond with what we have".
+            let _ = tokio::time::timeout(
+                long_poll_timeout,
+                stream_position_receiver
+                    .wait_for(|stream_position| *stream_position > since_stream_position),
+            )
+            .await;
             current_stream_position = self
                 .filter_repository
                 .fetch_current_sync_stream_position()

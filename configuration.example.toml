@@ -30,6 +30,10 @@ password_pepper = ""
 [rate_limit]
 retry_after_ms = 2000
 
+[sync]
+# env: GRIDSTACK__SYNC__MAXIMUM_TIMEOUT_MILLISECONDS
+maximum_timeout_milliseconds = 30000
+
 [identity]
 # Primary long-term ed25519 key for identity endpoints.
 # Only the private seed is configured; the public key is derived from it.
