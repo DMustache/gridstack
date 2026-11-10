@@ -34,6 +34,7 @@ use crate::{
                 send_room_receipt::SendRoomReceiptUseCase, set_read_markers::SetReadMarkersUseCase,
             },
         },
+        synchronization::stream_notifier::StreamNotifier,
     },
 };
 
@@ -60,6 +61,7 @@ pub struct RoomsService {
     events_service: Arc<EventsService>,
     authorization_service: Arc<AuthorizationService>,
     server_name: Arc<ServerName>,
+    stream_notifier: Arc<StreamNotifier>,
 }
 
 #[allow(
@@ -72,12 +74,14 @@ impl RoomsService {
         events_service: Arc<EventsService>,
         authorization_service: Arc<AuthorizationService>,
         server_name: &ServerName,
+        stream_notifier: Arc<StreamNotifier>,
     ) -> Self {
         Self {
             room_repository,
             events_service,
             authorization_service,
             server_name: Arc::new(server_name.clone()),
+            stream_notifier,
         }
     }
 
@@ -86,13 +90,14 @@ impl RoomsService {
         creator_user_id: &AuthorizedUserIdentifier,
         command: CreateRoomCommand,
     ) -> Result<CreatedRoom, RoomsApplicationError> {
-        CreateRoomUseCase::new(
+        let created_room = CreateRoomUseCase::new(
             self.room_repository.as_ref(),
             self.events_service.as_ref(),
             self.authorization_service.as_ref(),
             self.server_name.as_ref(),
         )
-        .execute(creator_user_id, command)
+        .execute(creator_user_id, command);
+        self.publish_after_room_event_write(created_room)
     }
 
     pub fn join_room_by_id(
@@ -101,11 +106,10 @@ impl RoomsService {
         room_id: String,
         command: JoinRoomCommand,
     ) -> Result<JoinedRoom, RoomsApplicationError> {
-        JoinRoomUseCase::new(self.room_repository.as_ref(), self.events_service.as_ref()).execute(
-            joined_user_id,
-            room_id,
-            command,
-        )
+        let joined_room =
+            JoinRoomUseCase::new(self.room_repository.as_ref(), self.events_service.as_ref())
+                .execute(joined_user_id, room_id, command);
+        self.publish_after_room_event_write(joined_room)
     }
 
     pub fn get_joined_rooms(
@@ -198,11 +202,10 @@ impl RoomsService {
         room_id: String,
         command: LeaveRoomCommand,
     ) -> Result<LeftRoom, RoomsApplicationError> {
-        LeaveRoomUseCase::new(self.room_repository.as_ref(), self.events_service.as_ref()).execute(
-            left_user_id,
-            room_id,
-            command,
-        )
+        let left_room =
+            LeaveRoomUseCase::new(self.room_repository.as_ref(), self.events_service.as_ref())
+                .execute(left_user_id, room_id, command);
+        self.publish_after_room_event_write(left_room)
     }
 
     pub fn invite_user_to_room(
@@ -211,12 +214,13 @@ impl RoomsService {
         room_id: String,
         command: InviteUserCommand,
     ) -> Result<InvitedUser, RoomsApplicationError> {
-        InviteUserUseCase::new(
+        let invited_user = InviteUserUseCase::new(
             self.room_repository.as_ref(),
             self.events_service.as_ref(),
             self.authorization_service.as_ref(),
         )
-        .execute(inviter_user_id, room_id, command)
+        .execute(inviter_user_id, room_id, command);
+        self.publish_after_room_event_write(invited_user)
     }
 
     pub fn get_room_state(
@@ -284,12 +288,13 @@ impl RoomsService {
         state_key: String,
         content: serde_json::Value,
     ) -> Result<String, RoomsApplicationError> {
-        SetRoomStateWithKeyUseCase::new(
+        let state_event_identifier = SetRoomStateWithKeyUseCase::new(
             self.room_repository.as_ref(),
             self.events_service.as_ref(),
             self.server_name.as_ref(),
         )
-        .execute(user_id, room_id, event_type, state_key, content)
+        .execute(user_id, room_id, event_type, state_key, content);
+        self.publish_after_room_event_write(state_event_identifier)
     }
 
     pub fn send_room_message_event(
@@ -300,11 +305,12 @@ impl RoomsService {
         transaction_id: String,
         content: serde_json::Value,
     ) -> Result<String, RoomsApplicationError> {
-        SendRoomMessageEventUseCase::new(
+        let message_event_identifier = SendRoomMessageEventUseCase::new(
             self.room_repository.as_ref(),
             self.events_service.as_ref(),
         )
-        .execute(user_id, room_id, &event_type, transaction_id, content)
+        .execute(user_id, room_id, &event_type, transaction_id, content);
+        self.publish_after_room_event_write(message_event_identifier)
     }
 
     pub fn send_room_receipt(
@@ -329,6 +335,26 @@ impl RoomsService {
 }
 
 impl RoomsService {
+    /// Wakes waiting `/sync` long-polls after a committed room event write.
+    /// The write already succeeded, so a failure to read the new stream
+    /// position is logged and does not fail the request.
+    fn publish_after_room_event_write<T>(
+        &self,
+        write_result: Result<T, RoomsApplicationError>,
+    ) -> Result<T, RoomsApplicationError> {
+        if write_result.is_ok() {
+            match self.room_repository.fetch_latest_sync_stream_position() {
+                Ok(latest_stream_position) => self
+                    .stream_notifier
+                    .publish_stream_position(latest_stream_position),
+                Err(domain_error) => {
+                    error!(error = %domain_error, "failed to read latest sync stream position after room event write");
+                }
+            }
+        }
+        write_result
+    }
+
     fn require_room_state_read_access(
         &self,
         room_id: &str,

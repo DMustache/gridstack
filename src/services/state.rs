@@ -31,6 +31,7 @@ use crate::{
         synchronization::{
             persistence::{FilterRepository, SyncronizationPersistence},
             service::SyncronizationService,
+            stream_notifier::StreamNotifier,
         },
         traits::{Clock, JsonWebTokenAdapter},
     },
@@ -98,11 +99,13 @@ impl ApplicationState {
             &application_configuration.database.url,
         ));
         let events_service = Arc::new(EventsService::new(&server_name, Arc::clone(&clock)));
+        let stream_notifier = Arc::new(StreamNotifier::new());
         let rooms_service = Arc::new(RoomsService::new(
             room_repository,
             events_service,
             Arc::clone(&authorization_service),
             &server_name,
+            Arc::clone(&stream_notifier),
         ));
         let filter_repository: Arc<dyn FilterRepository> = Arc::new(
             SyncronizationPersistence::new(&application_configuration.database.url),
@@ -110,6 +113,8 @@ impl ApplicationState {
         let syncronization_service = Arc::new(SyncronizationService::new(
             filter_repository,
             Arc::clone(&authorization_service),
+            stream_notifier,
+            application_configuration.sync.clone(),
         ));
         let identity_persistence = IdentityPersistence::new(
             &application_configuration.database.url,
