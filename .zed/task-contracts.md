@@ -113,3 +113,28 @@ This document defines the contract for tasks in `.zed/tasks.json`.
 - Represents: cross-compile the standalone `client/` crate for Windows 10/11 (`x86_64-pc-windows-gnu`) in release mode.
 - Validation: command exit code; `client/target/x86_64-pc-windows-gnu/release/client.exe` exists and is non-empty.
 - Failure log: `generated/logs/client-build-windows-release.log`.
+
+18. `Agents: Bootstrap GitHub`
+- Script: `scripts/agents/bootstrap_github.sh`
+- Represents: idempotent creation of workflow labels, roadmap milestones, and reuse of the "Gridstack" project board (Status mirror + Sprint field).
+- Validation: `.github/agents-project.env` exists and is non-empty. Requires `gh` scopes `repo` and `project`.
+
+19. `Agents: Project State`
+- Script: `scripts/agents/project_state.sh`
+- Represents: snapshot of git, spec coverage, QA gate, milestones, task stages, PRs.
+- Validation: `generated/reports/state.md` exists and is non-empty.
+
+20. `Agents: Repo Map`
+- Script: `scripts/agents/repo_map.sh`
+- Represents: compact file/route/trait/migration/test index for agents.
+- Validation: `generated/reports/repo-map.md` exists and is non-empty.
+
+21. `Agents: Spec Coverage`
+- Script: `scripts/agents/spec_coverage.py`
+- Represents: Matrix CS API operations in `generated/openapi/matrix-openapi.json` vs implemented axum routes.
+- Validation: `generated/reports/spec-coverage.md` and `.json` exist and are non-empty. Exit 2 means the Matrix OpenAPI is missing.
+
+22. `QA: Gate`
+- Script: `scripts/agents/qa_gate.sh`
+- Represents: Format → Check → Ultra Clippy → Test, stopping at first failure.
+- Validation: last line of `generated/reports/qa-gate.txt` is `QA GATE PASSED`.
