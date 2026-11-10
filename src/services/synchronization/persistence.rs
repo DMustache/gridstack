@@ -1,5 +1,5 @@
 use diesel::{
-    BoolExpressionMethods, ExpressionMethods, JoinOnDsl, NullableExpressionMethods,
+    BoolExpressionMethods, Connection, ExpressionMethods, JoinOnDsl, NullableExpressionMethods,
     OptionalExtension, QueryDsl, RunQueryDsl,
     dsl::{max, min},
     insert_into,
@@ -82,15 +82,21 @@ pub trait FilterRepository: Send + Sync {
         &self,
         user_identifier: &str,
     ) -> Result<Vec<Value>, DomainError>;
+    /// Stores a to-device message and returns its position in the shared sync stream.
     fn enqueue_to_device_event(
         &self,
-        user_identifier: &str,
+        recipient_user_identifier: &str,
+        recipient_device_identifier: &str,
+        sender_user_identifier: &str,
         event_type: &str,
         content: Value,
     ) -> Result<i64, DomainError>;
+    /// Deletes the device's messages acknowledged by `since_stream_position`
+    /// (positions `<=` it), then returns the ones after it.
     fn fetch_to_device_events_since(
         &self,
-        user_identifier: &str,
+        recipient_user_identifier: &str,
+        recipient_device_identifier: &str,
         since_stream_position: i64,
     ) -> Result<Vec<Value>, DomainError>;
 }
@@ -128,16 +134,7 @@ pub struct SyncronizationPersistence {
     connection_pool: r2d2::Pool<ConnectionManager<PgConnection>>,
     presence_store: RwLock<HashMap<String, String>>,
     account_data_store: RwLock<HashMap<String, HashMap<String, Value>>>,
-    to_device_store: RwLock<Vec<ToDeviceRecord>>,
     state_directory_path: PathBuf,
-}
-
-#[derive(Clone, Debug)]
-struct ToDeviceRecord {
-    stream_position: i64,
-    user_identifier: String,
-    event_type: String,
-    content: Value,
 }
 
 impl SyncronizationPersistence {
@@ -150,7 +147,6 @@ impl SyncronizationPersistence {
             connection_pool,
             presence_store: RwLock::new(load_presence_store(&state_directory_path)),
             account_data_store: RwLock::new(load_account_data_store(&state_directory_path)),
-            to_device_store: RwLock::new(load_to_device_store(&state_directory_path)),
             state_directory_path,
         }
     }
@@ -207,17 +203,23 @@ impl FilterRepository for SyncronizationPersistence {
     }
 
     fn fetch_current_sync_stream_position(&self) -> Result<i64, DomainError> {
-        use schema::room_sync_stream;
+        use schema::{room_sync_stream, to_device_messages};
 
         let mut connection = self
             .connection_pool
             .get()
             .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
-        let stream_position = room_sync_stream::table
+        let room_stream_position = room_sync_stream::table
             .select(max(room_sync_stream::stream_position))
             .first::<Option<i64>>(&mut connection)
             .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
-        Ok(stream_position.unwrap_or(0))
+        let to_device_stream_position = to_device_messages::table
+            .select(max(to_device_messages::stream_position))
+            .first::<Option<i64>>(&mut connection)
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+        Ok(room_stream_position
+            .unwrap_or(0)
+            .max(to_device_stream_position.unwrap_or(0)))
     }
 
     fn fetch_user_room_memberships(
@@ -651,47 +653,76 @@ impl FilterRepository for SyncronizationPersistence {
 
     fn enqueue_to_device_event(
         &self,
-        user_identifier: &str,
+        recipient_user_identifier: &str,
+        recipient_device_identifier: &str,
+        sender_user_identifier: &str,
         event_type: &str,
         content: Value,
     ) -> Result<i64, DomainError> {
-        let stream_position = self.fetch_current_sync_stream_position()?.saturating_add(1);
-        {
-            let mut to_device_store = self
-                .to_device_store
-                .write()
-                .map_err(|_| DomainError::InvalidRequest("to-device lock failure".to_owned()))?;
-            to_device_store.push(ToDeviceRecord {
-                stream_position,
-                user_identifier: user_identifier.to_owned(),
-                event_type: event_type.to_owned(),
-                content,
-            });
-        }
-        persist_to_device_store(&self.state_directory_path, &self.to_device_store)?;
-        Ok(stream_position)
+        use schema::to_device_messages;
+
+        let mut connection = self
+            .connection_pool
+            .get()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+        insert_into(to_device_messages::table)
+            .values((
+                to_device_messages::recipient_user_id.eq(recipient_user_identifier),
+                to_device_messages::recipient_device_id.eq(recipient_device_identifier),
+                to_device_messages::sender_user_id.eq(sender_user_identifier),
+                to_device_messages::event_type.eq(event_type),
+                to_device_messages::content.eq(content),
+            ))
+            .returning(to_device_messages::stream_position)
+            .get_result::<i64>(&mut connection)
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))
     }
 
     fn fetch_to_device_events_since(
         &self,
-        user_identifier: &str,
+        recipient_user_identifier: &str,
+        recipient_device_identifier: &str,
         since_stream_position: i64,
     ) -> Result<Vec<Value>, DomainError> {
-        let to_device_store = self
-            .to_device_store
-            .read()
-            .map_err(|_| DomainError::InvalidRequest("to-device lock failure".to_owned()))?;
-        Ok(to_device_store
-            .iter()
-            .filter(|record| {
-                record.user_identifier == user_identifier
-                    && record.stream_position > since_stream_position
+        use schema::to_device_messages;
+
+        let mut connection = self
+            .connection_pool
+            .get()
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+        let recipient_messages = to_device_messages::recipient_user_id
+            .eq(recipient_user_identifier)
+            .and(to_device_messages::recipient_device_id.eq(recipient_device_identifier));
+        let pending_messages = connection
+            .transaction::<_, diesel::result::Error, _>(|connection| {
+                diesel::delete(
+                    to_device_messages::table.filter(
+                        recipient_messages
+                            .and(to_device_messages::stream_position.le(since_stream_position)),
+                    ),
+                )
+                .execute(connection)?;
+                to_device_messages::table
+                    .filter(
+                        recipient_messages
+                            .and(to_device_messages::stream_position.gt(since_stream_position)),
+                    )
+                    .order(to_device_messages::stream_position.asc())
+                    .select((
+                        to_device_messages::sender_user_id,
+                        to_device_messages::event_type,
+                        to_device_messages::content,
+                    ))
+                    .load::<(String, String, Value)>(connection)
             })
-            .map(|record| {
+            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+        Ok(pending_messages
+            .into_iter()
+            .map(|(sender_user_identifier, event_type, content)| {
                 serde_json::json!({
-                    "type": record.event_type,
-                    "sender": user_identifier,
-                    "content": record.content
+                    "type": event_type,
+                    "sender": sender_user_identifier,
+                    "content": content
                 })
             })
             .collect())
@@ -763,73 +794,5 @@ fn persist_account_data_store(
     fs::write(file_path, payload).map_err(|error| DomainError::InvalidRequest(error.to_string()))
 }
 
-fn load_to_device_store(state_directory_path: &Path) -> Vec<ToDeviceRecord> {
-    let file_path = state_directory_path.join("to_device.jsonl");
-    let Ok(file) = fs::File::open(file_path) else {
-        return Vec::new();
-    };
-    BufReader::new(file)
-        .lines()
-        .map_while(Result::ok)
-        .filter_map(|line| serde_json::from_str::<ToDeviceRecordWire>(&line).ok())
-        .map(ToDeviceRecord::from)
-        .collect()
-}
-
-fn persist_to_device_store(
-    state_directory_path: &Path,
-    to_device_store: &RwLock<Vec<ToDeviceRecord>>,
-) -> Result<(), DomainError> {
-    fs::create_dir_all(state_directory_path)
-        .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
-    let file_path = state_directory_path.join("to_device.jsonl");
-    let snapshot = to_device_store
-        .read()
-        .map_err(|_| DomainError::InvalidRequest("to-device lock failure".to_owned()))?;
-    let mut file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(file_path)
-        .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
-    for record in snapshot.iter() {
-        let payload = serde_json::to_string(&ToDeviceRecordWire::from(record.clone()))
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
-        writeln!(file, "{payload}")
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
-    }
-    drop(snapshot);
-    file.flush()
-        .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
-    Ok(())
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct ToDeviceRecordWire {
-    stream_position: i64,
-    user_identifier: String,
-    event_type: String,
-    content: Value,
-}
-
-impl From<ToDeviceRecordWire> for ToDeviceRecord {
-    fn from(value: ToDeviceRecordWire) -> Self {
-        Self {
-            stream_position: value.stream_position,
-            user_identifier: value.user_identifier,
-            event_type: value.event_type,
-            content: value.content,
-        }
-    }
-}
-
-impl From<ToDeviceRecord> for ToDeviceRecordWire {
-    fn from(value: ToDeviceRecord) -> Self {
-        Self {
-            stream_position: value.stream_position,
-            user_identifier: value.user_identifier,
-            event_type: value.event_type,
-            content: value.content,
-        }
-    }
-}
+#[cfg(test)]
+mod tests;

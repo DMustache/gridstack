@@ -231,6 +231,17 @@ diesel::table! {
 }
 
 diesel::table! {
+    to_device_messages (stream_position) {
+        stream_position -> Int8,
+        recipient_user_id -> Varchar,
+        recipient_device_id -> Varchar,
+        sender_user_id -> Varchar,
+        event_type -> Varchar,
+        content -> Jsonb,
+    }
+}
+
+diesel::table! {
     user_filters (id) {
         id -> Int8,
         user_id -> Varchar,
@@ -303,6 +314,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     room_sync_stream,
     room_timeline_projection,
     rooms,
+    to_device_messages,
     user_filters,
     users,
 );
