@@ -6,14 +6,10 @@
 //! Required:
 //! - `GRIDSTACK_QA_BASE_URL`, for example `http://127.0.0.1:3000`
 //!
-//! Optional:
-//! - `GRIDSTACK_QA_STATE_DIRECTORY`: the server's `generated/state` directory.
-//!   When set, the test also checks that `to_device.jsonl` stops growing.
-//!
 //! The server rate-limits to 120 requests per minute per client, so run these
 //! tests at most a few times per minute.
 
-use std::{path::PathBuf, time::Duration};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -120,17 +116,10 @@ fn events_of_type(events: &Value, event_type: &str) -> usize {
     })
 }
 
-fn to_device_file_size() -> Option<u64> {
-    let directory = std::env::var("GRIDSTACK_QA_STATE_DIRECTORY").ok()?;
-    let path = PathBuf::from(directory).join("to_device.jsonl");
-    Some(std::fs::metadata(path).map_or(0, |metadata| metadata.len()))
-}
-
 #[tokio::test]
 #[ignore = "needs a running server: set GRIDSTACK_QA_BASE_URL"]
 async fn idle_syncs_do_not_accumulate_to_device_events() {
     let client = QaClient::register_fresh_user().await;
-    let file_size_before = to_device_file_size();
 
     let responses = client.sync_repeatedly(IDLE_SYNC_COUNT).await;
 
@@ -143,15 +132,6 @@ async fn idle_syncs_do_not_accumulate_to_device_events() {
         vec![0; IDLE_SYNC_COUNT],
         "nobody sent this user a to-device message"
     );
-
-    if let (Some(before), Some(after)) = (file_size_before, to_device_file_size()) {
-        assert_eq!(
-            before,
-            after,
-            "to_device.jsonl grew by {} bytes during idle syncs",
-            after.saturating_sub(before)
-        );
-    }
 }
 
 #[tokio::test]

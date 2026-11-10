@@ -29,7 +29,7 @@ use crate::{
             persistence::{
                 FilterRepository, StateEventRecord, TimelineEventRecord, UserRoomMembershipRecord,
             },
-            service::SyncronizationService,
+            service::{SyncronizationService, parse_sync_stream_position},
         },
     },
 };
@@ -128,11 +128,17 @@ impl FilterRepository for RecordingFilterRepository {
         Ok(None)
     }
 
+    /// Mirrors the Postgres adapter: the current position is the highest
+    /// stored row, so it drops when acknowledged to-device rows are deleted.
     fn fetch_current_sync_stream_position(&self) -> Result<i64, DomainError> {
-        Ok(*self
-            .current_stream_position
+        Ok(self
+            .to_device_events
             .lock()
-            .expect("stream position lock"))
+            .expect("to-device lock")
+            .iter()
+            .map(|event| event.stream_position)
+            .max()
+            .unwrap_or(0))
     }
 
     fn fetch_user_room_memberships(
@@ -500,5 +506,24 @@ async fn acknowledged_to_device_events_are_not_redelivered() {
         harness.repository.stored_to_device_event_count(),
         0,
         "the event is deleted once the client syncs with a later token"
+    );
+}
+
+#[tokio::test]
+async fn next_batch_never_decreases_after_to_device_acknowledgement() {
+    let harness = SyncTestHarness::new();
+    harness
+        .repository
+        .deliver_to_device_event_from_other_user("m.room_key_request", json!({ "action": "x" }));
+
+    let batches = harness.sync_repeatedly(3).await;
+
+    let stream_positions: Vec<i64> = batches
+        .iter()
+        .map(|batch| parse_sync_stream_position(&batch.next_batch).expect("valid token"))
+        .collect();
+    assert!(
+        stream_positions.windows(2).all(|pair| pair[1] >= pair[0]),
+        "next_batch went backwards after acknowledgement: {stream_positions:?}"
     );
 }

@@ -141,8 +141,10 @@ impl SyncronizationService {
             &sync_filter_constraints,
         )?;
 
+        let next_batch_stream_position = current_stream_position.max(since_stream_position);
+
         Ok(SyncBatch {
-            next_batch: format!("s{current_stream_position}_0_0_0_0_0_0_0_0"),
+            next_batch: format!("s{next_batch_stream_position}_0_0_0_0_0_0_0_0"),
             rooms,
             presence: SyncEventsBatch {
                 events: presence_events,
