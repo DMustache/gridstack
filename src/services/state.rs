@@ -63,12 +63,14 @@ struct RateLimitBucket {
 }
 
 impl ApplicationState {
+    /// # Errors
+    ///
+    /// Returns an error if the configured server name is invalid.
+    ///
     /// # Panics
     ///
     /// Will panic if database url is invalid or connection fails.
-    #[allow(clippy::expect_used)]
-    #[must_use]
-    pub fn new(application_configuration: &ApplicationConfiguration) -> Self {
+    pub fn new(application_configuration: &ApplicationConfiguration) -> anyhow::Result<Self> {
         info!("initializing application state");
         set_rate_limit_retry_after_ms(application_configuration.rate_limit.retry_after_ms);
         log_database_startup_status(&application_configuration.database.url);
@@ -82,10 +84,7 @@ impl ApplicationState {
         let json_web_token_adapter: Arc<dyn JsonWebTokenAdapter> = Arc::new(JsonWebToken);
         let clock: Arc<dyn Clock> = Arc::new(ChronoClock);
 
-        let server_name = application_configuration
-            .server
-            .server_name()
-            .expect("Server Name Invalid");
+        let server_name = application_configuration.server.server_name()?;
 
         let authorization_service = Arc::new(AuthorizationService::new(
             user_repository,
@@ -128,7 +127,7 @@ impl ApplicationState {
         let rate_limiter = Arc::new(RateLimiterState::new(Duration::from_mins(1), 120));
         info!("application state initialized");
 
-        Self {
+        Ok(Self {
             authorization_service,
             rooms_service,
             syncronization_service,
@@ -138,7 +137,7 @@ impl ApplicationState {
             server_name,
             allow_registration: application_configuration.authenification.allow_registration,
             rate_limiter,
-        }
+        })
     }
 
     pub fn flush_runtime_state(&self) {
