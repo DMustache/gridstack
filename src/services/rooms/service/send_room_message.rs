@@ -85,7 +85,7 @@ where
             user_id.as_existing_user_identifier(),
         )?;
         let (message_event_kind, event_content) =
-            parse_room_message_event_content(event_type, content).map_err(|_| {
+            parse_room_message_event_content(event_type, content).map_err(|()| {
                 warn!(
                     room_id = %room_id,
                     event_type = %event_type,
