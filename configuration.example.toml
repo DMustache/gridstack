@@ -4,16 +4,19 @@ port = 3000
 server_name = "127.0.0.1:3000"
 
 [database]
-url = "postgres://admin:admin@localhost/gridstack"
+# env: GRIDSTACK__DATABASE__URL
+url = ""
 
 [authenification]
 allow_registration = true
 access_token_expiry_seconds = 3600
 refresh_token_expiry_seconds = 7776000
 # openssl rand -hex 64
-json_web_token_secret = "f4351c639741bdfc82fa19560c3c4c8866828384b7448dff20b797d8e598a6b3a6bedc11d69b3f6cfc35f1a7659c80b28890edd4c03e0a8e102e352a28ed1e44"
+# env: GRIDSTACK__AUTHENIFICATION__JSON_WEB_TOKEN_SECRET (>= 32 bytes)
+json_web_token_secret = ""
 # openssl rand -hex 16
-password_pepper = "45590a614fff689504f123c3add6ad36"
+# env: GRIDSTACK__AUTHENIFICATION__PASSWORD_PEPPER (>= 32 bytes)
+password_pepper = ""
 
 # Optional appservice authentication/namespace ownership.
 # `controlled_user_id_patterns` are Rust regex strings evaluated against full MXID.
@@ -43,8 +46,10 @@ retry_after_ms = 2000
 # - Store in secret management, not in git.
 # - Rotate intentionally (do not auto-regenerate on startup).
 long_term_key_id = "ed25519:0"
-long_term_public_key = "VXuGitF39UH5iRfvbIknlvlAVKgD1BsLDMvBf0pmp7c"
-long_term_private_key = "dGhpc19pc19hX3BsYWNlaG9sZGVyX2tleV9mb3JfZGV2X29ubHk"
+# env: GRIDSTACK__IDENTITY__LONG_TERM_PUBLIC_KEY
+# long_term_public_key = ""
+# env: GRIDSTACK__IDENTITY__LONG_TERM_PRIVATE_KEY
+# long_term_private_key = ""
 
 # Ephemeral invite key validity window in seconds (default: 7 days).
 ephemeral_key_validity_seconds = 604800

@@ -1,7 +1,8 @@
 use std::net::SocketAddr;
 
-use config::Config;
+use config::{Config, ConfigBuilder, Environment, builder::DefaultState};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use crate::infrastructure::server_name::{ServerName, ServerNamePresentationFormat};
 
@@ -9,6 +10,7 @@ use crate::infrastructure::server_name::{ServerName, ServerNamePresentationForma
 pub struct ApplicationConfiguration {
     pub server: ServerConfiguration,
     pub database: DatabaseConfiguration,
+    #[serde(alias = "authentication")]
     pub authenification: AuthenticationConfiguration,
     #[serde(default)]
     pub identity: IdentityConfiguration,
@@ -95,12 +97,78 @@ const fn default_ephemeral_key_validity_seconds() -> u64 {
 
 impl ApplicationConfiguration {
     pub fn load_from_path(path: &str) -> anyhow::Result<Self> {
-        let configuration_builder = Config::builder().add_source(config::File::with_name(path));
+        let configuration_builder = Config::builder()
+            .add_source(config::File::with_name(path).required(false))
+            .add_source(
+                Environment::with_prefix("GRIDSTACK")
+                    .separator("__")
+                    .try_parsing(true),
+            );
+        Self::load_from_builder(configuration_builder)
+    }
+
+    fn load_from_builder(
+        configuration_builder: ConfigBuilder<DefaultState>,
+    ) -> anyhow::Result<Self> {
         let configuration = configuration_builder.build()?;
         let application_configuration: Self = configuration.try_deserialize()?;
         application_configuration.server.server_name()?;
+        application_configuration.validate_secrets()?;
         Ok(application_configuration)
     }
+
+    fn validate_secrets(&self) -> anyhow::Result<()> {
+        if self.database.url.trim().is_empty() {
+            anyhow::bail!("[database] url must not be empty");
+        }
+        validate_secret(
+            "[authenification] json_web_token_secret",
+            &self.authenification.json_web_token_secret,
+        )?;
+        validate_secret(
+            "[authenification] password_pepper",
+            &self.authenification.password_pepper,
+        )
+    }
+}
+
+const MINIMUM_SECRET_LENGTH_BYTES: usize = 32;
+
+/// SHA-256 hex digests of secret values that were committed to git history.
+const KNOWN_LEAKED_SECRET_DIGESTS: [&str; 2] = [
+    "b3a679dd8fc0fe824fc1cf215d2ceca0dfd297abed5e4aabb4a69a3fe807f453",
+    "437b08f45dca9aaa4b410d7c25874e764f9af26265de4e51f6c56e0199ee75af",
+];
+
+fn validate_secret(setting_name: &str, secret: &str) -> anyhow::Result<()> {
+    validate_secret_against(setting_name, secret, &KNOWN_LEAKED_SECRET_DIGESTS)
+}
+
+fn sha256_hex(value: &str) -> String {
+    use std::fmt::Write;
+    Sha256::digest(value.as_bytes())
+        .iter()
+        .fold(String::new(), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        })
+}
+
+fn validate_secret_against(
+    setting_name: &str,
+    secret: &str,
+    leaked_digests: &[&str],
+) -> anyhow::Result<()> {
+    if secret.is_empty() {
+        anyhow::bail!("{setting_name} must be set (use the GRIDSTACK__ environment variable)");
+    }
+    if secret.len() < MINIMUM_SECRET_LENGTH_BYTES {
+        anyhow::bail!("{setting_name} must be at least {MINIMUM_SECRET_LENGTH_BYTES} bytes long");
+    }
+    if leaked_digests.contains(&sha256_hex(secret).as_str()) {
+        anyhow::bail!("{setting_name} is a known leaked value and must be rotated");
+    }
+    Ok(())
 }
 
 impl ServerConfiguration {
@@ -124,7 +192,11 @@ impl ServerConfiguration {
 
 #[cfg(test)]
 mod tests {
-    use super::ServerConfiguration;
+    use std::collections::HashMap;
+
+    use config::{Config, Environment, File, FileFormat};
+
+    use super::{ApplicationConfiguration, ServerConfiguration};
     use crate::infrastructure::server_name::ServerNamePresentationFormat;
 
     fn server_configuration(host: &str, port: u16, server_name: &str) -> ServerConfiguration {
@@ -165,5 +237,81 @@ mod tests {
             message.contains("invalid [server] server_name \"bad name:\""),
             "{message}"
         );
+    }
+
+    const VALID_SECRET: &str = "0123456789abcdef0123456789abcdef-test";
+
+    fn configuration_text(json_web_token_secret_line: &str, pepper: &str) -> String {
+        format!(
+            "[server]\nhost=\"127.0.0.1\"\nport=3000\nserver_name=\"example.org\"\n\
+             [database]\nurl=\"postgres://example\"\n\
+             [authenification]\nallow_registration=true\naccess_token_expiry_seconds=1\n\
+             refresh_token_expiry_seconds=1\n{json_web_token_secret_line}\npassword_pepper=\"{pepper}\"\n\
+             [rate_limit]\nretry_after_ms=1\n"
+        )
+    }
+
+    fn load(
+        text: &str,
+        environment: HashMap<String, String>,
+    ) -> anyhow::Result<ApplicationConfiguration> {
+        let builder = Config::builder()
+            .add_source(File::from_str(text, FileFormat::Toml))
+            .add_source(
+                Environment::with_prefix("GRIDSTACK")
+                    .separator("__")
+                    .source(Some(environment)),
+            );
+        ApplicationConfiguration::load_from_builder(builder)
+    }
+
+    fn valid_text() -> String {
+        configuration_text(
+            &format!("json_web_token_secret=\"{VALID_SECRET}\""),
+            VALID_SECRET,
+        )
+    }
+
+    #[test]
+    fn environment_overrides_file_secret() {
+        let text = configuration_text("json_web_token_secret=\"short\"", VALID_SECRET);
+        let environment = HashMap::from([(
+            "GRIDSTACK__AUTHENIFICATION__JSON_WEB_TOKEN_SECRET".to_owned(),
+            VALID_SECRET.to_owned(),
+        )]);
+        let loaded = load(&text, environment).expect("environment secret should win");
+        assert_eq!(loaded.authenification.json_web_token_secret, VALID_SECRET);
+    }
+
+    #[test]
+    fn missing_json_web_token_secret_fails_startup() {
+        let text = configuration_text("", VALID_SECRET);
+        let error = load(&text, HashMap::new()).expect_err("must fail");
+        assert!(error.to_string().contains("json_web_token_secret"));
+    }
+
+    #[test]
+    fn short_secret_fails_startup() {
+        let text = configuration_text("json_web_token_secret=\"too-short\"", VALID_SECRET);
+        let error = load(&text, HashMap::new()).expect_err("must fail");
+        assert!(error.to_string().contains("json_web_token_secret"));
+    }
+
+    #[test]
+    fn known_leaked_secret_fails_startup() {
+        let digest = super::sha256_hex(VALID_SECRET);
+        let error = super::validate_secret_against("[x] y", VALID_SECRET, &[digest.as_str()])
+            .expect_err("must fail");
+        assert!(error.to_string().contains("known leaked"));
+        assert!(!error.to_string().contains(VALID_SECRET));
+    }
+
+    #[test]
+    fn error_message_does_not_contain_secret_value() {
+        let secret = "short-but-recognizable-secret";
+        let text = configuration_text(&format!("json_web_token_secret=\"{secret}\""), VALID_SECRET);
+        let error = load(&text, HashMap::new()).expect_err("must fail");
+        assert!(!format!("{error:#}").contains(secret));
+        assert!(load(&valid_text(), HashMap::new()).is_ok());
     }
 }

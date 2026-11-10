@@ -618,6 +618,7 @@ dependencies = [
  "response_derive",
  "serde",
  "serde_json",
+ "sha2",
  "strum",
  "syn 2.0.117",
  "thiserror",

@@ -4,3 +4,4 @@ target
 /.agents
 client.db
 reference
+/configuration.toml

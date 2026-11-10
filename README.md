@@ -26,7 +26,7 @@ Gridstack is an experimental Matrix homeserver and desktop client written in Rus
 | `response_derive/` | Local response-related procedural macro crate |
 | `scripts/tasks/` | Scripts used by the project task registry |
 | `.zed/tasks.json` | Canonical runnable task definitions |
-| `configuration.toml` | Local server, database, authentication, and identity configuration |
+| `configuration.example.toml` | Template for the untracked local `configuration.toml` |
 
 ## Requirements
 
@@ -42,8 +42,8 @@ The desktop client has additional native dependencies required by `eframe`. Cros
 
 1. Clone the repository and switch to its default `develop` branch.
 2. Create a PostgreSQL database for Gridstack.
-3. Copy or edit `configuration.toml` for your environment.
-4. Replace every development secret and identity key in the configuration before using a shared or deployed environment.
+3. Copy `configuration.example.toml` to `configuration.toml` (gitignored) and fill it in, or supply values via environment variables.
+4. Set the database URL, `json_web_token_secret` and `password_pepper` (see Configuration and security). The server refuses to start without them.
 5. Apply the migrations from `migrations/` with Diesel.
 6. Use the tasks in `.zed/tasks.json` to check, test, and build the project.
 
@@ -83,7 +83,7 @@ The desktop client follows a ports-and-adapters structure with application, doma
 
 ## Configuration and security
 
-`configuration.toml` contains development defaults. Do not reuse its database credentials, JWT secret, password pepper, or identity key material in production.
+`configuration.toml` is gitignored and holds no secrets in the repository. Every setting can be set from the environment as `GRIDSTACK__<SECTION>__<KEY>`, which overrides the file, for example `GRIDSTACK__AUTHENIFICATION__JSON_WEB_TOKEN_SECRET`, `GRIDSTACK__AUTHENIFICATION__PASSWORD_PEPPER` and `GRIDSTACK__DATABASE__URL`. The JWT secret and pepper must be at least 32 bytes (`openssl rand -hex 32`); startup fails on empty, short or previously leaked values.
 
 For a real deployment:
 
