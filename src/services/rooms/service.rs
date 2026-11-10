@@ -425,6 +425,10 @@ fn map_room_persistence_error(error: DomainError, room_id: &str) -> RoomsApplica
             }
         }
         DomainError::NotFound | DomainError::InvalidCredentials => RoomsApplicationError::Internal,
+        DomainError::Unavailable(source) => {
+            error!(error = %format!("{source:#}"), "infrastructure failure persisting room event contract");
+            RoomsApplicationError::Internal
+        }
     }
 }
 
@@ -447,6 +451,10 @@ fn map_receipt_persistence_error(error: DomainError) -> RoomsApplicationError {
         }
         DomainError::InvalidRequest(reason) => {
             error!(reason, "failed to persist receipt");
+            RoomsApplicationError::Internal
+        }
+        DomainError::Unavailable(source) => {
+            error!(error = %format!("{source:#}"), "infrastructure failure persisting receipt");
             RoomsApplicationError::Internal
         }
     }
