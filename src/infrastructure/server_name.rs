@@ -33,10 +33,7 @@ impl ServerName {
     }
 
     fn format_server_name(host: &ServerHost, port: Option<u16>) -> String {
-        if port.is_none() {
-            return host.to_string();
-        }
-        format!("{}:{}", host, port.unwrap())
+        port.map_or_else(|| host.to_string(), |port| format!("{host}:{port}"))
     }
 
     pub fn as_str(&self) -> &str {
@@ -285,6 +282,12 @@ struct ServerNameParts<'a> {
 #[cfg(test)]
 mod tests {
     use super::{ServerHost, ServerName, ServerNamePresentationFormat};
+
+    #[test]
+    fn server_name_without_port_formats_without_unwrap() {
+        let server_name = ServerName::try_new("matrix.org").expect("valid");
+        assert_eq!(server_name.as_str(), "matrix.org");
+    }
 
     #[test]
     fn accepts_matrix_spec_examples() {

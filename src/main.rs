@@ -19,7 +19,7 @@ async fn main() -> anyhow::Result<()> {
     info!("application configuration loaded");
 
     let socket_address = application_configuration.server.socket_address()?;
-    let application_state = ApplicationState::new(&application_configuration);
+    let application_state = ApplicationState::new(&application_configuration)?;
     let router = build_router(application_state.clone());
 
     let tcp_listener = TcpListener::bind(socket_address).await?;
