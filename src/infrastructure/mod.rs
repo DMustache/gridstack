@@ -1,6 +1,7 @@
 pub mod chrono_clock;
 pub mod configuration;
 pub mod device_id;
+pub mod ed25519;
 pub mod json_web_token;
 pub mod password_hash;
 pub mod server_name;

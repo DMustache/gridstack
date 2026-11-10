@@ -70,7 +70,6 @@ pub struct RateLimitConfiguration {
 pub struct IdentityConfiguration {
     #[serde(default = "default_long_term_key_id")]
     pub long_term_key_id: String,
-    pub long_term_public_key: Option<String>,
     pub long_term_private_key: Option<String>,
     #[serde(default = "default_ephemeral_key_validity_seconds")]
     pub ephemeral_key_validity_seconds: u64,
@@ -80,7 +79,6 @@ impl Default for IdentityConfiguration {
     fn default() -> Self {
         Self {
             long_term_key_id: default_long_term_key_id(),
-            long_term_public_key: None,
             long_term_private_key: None,
             ephemeral_key_validity_seconds: default_ephemeral_key_validity_seconds(),
         }
@@ -111,9 +109,24 @@ impl ApplicationConfiguration {
         configuration_builder: ConfigBuilder<DefaultState>,
     ) -> anyhow::Result<Self> {
         let configuration = configuration_builder.build()?;
+        if configuration
+            .get::<String>("identity.long_term_public_key")
+            .is_ok()
+        {
+            anyhow::bail!(
+                "[identity] long_term_public_key is no longer supported; the public key is derived from long_term_private_key (unpadded base64 32-byte ed25519 seed)"
+            );
+        }
         let application_configuration: Self = configuration.try_deserialize()?;
         application_configuration.server.server_name()?;
         application_configuration.validate_secrets()?;
+        if let Some(private_key) = &application_configuration.identity.long_term_private_key
+            && !private_key.trim().is_empty()
+        {
+            crate::infrastructure::ed25519::derive_public_key(private_key).map_err(|error| {
+                anyhow::anyhow!("invalid [identity] long_term_private_key: {error}")
+            })?;
+        }
         Ok(application_configuration)
     }
 
@@ -270,6 +283,26 @@ mod tests {
             &format!("json_web_token_secret=\"{VALID_SECRET}\""),
             VALID_SECRET,
         )
+    }
+
+    #[test]
+    fn separate_public_key_in_configuration_is_rejected() {
+        let text = format!(
+            "{}\n[identity]\nlong_term_public_key=\"abc\"\n",
+            valid_text()
+        );
+        let error = load(&text, HashMap::new()).expect_err("must fail");
+        assert!(error.to_string().contains("long_term_public_key"));
+    }
+
+    #[test]
+    fn invalid_seed_length_is_rejected() {
+        let text = format!(
+            "{}\n[identity]\nlong_term_private_key=\"AAAA\"\n",
+            valid_text()
+        );
+        let error = load(&text, HashMap::new()).expect_err("must fail");
+        assert!(error.to_string().contains("long_term_private_key"));
     }
 
     #[test]

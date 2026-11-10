@@ -1,4 +1,3 @@
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration, Utc};
 use diesel::{
     BoolExpressionMethods, Connection, ExpressionMethods, OptionalExtension, QueryDsl, RunQueryDsl,
@@ -11,7 +10,7 @@ use diesel::{
 use uuid::Uuid;
 
 use crate::{
-    infrastructure::{configuration::IdentityConfiguration, schema},
+    infrastructure::{configuration::IdentityConfiguration, ed25519, schema},
     services::identity::{
         entities::{
             EncodedPublicKey, IdentitySigningAlgorithm, IdentitySigningKey, IdentitySigningKeyId,
@@ -19,7 +18,7 @@ use crate::{
         },
         errors::IdentityServiceError,
         service::{
-            IdentityEphemeralKeyGenerator, IdentityInvitationRepository,
+            GeneratedEphemeralKey, IdentityEphemeralKeyGenerator, IdentityInvitationRepository,
             IdentitySigningKeyRepository, StoreThirdPartyInviteCommand,
         },
     },
@@ -72,7 +71,24 @@ impl IdentityPersistence {
         }
 
         if let Some(existing_key) = self.fetch_latest_long_term_key()? {
-            return Ok(existing_key);
+            let stored_private_key = self.fetch_long_term_private_key(&existing_key.key_id)?;
+            let Some(replacement) = replacement_for_mismatched_pair(
+                existing_key.key_id.as_str(),
+                existing_key.public_key.as_str(),
+                stored_private_key.as_deref(),
+            ) else {
+                return Ok(existing_key);
+            };
+            tracing::warn!(
+                key_id = existing_key.key_id.as_str(),
+                "stored identity long-term key pair is not a valid ed25519 pair; regenerating"
+            );
+            self.upsert_long_term_key_material(&replacement)?;
+            return Ok(IdentitySigningKey {
+                key_id: existing_key.key_id,
+                public_key: EncodedPublicKey::parse(replacement.public_key)?,
+                usage: IdentitySigningKeyUsage::LongTerm,
+            });
         }
 
         let generated_key_material = self.generate_long_term_key_material()?;
@@ -113,6 +129,28 @@ impl IdentityPersistence {
             .map_err(database_error_to_identity_error)?;
 
         row.map(long_term_key_from_columns).transpose()
+    }
+
+    fn fetch_long_term_private_key(
+        &self,
+        key_id: &IdentitySigningKeyId,
+    ) -> Result<Option<String>, IdentityServiceError> {
+        use schema::identity_signing_keys;
+
+        let mut connection = self
+            .connection_pool
+            .get()
+            .map_err(connection_error_to_identity_error)?;
+
+        let private_key = identity_signing_keys::table
+            .select(identity_signing_keys::private_key)
+            .filter(identity_signing_keys::usage.eq("long_term"))
+            .filter(identity_signing_keys::key_id.eq(Some(key_id.as_str())))
+            .first::<Option<String>>(&mut connection)
+            .optional()
+            .map_err(database_error_to_identity_error)?;
+
+        Ok(private_key.flatten())
     }
 
     fn fetch_active_long_term_key(&self) -> Result<IdentitySigningKey, IdentityServiceError> {
@@ -163,13 +201,12 @@ impl IdentityPersistence {
         let key_id = self.default_long_term_key_id.clone();
         IdentitySigningKeyId::parse(key_id.clone())?;
 
-        let public_key = random_base64_url_string();
-        let private_key = random_base64_url_string();
+        let key_pair = ed25519::generate_key_pair();
 
         Ok(ConfiguredLongTermKeyMaterial {
             key_id,
-            public_key,
-            private_key,
+            public_key: key_pair.public_key,
+            private_key: key_pair.private_seed,
         })
     }
 }
@@ -263,7 +300,7 @@ impl IdentityInvitationRepository for IdentityPersistence {
     fn store_invite(
         &self,
         command: &StoreThirdPartyInviteCommand,
-        public_keys: Vec<IdentitySigningKey>,
+        ephemeral_keys: Vec<GeneratedEphemeralKey>,
     ) -> Result<StoredThirdPartyInvite, IdentityServiceError> {
         use schema::{identity_signing_keys, identity_third_party_invites};
 
@@ -291,13 +328,15 @@ impl IdentityInvitationRepository for IdentityPersistence {
                     ))
                     .execute(connection)?;
 
-                for invite_key in &public_keys {
+                for generated_key in &ephemeral_keys {
+                    let invite_key = &generated_key.key;
                     insert_into(identity_signing_keys::table)
                         .values((
                             identity_signing_keys::usage.eq("ephemeral_invite"),
                             identity_signing_keys::key_id.eq(Some(invite_key.key_id.as_str())),
                             identity_signing_keys::public_key.eq(invite_key.public_key.as_str()),
-                            identity_signing_keys::private_key.eq::<Option<&str>>(None),
+                            identity_signing_keys::private_key
+                                .eq(Some(generated_key.private_seed.as_str())),
                             identity_signing_keys::expires_at.eq(Some(expires_at)),
                         ))
                         .execute(connection)?;
@@ -307,9 +346,9 @@ impl IdentityInvitationRepository for IdentityPersistence {
             })
             .map_err(database_error_to_identity_error)?;
 
-        let mut response_public_keys = Vec::with_capacity(public_keys.len() + 1);
+        let mut response_public_keys = Vec::with_capacity(ephemeral_keys.len() + 1);
         response_public_keys.push(long_term_key);
-        response_public_keys.extend(public_keys);
+        response_public_keys.extend(ephemeral_keys.into_iter().map(|generated| generated.key));
 
         Ok(StoredThirdPartyInvite {
             medium: command.medium.clone(),
@@ -324,37 +363,62 @@ impl IdentityInvitationRepository for IdentityPersistence {
 }
 
 impl IdentityEphemeralKeyGenerator for IdentityPersistence {
-    fn generate_invite_key(&self) -> Result<IdentitySigningKey, IdentityServiceError> {
-        let algorithm = IdentitySigningAlgorithm::ed25519();
-        let key_identifier = format!("ephemeral_{}", Uuid::new_v4().simple());
-        let key_id =
-            IdentitySigningKeyId::parse(format!("{}:{}", algorithm.as_str(), key_identifier))?;
-        let public_key = EncodedPublicKey::parse(random_base64_url_string())?;
+    fn generate_invite_key(&self) -> Result<GeneratedEphemeralKey, IdentityServiceError> {
+        generate_ephemeral_invite_key()
+    }
+}
 
-        Ok(IdentitySigningKey {
+fn generate_ephemeral_invite_key() -> Result<GeneratedEphemeralKey, IdentityServiceError> {
+    let algorithm = IdentitySigningAlgorithm::ed25519();
+    let key_identifier = format!("ephemeral_{}", Uuid::new_v4().simple());
+    let key_id = IdentitySigningKeyId::parse(format!("{}:{}", algorithm.as_str(), key_identifier))?;
+    let key_pair = ed25519::generate_key_pair();
+    let public_key = EncodedPublicKey::parse(key_pair.public_key)?;
+
+    Ok(GeneratedEphemeralKey {
+        key: IdentitySigningKey {
             key_id,
             public_key,
             usage: IdentitySigningKeyUsage::EphemeralInvite,
-        })
-    }
+        },
+        private_seed: key_pair.private_seed,
+    })
 }
 
 fn configured_long_term_key_material(
     identity_configuration: &IdentityConfiguration,
 ) -> Option<ConfiguredLongTermKeyMaterial> {
-    let public_key = identity_configuration.long_term_public_key.as_ref()?.trim();
     let private_key = identity_configuration
         .long_term_private_key
         .as_ref()?
         .trim();
-    if public_key.is_empty() || private_key.is_empty() {
+    if private_key.is_empty() {
         return None;
     }
+    // The seed was validated at configuration load; a failure here yields no configured key.
+    let public_key = ed25519::derive_public_key(private_key).ok()?;
 
     Some(ConfiguredLongTermKeyMaterial {
         key_id: identity_configuration.long_term_key_id.clone(),
-        public_key: public_key.to_owned(),
+        public_key,
         private_key: private_key.to_owned(),
+    })
+}
+
+/// Returns replacement key material when a stored pair is not a real ed25519 pair.
+fn replacement_for_mismatched_pair(
+    key_id: &str,
+    public_key: &str,
+    private_key: Option<&str>,
+) -> Option<ConfiguredLongTermKeyMaterial> {
+    if private_key.is_some_and(|seed| ed25519::is_matching_key_pair(seed, public_key)) {
+        return None;
+    }
+    let key_pair = ed25519::generate_key_pair();
+    Some(ConfiguredLongTermKeyMaterial {
+        key_id: key_id.to_owned(),
+        public_key: key_pair.public_key,
+        private_key: key_pair.private_seed,
     })
 }
 
@@ -417,13 +481,59 @@ fn database_error_to_identity_error(error: diesel::result::Error) -> IdentitySer
     IdentityServiceError::Internal(anyhow::anyhow!(error.to_string()))
 }
 
-fn random_base64_url_string() -> String {
-    let left = Uuid::new_v4();
-    let right = Uuid::new_v4();
+#[cfg(test)]
+mod tests {
+    use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 
-    let mut bytes = [0_u8; 32];
-    bytes[..16].copy_from_slice(left.as_bytes());
-    bytes[16..].copy_from_slice(right.as_bytes());
+    use super::*;
 
-    URL_SAFE_NO_PAD.encode(bytes)
+    #[test]
+    fn ephemeral_signature_verifies_with_published_public_key() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
+
+        let generated = generate_ephemeral_invite_key().unwrap();
+        let seed: [u8; 32] = STANDARD_NO_PAD
+            .decode(&generated.private_seed)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let signature = SigningKey::from_bytes(&seed).sign(b"fixed message");
+        let public_bytes: [u8; 32] = STANDARD_NO_PAD
+            .decode(generated.key.public_key.as_str())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        VerifyingKey::from_bytes(&public_bytes)
+            .unwrap()
+            .verify(b"fixed message", &signature)
+            .unwrap();
+    }
+
+    #[test]
+    fn mismatched_stored_key_pair_is_regenerated() {
+        let stored = ed25519::generate_key_pair();
+        let unrelated = ed25519::generate_key_pair();
+
+        let replacement = replacement_for_mismatched_pair(
+            "ed25519:0",
+            &unrelated.public_key,
+            Some(&stored.private_seed),
+        )
+        .expect("mismatched pair must be replaced");
+        assert_eq!(replacement.key_id, "ed25519:0");
+        assert!(ed25519::is_matching_key_pair(
+            &replacement.private_key,
+            &replacement.public_key
+        ));
+
+        assert!(
+            replacement_for_mismatched_pair(
+                "ed25519:0",
+                &stored.public_key,
+                Some(&stored.private_seed)
+            )
+            .is_none()
+        );
+        assert!(replacement_for_mismatched_pair("ed25519:0", &stored.public_key, None).is_some());
+    }
 }
