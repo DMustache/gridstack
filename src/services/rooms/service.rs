@@ -485,3 +485,29 @@ fn parse_room_stream_position_token(token: &str) -> Result<i64, RoomsApplication
 const fn _supported_room_versions() -> [SupportedRoomVersion; 2] {
     [SupportedRoomVersion::V1, SupportedRoomVersion::V2]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DomainError, RoomsApplicationError, map_receipt_persistence_error,
+        map_room_persistence_error,
+    };
+
+    #[test]
+    fn room_persistence_unavailable_maps_to_internal() {
+        let error = DomainError::Unavailable(anyhow::anyhow!("pool exhausted"));
+        assert_eq!(
+            map_room_persistence_error(error, "!room:example.org"),
+            RoomsApplicationError::Internal
+        );
+    }
+
+    #[test]
+    fn receipt_persistence_unavailable_maps_to_internal() {
+        let error = DomainError::Unavailable(anyhow::anyhow!("connection reset"));
+        assert_eq!(
+            map_receipt_persistence_error(error),
+            RoomsApplicationError::Internal
+        );
+    }
+}

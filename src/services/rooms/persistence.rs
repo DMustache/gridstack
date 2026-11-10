@@ -597,7 +597,7 @@ impl RoomRepository for RoomPersistence {
         let mut connection = self
             .connection_pool
             .get()
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         connection
             .transaction(|connection| {
@@ -935,7 +935,7 @@ impl RoomRepository for RoomPersistence {
                     let detail = database_error_info.details().unwrap_or_default().to_owned();
                     DomainError::InvalidRequest(format!("unique violation: {detail}"))
                 }
-                other => DomainError::InvalidRequest(other.to_string()),
+                other => DomainError::Unavailable(other.into()),
             })?;
 
         Ok(())
@@ -951,7 +951,7 @@ impl RoomRepository for RoomPersistence {
         let mut connection = self
             .connection_pool
             .get()
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         let row = rooms::table
             .left_outer_join(
@@ -967,7 +967,7 @@ impl RoomRepository for RoomPersistence {
             ))
             .first::<(Option<String>, Option<String>, Option<String>)>(&mut connection)
             .optional()
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         Ok(row.map(
             |(room_version, visibility, membership_state)| RoomJoinContext {
@@ -984,7 +984,7 @@ impl RoomRepository for RoomPersistence {
         let mut connection = self
             .connection_pool
             .get()
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         room_membership_projection::table
             .filter(room_membership_projection::user_id.eq(user_id))
@@ -992,7 +992,7 @@ impl RoomRepository for RoomPersistence {
             .select(room_membership_projection::room_id)
             .order(room_membership_projection::room_id.asc())
             .load::<String>(&mut connection)
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))
+            .map_err(|error| DomainError::Unavailable(error.into()))
     }
 
     fn fetch_public_room_count(&self) -> Result<i64, DomainError> {
@@ -1001,13 +1001,13 @@ impl RoomRepository for RoomPersistence {
         let mut connection = self
             .connection_pool
             .get()
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         rooms::table
             .filter(rooms::visibility.eq(Some("public".to_owned())))
             .count()
             .get_result::<i64>(&mut connection)
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))
+            .map_err(|error| DomainError::Unavailable(error.into()))
     }
 
     fn fetch_public_room_roster_page(
@@ -1020,7 +1020,7 @@ impl RoomRepository for RoomPersistence {
         let mut connection = self
             .connection_pool
             .get()
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         let joined_member_count = count(room_membership_projection::user_id.nullable());
 
@@ -1042,7 +1042,7 @@ impl RoomRepository for RoomPersistence {
             .offset(offset)
             .limit(limit)
             .load::<(String, Option<String>, Option<String>, i64)>(&mut connection)
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         Ok(rows
             .into_iter()
@@ -1068,7 +1068,7 @@ impl RoomRepository for RoomPersistence {
         let mut connection = self
             .connection_pool
             .get()
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         let rows = room_membership_projection::table
             .inner_join(
@@ -1083,7 +1083,7 @@ impl RoomRepository for RoomPersistence {
                 room_events::content_json,
             ))
             .load::<(String, serde_json::Value)>(&mut connection)
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         Ok(rows
             .into_iter()
@@ -1115,7 +1115,7 @@ impl RoomRepository for RoomPersistence {
             .event_rows
             .first()
             .map(|value| value.room_id.clone())
-            .ok_or_else(|| DomainError::InvalidRequest("missing event row".to_owned()))?;
+            .ok_or_else(|| DomainError::Unavailable(anyhow::anyhow!("missing event row")))?;
 
         let event_batch_write_contract = EventBatchWriteContract {
             room_id,
@@ -1123,7 +1123,7 @@ impl RoomRepository for RoomPersistence {
                 .event_rows
                 .first()
                 .map(|value| value.room_version)
-                .ok_or_else(|| DomainError::InvalidRequest("missing room version".to_owned()))?,
+                .ok_or_else(|| DomainError::Unavailable(anyhow::anyhow!("missing room version")))?,
             event_write_contracts: vec![event_write_contract.clone()],
         };
 
@@ -1143,7 +1143,7 @@ impl RoomRepository for RoomPersistence {
         let mut connection = self
             .connection_pool
             .get()
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         let event_exists = select(exists(
             room_events::table
@@ -1151,7 +1151,7 @@ impl RoomRepository for RoomPersistence {
                 .filter(room_events::event_id.eq(event_id)),
         ))
         .get_result::<bool>(&mut connection)
-        .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+        .map_err(|error| DomainError::Unavailable(error.into()))?;
         if !event_exists {
             return Err(DomainError::NotFound);
         }
@@ -1166,7 +1166,7 @@ impl RoomRepository for RoomPersistence {
                 room_receipts::receipt_ts.eq(Utc::now().timestamp_millis()),
             ))
             .execute(&mut connection)
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         Ok(())
     }
@@ -1182,7 +1182,7 @@ impl RoomRepository for RoomPersistence {
         let mut connection = self
             .connection_pool
             .get()
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         let event_exists = select(exists(
             room_events::table
@@ -1190,7 +1190,7 @@ impl RoomRepository for RoomPersistence {
                 .filter(room_events::event_id.eq(event_id)),
         ))
         .get_result::<bool>(&mut connection)
-        .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+        .map_err(|error| DomainError::Unavailable(error.into()))?;
         if !event_exists {
             return Err(DomainError::NotFound);
         }
@@ -1203,7 +1203,7 @@ impl RoomRepository for RoomPersistence {
                 room_read_markers::updated_at.eq(Utc::now()),
             ))
             .execute(&mut connection)
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         Ok(())
     }
@@ -1219,7 +1219,7 @@ impl RoomRepository for RoomPersistence {
         let mut connection = self
             .connection_pool
             .get()
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
         if thread_id == "main" {
             let has_thread_relation = select(exists(
                 room_event_relations::table
@@ -1228,7 +1228,7 @@ impl RoomRepository for RoomPersistence {
                     .filter(room_event_relations::rel_type.eq("m.thread")),
             ))
             .get_result::<bool>(&mut connection)
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
             return Ok(!has_thread_relation);
         }
 
@@ -1244,7 +1244,7 @@ impl RoomRepository for RoomPersistence {
                 .filter(room_event_relations::related_event_id.eq(thread_id)),
         ))
         .get_result::<bool>(&mut connection)
-        .map_err(|error| DomainError::InvalidRequest(error.to_string()))
+        .map_err(|error| DomainError::Unavailable(error.into()))
     }
 
     fn fetch_room_event_id_by_transaction_id(
@@ -1259,7 +1259,7 @@ impl RoomRepository for RoomPersistence {
         let mut connection = self
             .connection_pool
             .get()
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         room_idempotency_records::table
             .inner_join(
@@ -1272,7 +1272,7 @@ impl RoomRepository for RoomPersistence {
             .select(room_idempotency_records::event_id)
             .first::<String>(&mut connection)
             .optional()
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))
+            .map_err(|error| DomainError::Unavailable(error.into()))
     }
 
     fn fetch_room_state_events(&self, room_id: &str) -> Result<Vec<RoomStateEvent>, DomainError> {
@@ -1281,7 +1281,7 @@ impl RoomRepository for RoomPersistence {
         let mut connection = self
             .connection_pool
             .get()
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         let rows = room_current_state::table
             .inner_join(
@@ -1312,7 +1312,7 @@ impl RoomRepository for RoomPersistence {
                 String,
                 Option<serde_json::Value>,
             )>(&mut connection)
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         Ok(rows
             .into_iter()
@@ -1352,7 +1352,7 @@ impl RoomRepository for RoomPersistence {
         let mut connection = self
             .connection_pool
             .get()
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         let rows = room_sync_stream::table
             .inner_join(room_events::table.on(room_events::event_id.eq(room_sync_stream::event_id)))
@@ -1385,7 +1385,7 @@ impl RoomRepository for RoomPersistence {
                 String,
                 Option<serde_json::Value>,
             )>(&mut connection)
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         Ok(rows
             .into_iter()
@@ -1423,7 +1423,7 @@ impl RoomRepository for RoomPersistence {
         let mut connection = self
             .connection_pool
             .get()
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         let row = room_sync_stream::table
             .inner_join(room_events::table.on(room_events::event_id.eq(room_sync_stream::event_id)))
@@ -1435,7 +1435,7 @@ impl RoomRepository for RoomPersistence {
             .select(room_events::history_visibility)
             .first::<Option<String>>(&mut connection)
             .optional()
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         Ok(row.flatten())
     }
@@ -1450,7 +1450,7 @@ impl RoomRepository for RoomPersistence {
         let mut connection = self
             .connection_pool
             .get()
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         let row = room_sync_stream::table
             .inner_join(room_events::table.on(room_events::event_id.eq(room_sync_stream::event_id)))
@@ -1462,7 +1462,7 @@ impl RoomRepository for RoomPersistence {
             .select(room_events::history_visibility)
             .first::<Option<String>>(&mut connection)
             .optional()
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         Ok(row.flatten())
     }
@@ -1478,7 +1478,7 @@ impl RoomRepository for RoomPersistence {
         let mut connection = self
             .connection_pool
             .get()
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         let row = room_sync_stream::table
             .inner_join(room_events::table.on(room_events::event_id.eq(room_sync_stream::event_id)))
@@ -1490,7 +1490,7 @@ impl RoomRepository for RoomPersistence {
             .select(room_events::membership)
             .first::<Option<String>>(&mut connection)
             .optional()
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         Ok(row.flatten())
     }
@@ -1506,7 +1506,7 @@ impl RoomRepository for RoomPersistence {
         let mut connection = self
             .connection_pool
             .get()
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         let row = room_sync_stream::table
             .inner_join(room_events::table.on(room_events::event_id.eq(room_sync_stream::event_id)))
@@ -1518,7 +1518,7 @@ impl RoomRepository for RoomPersistence {
             .select(room_events::membership)
             .first::<Option<String>>(&mut connection)
             .optional()
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         Ok(row.flatten())
     }
@@ -1534,7 +1534,7 @@ impl RoomRepository for RoomPersistence {
         let mut connection = self
             .connection_pool
             .get()
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         let found = room_sync_stream::table
             .inner_join(room_events::table.on(room_events::event_id.eq(room_sync_stream::event_id)))
@@ -1546,7 +1546,7 @@ impl RoomRepository for RoomPersistence {
             .select(room_sync_stream::stream_position)
             .first::<i64>(&mut connection)
             .optional()
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         Ok(found.is_some())
     }
@@ -1561,7 +1561,7 @@ impl RoomRepository for RoomPersistence {
         let mut connection = self
             .connection_pool
             .get()
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         let row = room_events::table
             .inner_join(
@@ -1594,7 +1594,7 @@ impl RoomRepository for RoomPersistence {
                 i64,
             )>(&mut connection)
             .optional()
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         Ok(row.map(
             |(
@@ -1632,7 +1632,7 @@ impl RoomRepository for RoomPersistence {
         let mut connection = self
             .connection_pool
             .get()
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         let row = room_current_state::table
             .inner_join(
@@ -1662,7 +1662,7 @@ impl RoomRepository for RoomPersistence {
                 Option<serde_json::Value>,
             )>(&mut connection)
             .optional()
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         Ok(row.map(
             |(
@@ -1698,14 +1698,14 @@ impl RoomRepository for RoomPersistence {
         let mut connection = self
             .connection_pool
             .get()
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         room_aliases::table
             .filter(room_aliases::alias_localpart.eq(alias_localpart))
             .select(room_aliases::room_id)
             .first::<String>(&mut connection)
             .optional()
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))
+            .map_err(|error| DomainError::Unavailable(error.into()))
     }
 
     #[allow(
@@ -1726,13 +1726,13 @@ impl RoomRepository for RoomPersistence {
         let mut connection = self
             .connection_pool
             .get()
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         let room_max_stream_position = room_timeline_projection::table
             .filter(room_timeline_projection::room_id.eq(room_id))
             .select(diesel::dsl::max(room_timeline_projection::stream_position))
             .first::<Option<i64>>(&mut connection)
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?
+            .map_err(|error| DomainError::Unavailable(error.into()))?
             .unwrap_or(0);
 
         let start_stream_position = from_stream_position.unwrap_or(if backward {
@@ -1825,7 +1825,7 @@ impl RoomRepository for RoomPersistence {
                 Option<serde_json::Value>,
                 i64,
             )>(&mut connection)
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         let chunk = rows
             .into_iter()
@@ -1888,7 +1888,7 @@ fn persist_event_batch(
 
     let mut connection = connection_pool
         .get()
-        .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+        .map_err(|error| DomainError::Unavailable(error.into()))?;
 
     connection
         .transaction(|connection| {
@@ -2203,7 +2203,7 @@ fn persist_event_batch(
                 let detail = database_error_info.details().unwrap_or_default().to_owned();
                 DomainError::InvalidRequest(format!("unique violation: {detail}"))
             }
-            other => DomainError::InvalidRequest(other.to_string()),
+            other => DomainError::Unavailable(other.into()),
         })?;
 
     Ok(())
