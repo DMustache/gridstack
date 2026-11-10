@@ -155,14 +155,10 @@ impl EventsService {
 
         let mut event_write_contracts = Vec::with_capacity(room_event_flow.intents.len());
         let mut compilation_state = CompilationState::new();
-        let is_room_bootstrap_flow = room_event_flow
-            .intents
-            .first()
-            .map(|event_intent| {
-                event_intent.event_type() == "m.room.create"
-                    && event_intent.state_key.as_deref() == Some("")
-            })
-            .unwrap_or(false);
+        let is_room_bootstrap_flow = room_event_flow.intents.first().is_some_and(|event_intent| {
+            event_intent.event_type() == "m.room.create"
+                && event_intent.state_key.as_deref() == Some("")
+        });
 
         for (event_index, event_intent) in room_event_flow.intents.iter().enumerate() {
             validate_event_intent(event_intent)

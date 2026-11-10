@@ -18,6 +18,7 @@ pub enum AuthorizationLayerError {
     UnknownToken,
 }
 
+#[allow(clippy::unused_async_trait_impl)] // FromRequestParts trait requires an async signature
 impl FromRequestParts<ApplicationState> for AuthorizationLayer {
     type Rejection = AuthorizationLayerError;
 
@@ -48,6 +49,7 @@ impl FromRequestParts<ApplicationState> for AuthorizationLayer {
     }
 }
 
+#[allow(clippy::unused_async_trait_impl)] // FromRequestParts trait requires an async signature
 impl FromRequestParts<ApplicationState> for OptionalAuthorizationLayer {
     type Rejection = Infallible;
 
@@ -114,6 +116,7 @@ pub enum RateLimitLayerError {
     Internal,
 }
 
+#[allow(clippy::unused_async_trait_impl)] // FromRequestParts trait requires an async signature
 impl FromRequestParts<ApplicationState> for RateLimitLayer {
     type Rejection = RateLimitLayerError;
 
