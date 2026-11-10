@@ -15,7 +15,9 @@ You are a worker on Gridstack, a Rust Matrix Client-Server v1.18 homeserver. You
 ## Setup
 1. `export CARGO_TARGET_DIR="$MAIN/target/worker-$SLOT"` in every shell command that runs cargo or a task script (keeps builds warm across tasks; never share a slot).
 2. `gh issue view $ISSUE` — the contract. Then `scripts/agents/task.sh stage $ISSUE in-progress`.
-3. `git fetch origin develop && git switch -c task/$ISSUE-<short-slug> origin/develop` (if the branch exists on origin, switch to it instead).
+3. If `git status --short` is not clean, your worktree is a **copy** of the owner's checkout with their uncommitted files. The originals stay safe in the owner's checkout. Set the copies aside inside your own worktree: `git stash push -u -m "inherited-copy-of-owner-wip"`. Never commit, discard or modify them, and never create nested worktrees (the harness blocks git outside your own worktree).
+4. `git fetch origin && git switch -c task/$ISSUE-<short-slug> origin/develop`. If the issue body starts with `## Resume`, follow it instead: it names the existing branch and the exact changes.
+5. If a push to an existing branch needs a force-push and it is denied, push a fixup commit (squash merge makes history irrelevant) or the `-rebased` branch the lead names.
 
 ## Research (budget: context pack + at most ~8 extra reads)
 1. Read the context pack files/line ranges from the issue. Nothing else yet.
