@@ -11,7 +11,7 @@ pub use invitation_signing::{
     SignThirdPartyInviteCommand,
 };
 pub use invitation_storage::{
-    IdentityEphemeralKeyGenerator, IdentityInvitationRepository, InvitationStorageService,
-    StoreThirdPartyInviteCommand,
+    GeneratedEphemeralKey, IdentityEphemeralKeyGenerator, IdentityInvitationRepository,
+    InvitationStorageService, StoreThirdPartyInviteCommand,
 };
 pub use key_management::{IdentitySigningKeyRepository, KeyManagementService};

@@ -18,7 +18,7 @@ use crate::{
         },
         errors::IdentityServiceError,
         service::{
-            IdentityEphemeralKeyGenerator, IdentityInvitationRepository,
+            GeneratedEphemeralKey, IdentityEphemeralKeyGenerator, IdentityInvitationRepository,
             IdentitySigningKeyRepository, StoreThirdPartyInviteCommand,
         },
     },
@@ -300,7 +300,7 @@ impl IdentityInvitationRepository for IdentityPersistence {
     fn store_invite(
         &self,
         command: &StoreThirdPartyInviteCommand,
-        public_keys: Vec<IdentitySigningKey>,
+        ephemeral_keys: Vec<GeneratedEphemeralKey>,
     ) -> Result<StoredThirdPartyInvite, IdentityServiceError> {
         use schema::{identity_signing_keys, identity_third_party_invites};
 
@@ -328,13 +328,15 @@ impl IdentityInvitationRepository for IdentityPersistence {
                     ))
                     .execute(connection)?;
 
-                for invite_key in &public_keys {
+                for generated_key in &ephemeral_keys {
+                    let invite_key = &generated_key.key;
                     insert_into(identity_signing_keys::table)
                         .values((
                             identity_signing_keys::usage.eq("ephemeral_invite"),
                             identity_signing_keys::key_id.eq(Some(invite_key.key_id.as_str())),
                             identity_signing_keys::public_key.eq(invite_key.public_key.as_str()),
-                            identity_signing_keys::private_key.eq::<Option<&str>>(None),
+                            identity_signing_keys::private_key
+                                .eq(Some(generated_key.private_seed.as_str())),
                             identity_signing_keys::expires_at.eq(Some(expires_at)),
                         ))
                         .execute(connection)?;
@@ -344,9 +346,9 @@ impl IdentityInvitationRepository for IdentityPersistence {
             })
             .map_err(database_error_to_identity_error)?;
 
-        let mut response_public_keys = Vec::with_capacity(public_keys.len() + 1);
+        let mut response_public_keys = Vec::with_capacity(ephemeral_keys.len() + 1);
         response_public_keys.push(long_term_key);
-        response_public_keys.extend(public_keys);
+        response_public_keys.extend(ephemeral_keys.into_iter().map(|generated| generated.key));
 
         Ok(StoredThirdPartyInvite {
             medium: command.medium.clone(),
@@ -361,19 +363,26 @@ impl IdentityInvitationRepository for IdentityPersistence {
 }
 
 impl IdentityEphemeralKeyGenerator for IdentityPersistence {
-    fn generate_invite_key(&self) -> Result<IdentitySigningKey, IdentityServiceError> {
-        let algorithm = IdentitySigningAlgorithm::ed25519();
-        let key_identifier = format!("ephemeral_{}", Uuid::new_v4().simple());
-        let key_id =
-            IdentitySigningKeyId::parse(format!("{}:{}", algorithm.as_str(), key_identifier))?;
-        let public_key = EncodedPublicKey::parse(ed25519::generate_key_pair().public_key)?;
+    fn generate_invite_key(&self) -> Result<GeneratedEphemeralKey, IdentityServiceError> {
+        generate_ephemeral_invite_key()
+    }
+}
 
-        Ok(IdentitySigningKey {
+fn generate_ephemeral_invite_key() -> Result<GeneratedEphemeralKey, IdentityServiceError> {
+    let algorithm = IdentitySigningAlgorithm::ed25519();
+    let key_identifier = format!("ephemeral_{}", Uuid::new_v4().simple());
+    let key_id = IdentitySigningKeyId::parse(format!("{}:{}", algorithm.as_str(), key_identifier))?;
+    let key_pair = ed25519::generate_key_pair();
+    let public_key = EncodedPublicKey::parse(key_pair.public_key)?;
+
+    Ok(GeneratedEphemeralKey {
+        key: IdentitySigningKey {
             key_id,
             public_key,
             usage: IdentitySigningKeyUsage::EphemeralInvite,
-        })
-    }
+        },
+        private_seed: key_pair.private_seed,
+    })
 }
 
 fn configured_long_term_key_material(
@@ -474,7 +483,31 @@ fn database_error_to_identity_error(error: diesel::result::Error) -> IdentitySer
 
 #[cfg(test)]
 mod tests {
+    use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
+
     use super::*;
+
+    #[test]
+    fn ephemeral_signature_verifies_with_published_public_key() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
+
+        let generated = generate_ephemeral_invite_key().unwrap();
+        let seed: [u8; 32] = STANDARD_NO_PAD
+            .decode(&generated.private_seed)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let signature = SigningKey::from_bytes(&seed).sign(b"fixed message");
+        let public_bytes: [u8; 32] = STANDARD_NO_PAD
+            .decode(generated.key.public_key.as_str())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        VerifyingKey::from_bytes(&public_bytes)
+            .unwrap()
+            .verify(b"fixed message", &signature)
+            .unwrap();
+    }
 
     #[test]
     fn mismatched_stored_key_pair_is_regenerated() {

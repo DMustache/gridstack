@@ -74,16 +74,6 @@ mod tests {
     }
 
     #[test]
-    fn ephemeral_signature_verifies_with_published_public_key() {
-        let key_pair = generate_key_pair();
-        assert_signature_verifies(&key_pair.private_seed, &key_pair.public_key);
-        assert!(is_matching_key_pair(
-            &key_pair.private_seed,
-            &key_pair.public_key
-        ));
-    }
-
-    #[test]
     fn invalid_seed_length_is_rejected() {
         let short_seed = STANDARD_NO_PAD.encode([7_u8; 16]);
         assert!(derive_public_key(&short_seed).is_err());

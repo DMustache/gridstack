@@ -13,16 +13,22 @@ pub struct StoreThirdPartyInviteCommand {
     pub sender: MatrixUserIdentifier,
 }
 
+/// A freshly generated ephemeral key together with the private seed that must be persisted.
+pub struct GeneratedEphemeralKey {
+    pub key: IdentitySigningKey,
+    pub private_seed: String,
+}
+
 pub trait IdentityInvitationRepository: Send + Sync {
     fn store_invite(
         &self,
         command: &StoreThirdPartyInviteCommand,
-        public_keys: Vec<IdentitySigningKey>,
+        ephemeral_keys: Vec<GeneratedEphemeralKey>,
     ) -> Result<StoredThirdPartyInvite, IdentityServiceError>;
 }
 
 pub trait IdentityEphemeralKeyGenerator: Send + Sync {
-    fn generate_invite_key(&self) -> Result<IdentitySigningKey, IdentityServiceError>;
+    fn generate_invite_key(&self) -> Result<GeneratedEphemeralKey, IdentityServiceError>;
 }
 
 pub struct InvitationStorageService<Repository, KeyGenerator>
