@@ -1004,13 +1004,13 @@ impl RoomRepository for RoomPersistence {
         let mut connection = self
             .connection_pool
             .get()
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| DomainError::Unavailable(error.into()))?;
 
         room_sync_stream::table
             .select(max(room_sync_stream::stream_position))
             .first::<Option<i64>>(&mut connection)
             .map(Option::unwrap_or_default)
-            .map_err(|error| DomainError::InvalidRequest(error.to_string()))
+            .map_err(|error| DomainError::Unavailable(error.into()))
     }
 
     fn fetch_public_room_count(&self) -> Result<i64, DomainError> {

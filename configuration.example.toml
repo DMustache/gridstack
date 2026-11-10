@@ -31,6 +31,7 @@ password_pepper = ""
 retry_after_ms = 2000
 
 [sync]
+# env: GRIDSTACK__SYNC__MAXIMUM_TIMEOUT_MILLISECONDS
 maximum_timeout_milliseconds = 30000
 
 [identity]
