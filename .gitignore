@@ -5,3 +5,7 @@ target
 client.db
 reference
 /configuration.toml
+
+# Local AI agent config
+.claude/
+.codex
